@@ -10,7 +10,14 @@ async fn main() {
 
     let bot = Bot::from_env();
 
-    // TODO: send message to admin that bot started
+    let admin_id = ChatId(
+        std::env::var("TG_ADMIN_ID")
+            .expect("ADMIN_ID environment variable not set")
+            .parse::<i64>()
+            .expect("TG_ADMIN_ID must be a valid i64"),
+    );
+
+    bot.send_message(admin_id, "Bot started").await.unwrap();
 
     teloxide::repl(bot, |bot: Bot, msg: Message| async move {
         println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
