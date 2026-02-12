@@ -1,6 +1,5 @@
 mod parser;
 
-use std::process;
 use teloxide::{prelude::*, types::ParseMode};
 
 #[tokio::main]
@@ -25,7 +24,8 @@ async fn main() {
         let reply_text = if let Some(text) = msg.text() {
             if text == "exit" {
                 log::info!("Received exit command. Shutting down...");
-                process::exit(0);
+                // process::exit(0);
+                // TODO: Implement graceful shutdown
             }
 
             if let Some(event) = parser::parse(text) {
