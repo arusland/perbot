@@ -1,5 +1,5 @@
-use chrono::{Duration, Local, NaiveTime};
-use regex::Regex;
+mod parser;
+
 use std::process;
 use teloxide::{prelude::*, types::ParseMode};
 
@@ -28,29 +28,13 @@ async fn main() {
                 process::exit(0);
             }
 
-            // Check for time-based scheduled message pattern "hh:mm message"
-            let time_regex = Regex::new(r"^(\d{1,2}):(\d{2})\s+(.+)$").unwrap();
-            if let Some(caps) = time_regex.captures(text) {
-                let hour: u32 = caps[1].parse().unwrap_or(0);
-                let minute: u32 = caps[2].parse().unwrap_or(0);
-                let message_text = caps[3].to_string();
-
-                if hour < 24 && minute < 60 {
-                    let now = Local::now();
-                    let target_time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap();
-                    let current_time = now.time();
-
-                    let mut target_datetime = now.date_naive().and_time(target_time);
-
-                    // If time has already passed today, add 24 hours
-                    if target_time <= current_time {
-                        target_datetime = target_datetime + Duration::days(1);
-                    }
-
-                    let current_datetime = now.naive_local();
-                    let delay = target_datetime.signed_duration_since(current_datetime);
+            if let Some(event) = parser::parse(text) {
+                if let Some(target_datetime) = parser::resolve_datetime(&event) {
+                    let now = chrono::Local::now().naive_local();
+                    let delay = target_datetime.signed_duration_since(now);
                     let delay_secs = delay.num_seconds().max(0) as u64;
 
+                    let message_text = event.message.clone();
                     let chat_id = msg.chat.id;
                     let bot_clone = bot.clone();
 
@@ -60,7 +44,10 @@ async fn main() {
                     });
 
                     println!("target_datetime: {:?}", target_datetime);
-                    format!("Scheduled message for {:02}:{:02}", hour, minute)
+                    format!(
+                        "Scheduled message for {}",
+                        target_datetime.format("%H:%M %d\\.%m\\.%Y")
+                    )
                 } else {
                     format!("*{}*", escape_markdown(text))
                 }
