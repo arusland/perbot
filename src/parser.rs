@@ -3,19 +3,27 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-/// Placeholder for future period support.
-pub struct Period;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatUnit {
+    Minutes,
+    Hours,
+    Days,
+    Weeks,
+    Months,
+    Years,
+}
 
-/// Placeholder for future repetition support.
-pub struct Repetition;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repetition {
+    pub interval: u32,
+    pub unit: RepeatUnit,
+}
 
-#[allow(dead_code)]
 pub struct ParsedEvent {
     pub date: Option<NaiveDate>,
     pub time: Option<NaiveTime>,
     pub year_explicit: bool,
     pub days: Option<HashSet<Weekday>>,
-    pub period: Option<Period>,
     pub repetition: Option<Repetition>,
     pub message: String,
 }
@@ -30,6 +38,11 @@ static RE_DATE_FULL: LazyLock<Regex> =
 
 static RE_DATE_SHORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d{1,2})\.(\d{1,2})(?:[^\.\d]|$)").unwrap());
+
+static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bevery\s+(?:(\d+)\s+)?(minutes?|hours?|days?|weeks?|months?|years?)\b")
+        .unwrap()
+});
 
 static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
@@ -98,6 +111,18 @@ pub fn parse_days(s: &str) -> Option<HashSet<Weekday>> {
         None
     } else {
         Some(set)
+    }
+}
+
+fn unit_from_str(s: &str) -> Option<RepeatUnit> {
+    match s.to_ascii_lowercase().as_str() {
+        "minute" | "minutes" => Some(RepeatUnit::Minutes),
+        "hour" | "hours" => Some(RepeatUnit::Hours),
+        "day" | "days" => Some(RepeatUnit::Days),
+        "week" | "weeks" => Some(RepeatUnit::Weeks),
+        "month" | "months" => Some(RepeatUnit::Months),
+        "year" | "years" => Some(RepeatUnit::Years),
+        _ => None,
     }
 }
 
@@ -177,6 +202,20 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         }
     }
 
+    // Repetition: "every N unit" or "every unit"
+    let mut repetition: Option<Repetition> = None;
+    if let Some(caps) = RE_EVERY.captures(&remaining) {
+        let interval: u32 = caps
+            .get(1)
+            .map(|m| m.as_str().parse().unwrap_or(1))
+            .unwrap_or(1);
+        if let Some(unit) = unit_from_str(&caps[2]) {
+            repetition = Some(Repetition { interval, unit });
+            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                + &remaining[caps.get(0).unwrap().end()..];
+        }
+    }
+
     let message = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if time.is_none() && date.is_none() {
@@ -191,8 +230,7 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         time,
         year_explicit,
         days,
-        period: None,
-        repetition: None,
+        repetition,
         message,
     })
 }
@@ -376,7 +414,6 @@ mod tests {
             time: Some(t),
             year_explicit: false,
             days: None,
-            period: None,
             repetition: None,
             message: "test".into(),
         };
@@ -391,7 +428,6 @@ mod tests {
             time: NaiveTime::from_hms_opt(12, 0, 0),
             year_explicit: true,
             days: None,
-            period: None,
             repetition: None,
             message: "old".into(),
         };
@@ -406,7 +442,6 @@ mod tests {
             time: Some(past.time()),
             year_explicit: false,
             days: None,
-            period: None,
             repetition: None,
             message: "wrap".into(),
         };
@@ -512,7 +547,6 @@ mod tests {
             time: Some(t),
             year_explicit: false,
             days: Some(days),
-            period: None,
             repetition: None,
             message: "skip".into(),
         };
@@ -528,5 +562,61 @@ mod tests {
         let expected_days: HashSet<Weekday> = [Weekday::Wed].into_iter().collect();
         assert_eq!(e.days, Some(expected_days));
         assert_eq!(e.message, "meeting");
+    }
+
+    // --- Repetition tests ---
+
+    #[test]
+    fn parse_every_n_weeks() {
+        let e = parse("14:55 20.05 every 2 weeks call office").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(14, 55, 0));
+        assert!(e.date.is_some());
+        let d = e.date.unwrap();
+        assert_eq!(d.day(), 20);
+        assert_eq!(d.month(), 5);
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 2);
+        assert_eq!(rep.unit, RepeatUnit::Weeks);
+        assert_eq!(e.message, "call office");
+    }
+
+    #[test]
+    fn parse_every_day() {
+        let e = parse("9:00 every day standup").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(9, 0, 0));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, RepeatUnit::Days);
+        assert_eq!(e.message, "standup");
+    }
+
+    #[test]
+    fn parse_every_month() {
+        let e = parse("10:00 01.01 every 1 month pay rent").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 0, 0));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, RepeatUnit::Months);
+        assert_eq!(e.message, "pay rent");
+    }
+
+    #[test]
+    fn parse_every_without_number() {
+        let e = parse("8:00 every hour check logs").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(8, 0, 0));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, RepeatUnit::Hours);
+        assert_eq!(e.message, "check logs");
+    }
+
+    #[test]
+    fn parse_every_year() {
+        let e = parse("12:00 01.01 every year happy new year").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(12, 0, 0));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, RepeatUnit::Years);
+        assert_eq!(e.message, "happy new year");
     }
 }

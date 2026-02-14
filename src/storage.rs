@@ -70,6 +70,9 @@ pub struct StoredEvent {
     pub target_datetime: NaiveDateTime,
     pub created_at: NaiveDateTime,
     pub fired: bool,
+    pub repeat_interval: Option<u32>,
+    pub repeat_unit: Option<String>,
+    pub dismissed: bool,
 }
 
 /// SQLite-based storage for parsed events.
@@ -107,7 +110,10 @@ impl EventStorage {
                 target_datetime TEXT NOT NULL,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now')),
                 fired           INTEGER NOT NULL DEFAULT 0,
-                days            TEXT
+                days            TEXT,
+                repeat_interval INTEGER,
+                repeat_unit     TEXT,
+                dismissed       INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -172,9 +178,24 @@ impl EventStorage {
             day_strs.join(",")
         });
 
+        let (repeat_interval, repeat_unit) = match &event.repetition {
+            Some(rep) => (
+                Some(rep.interval),
+                Some(match rep.unit {
+                    crate::parser::RepeatUnit::Minutes => "minutes",
+                    crate::parser::RepeatUnit::Hours => "hours",
+                    crate::parser::RepeatUnit::Days => "days",
+                    crate::parser::RepeatUnit::Weeks => "weeks",
+                    crate::parser::RepeatUnit::Months => "months",
+                    crate::parser::RepeatUnit::Years => "years",
+                }),
+            ),
+            None => (None, None),
+        };
+
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 chat_id,
                 date_str,
@@ -183,6 +204,8 @@ impl EventStorage {
                 event.message,
                 target_str,
                 days_str,
+                repeat_interval,
+                repeat_unit,
             ],
         )?;
 
@@ -192,7 +215,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
              FROM events WHERE id = ?1",
         )?;
 
@@ -208,7 +231,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
              FROM events WHERE chat_id = ?1 ORDER BY target_datetime ASC",
         )?;
 
@@ -220,8 +243,8 @@ impl EventStorage {
     /// Retrieves all pending (not yet fired) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
-             FROM events WHERE fired = 0 ORDER BY target_datetime ASC",
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+             FROM events WHERE fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
         let rows = stmt.query_map([], Self::row_to_event)?;
@@ -232,8 +255,8 @@ impl EventStorage {
     /// Retrieves pending events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
-             FROM events WHERE chat_id = ?1 AND fired = 0 ORDER BY target_datetime ASC",
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+             FROM events WHERE chat_id = ?1 AND fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
         let rows = stmt.query_map(params![chat_id], Self::row_to_event)?;
@@ -246,6 +269,15 @@ impl EventStorage {
         let rows_affected = self
             .conn
             .execute("UPDATE events SET fired = 1 WHERE id = ?1", params![id])?;
+
+        Ok(rows_affected > 0)
+    }
+
+    /// Marks an event as dismissed.
+    pub fn mark_dismissed(&self, id: i64) -> Result<bool> {
+        let rows_affected = self
+            .conn
+            .execute("UPDATE events SET dismissed = 1 WHERE id = ?1", params![id])?;
 
         Ok(rows_affected > 0)
     }
@@ -349,6 +381,8 @@ impl EventStorage {
         let target_str: String = row.get(6)?;
         let created_str: String = row.get(7)?;
         let days: Option<String> = row.get(9)?;
+        let repeat_interval: Option<u32> = row.get(10)?;
+        let repeat_unit: Option<String> = row.get(11)?;
 
         let date = date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
         let time = time_str.and_then(|s| NaiveTime::parse_from_str(&s, "%H:%M:%S").ok());
@@ -367,6 +401,9 @@ impl EventStorage {
             target_datetime,
             created_at,
             fired: row.get::<_, i32>(8)? != 0,
+            repeat_interval,
+            repeat_unit,
+            dismissed: row.get::<_, i32>(12)? != 0,
         })
     }
 }
@@ -381,7 +418,6 @@ mod tests {
             time: Some(NaiveTime::from_hms_opt(23, 59, 0).unwrap()),
             year_explicit: true,
             days: None,
-            period: None,
             repetition: None,
             message: message.to_string(),
         }
@@ -625,7 +661,6 @@ mod tests {
             time: Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap()),
             year_explicit: true,
             days: Some(days),
-            period: None,
             repetition: None,
             message: "weekday meeting".to_string(),
         };
@@ -654,5 +689,90 @@ mod tests {
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.days, None);
+    }
+
+    #[test]
+    fn test_repetition_round_trip() {
+        use crate::parser::{RepeatUnit, Repetition};
+
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = ParsedEvent {
+            date: Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap()),
+            time: Some(NaiveTime::from_hms_opt(14, 55, 0).unwrap()),
+            year_explicit: false,
+            days: None,
+            repetition: Some(Repetition {
+                interval: 2,
+                unit: RepeatUnit::Weeks,
+            }),
+            message: "call office".to_string(),
+        };
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 5, 20).unwrap(),
+            NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.repeat_interval, Some(2));
+        assert_eq!(stored.repeat_unit, Some("weeks".to_string()));
+        assert!(!stored.dismissed);
+    }
+
+    #[test]
+    fn test_repetition_none_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = create_test_event("no repeat");
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.repeat_interval, None);
+        assert_eq!(stored.repeat_unit, None);
+        assert!(!stored.dismissed);
+    }
+
+    #[test]
+    fn test_dismissed_flag() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = create_test_event("dismiss me");
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+
+        let stored = storage.get(id).unwrap().unwrap();
+        assert!(!stored.dismissed);
+
+        storage.mark_dismissed(id).unwrap();
+
+        let stored = storage.get(id).unwrap().unwrap();
+        assert!(stored.dismissed);
+    }
+
+    #[test]
+    fn test_dismissed_excluded_from_pending() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = create_test_event("pending test");
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+        );
+
+        let id1 = storage.insert(123, &event, target).unwrap();
+        let id2 = storage.insert(123, &event, target).unwrap();
+
+        storage.mark_dismissed(id1).unwrap();
+
+        let pending = storage.get_pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id2);
     }
 }
