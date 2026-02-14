@@ -65,6 +65,7 @@ pub struct StoredEvent {
     pub date: Option<NaiveDate>,
     pub time: Option<NaiveTime>,
     pub year_explicit: bool,
+    pub days: Option<String>,
     pub message: String,
     pub target_datetime: NaiveDateTime,
     pub created_at: NaiveDateTime,
@@ -105,7 +106,8 @@ impl EventStorage {
                 message         TEXT NOT NULL,
                 target_datetime TEXT NOT NULL,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                fired           INTEGER NOT NULL DEFAULT 0
+                fired           INTEGER NOT NULL DEFAULT 0,
+                days            TEXT
             )",
             [],
         )?;
@@ -152,10 +154,27 @@ impl EventStorage {
         let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
         let time_str = event.time.map(|t| t.format("%H:%M:%S").to_string());
         let target_str = target_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+        let days_str = event.days.as_ref().map(|days| {
+            let mut day_strs: Vec<&str> = days
+                .iter()
+                .map(|d| match d {
+                    chrono::Weekday::Mon => "mon",
+                    chrono::Weekday::Tue => "tue",
+                    chrono::Weekday::Wed => "wed",
+                    chrono::Weekday::Thu => "thu",
+                    chrono::Weekday::Fri => "fri",
+                    chrono::Weekday::Sat => "sat",
+                    chrono::Weekday::Sun => "sun",
+                })
+                .collect();
+            let order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+            day_strs.sort_by_key(|d| order.iter().position(|o| o == d).unwrap_or(7));
+            day_strs.join(",")
+        });
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 chat_id,
                 date_str,
@@ -163,6 +182,7 @@ impl EventStorage {
                 event.year_explicit as i32,
                 event.message,
                 target_str,
+                days_str,
             ],
         )?;
 
@@ -172,7 +192,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
              FROM events WHERE id = ?1",
         )?;
 
@@ -188,7 +208,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
              FROM events WHERE chat_id = ?1 ORDER BY target_datetime ASC",
         )?;
 
@@ -200,7 +220,7 @@ impl EventStorage {
     /// Retrieves all pending (not yet fired) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
              FROM events WHERE fired = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -212,7 +232,7 @@ impl EventStorage {
     /// Retrieves pending events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days
              FROM events WHERE chat_id = ?1 AND fired = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -328,6 +348,7 @@ impl EventStorage {
         let time_str: Option<String> = row.get(3)?;
         let target_str: String = row.get(6)?;
         let created_str: String = row.get(7)?;
+        let days: Option<String> = row.get(9)?;
 
         let date = date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
         let time = time_str.and_then(|s| NaiveTime::parse_from_str(&s, "%H:%M:%S").ok());
@@ -341,6 +362,7 @@ impl EventStorage {
             date,
             time,
             year_explicit: row.get::<_, i32>(4)? != 0,
+            days,
             message: row.get(5)?,
             target_datetime,
             created_at,
@@ -358,6 +380,7 @@ mod tests {
             date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),
             time: Some(NaiveTime::from_hms_opt(23, 59, 0).unwrap()),
             year_explicit: true,
+            days: None,
             period: None,
             repetition: None,
             message: message.to_string(),
@@ -580,5 +603,56 @@ mod tests {
         assert_eq!(ChatType::from_str("supergroup"), Some(ChatType::Supergroup));
         assert_eq!(ChatType::from_str("channel"), Some(ChatType::Channel));
         assert_eq!(ChatType::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_days_round_trip() {
+        use chrono::Weekday;
+        use std::collections::HashSet;
+
+        let storage = EventStorage::open_in_memory().unwrap();
+        let days: HashSet<Weekday> = [
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+        ]
+        .into_iter()
+        .collect();
+        let event = ParsedEvent {
+            date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),
+            time: Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap()),
+            year_explicit: true,
+            days: Some(days),
+            period: None,
+            repetition: None,
+            message: "weekday meeting".to_string(),
+        };
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(13, 30, 0).unwrap(),
+        );
+
+        let id = storage.insert(999, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.days, Some("mon,tue,wed,thu,fri".to_string()));
+        assert_eq!(stored.message, "weekday meeting");
+    }
+
+    #[test]
+    fn test_days_none_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = create_test_event("no days");
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+        );
+
+        let id = storage.insert(999, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.days, None);
     }
 }
