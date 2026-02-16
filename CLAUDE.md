@@ -39,8 +39,6 @@ Three source files in `src/`:
 - `13:25 thu-fri,sun 2023` — every Thursday, Friday, and Sunday in 2023 at 13:25.
 - `14:55 20.05 every 2 weeks` - start at 14:55 every year on date 20.05 and then repeat every 2 weeks.
 - `15:30 every 3 days` — start at next at 15:30 and then repeat every 3 days.
-
-## TODO:
 - `8 call Alex` - fire event next 08:00 (from current time)
 - `24 call Poly` - fire event next 00:00
 - `25 call Alex` - do not parse any time
