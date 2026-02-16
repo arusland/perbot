@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RepeatUnit {
+pub enum TimeUnit {
     Minutes,
     Hours,
     Days,
@@ -16,15 +16,25 @@ pub enum RepeatUnit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repetition {
     pub interval: u32,
-    pub unit: RepeatUnit,
+    pub unit: TimeUnit,
 }
 
 pub struct ParsedEvent {
+    /// "26.11", "31.12.2027"
     pub date: Option<NaiveDate>,
+    /// "13:23", "5:24 PM"
     pub time: Option<NaiveTime>,
+    /// "31.12.2027" — true when year is given explicitly
     pub year_explicit: bool,
+    /// "13:45 mon-fri", "13:25 thu-fri,sun"
     pub days: Option<HashSet<Weekday>>,
+    /// "every 2 weeks", "every hour"
     pub repetition: Option<Repetition>,
+    /// "8 min call her", "2 hours reminder"
+    pub in_offset: Option<(u32, TimeUnit)>,
+    /// "8 call Alex" → 8, "0 call Sacha" → 0, "24 call Poly" → 24
+    pub bare_hour: Option<u32>,
+    /// remainder after extracting all time/date components
     pub message: String,
 }
 
@@ -43,6 +53,12 @@ static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bevery\s+(?:(\d+)\s+)?(minutes?|hours?|days?|weeks?|months?|years?)\b")
         .unwrap()
 });
+
+static RE_IN_OFFSET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(\d+)\s+(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b").unwrap()
+});
+
+static RE_BARE_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,2})\s").unwrap());
 
 static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
@@ -114,14 +130,14 @@ pub fn parse_days(s: &str) -> Option<HashSet<Weekday>> {
     }
 }
 
-fn unit_from_str(s: &str) -> Option<RepeatUnit> {
+fn unit_from_str(s: &str) -> Option<TimeUnit> {
     match s.to_ascii_lowercase().as_str() {
-        "minute" | "minutes" => Some(RepeatUnit::Minutes),
-        "hour" | "hours" => Some(RepeatUnit::Hours),
-        "day" | "days" => Some(RepeatUnit::Days),
-        "week" | "weeks" => Some(RepeatUnit::Weeks),
-        "month" | "months" => Some(RepeatUnit::Months),
-        "year" | "years" => Some(RepeatUnit::Years),
+        "min" | "mins" | "minute" | "minutes" => Some(TimeUnit::Minutes),
+        "hour" | "hours" => Some(TimeUnit::Hours),
+        "day" | "days" => Some(TimeUnit::Days),
+        "week" | "weeks" => Some(TimeUnit::Weeks),
+        "month" | "months" => Some(TimeUnit::Months),
+        "year" | "years" => Some(TimeUnit::Years),
         _ => None,
     }
 }
@@ -131,78 +147,104 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
     let mut year_explicit = false;
-
-    // 12h time (must be checked before 24h to avoid partial match)
-    if let Some(caps) = RE_TIME_12H.captures(&remaining) {
-        let mut hour: u32 = caps[1].parse().ok()?;
-        let minute: u32 = caps[2].parse().ok()?;
-        let ampm = caps[3].to_ascii_uppercase();
-
-        if hour > 12 || minute >= 60 || hour == 0 {
-            return None;
-        }
-
-        if ampm == "PM" && hour != 12 {
-            hour += 12;
-        } else if ampm == "AM" && hour == 12 {
-            hour = 0;
-        }
-
-        time = NaiveTime::from_hms_opt(hour, minute, 0);
-        if time.is_none() {
-            return None;
-        }
-        remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-            + &remaining[caps.get(0).unwrap().end()..];
-    } else if let Some(caps) = RE_TIME_24H.captures(&remaining) {
-        let hour: u32 = caps[1].parse().ok()?;
-        let minute: u32 = caps[2].parse().ok()?;
-
-        time = NaiveTime::from_hms_opt(hour, minute, 0);
-        if time.is_none() {
-            return None;
-        }
-        remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-            + &remaining[caps.get(0).unwrap().end()..];
-    }
-
-    // Full date (must be checked before short date)
-    if let Some(caps) = RE_DATE_FULL.captures(&remaining) {
-        let day: u32 = caps[1].parse().ok()?;
-        let month: u32 = caps[2].parse().ok()?;
-        let year: i32 = caps[3].parse().ok()?;
-
-        date = NaiveDate::from_ymd_opt(year, month, day);
-        if date.is_none() {
-            return None;
-        }
-        year_explicit = true;
-        remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-            + &remaining[caps.get(0).unwrap().end()..];
-    } else if let Some(caps) = RE_DATE_SHORT.captures(&remaining) {
-        let day: u32 = caps[1].parse().ok()?;
-        let month: u32 = caps[2].parse().ok()?;
-        let year = Local::now().year();
-
-        date = NaiveDate::from_ymd_opt(year, month, day);
-        if date.is_none() {
-            return None;
-        }
-        remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-            + &remaining[caps.get(0).unwrap().end()..];
-    }
-
-    // Days of week
+    let mut in_offset: Option<(u32, TimeUnit)> = None;
+    let mut bare_hour: Option<u32> = None;
     let mut days: Option<HashSet<Weekday>> = None;
-    if let Some(caps) = RE_DAYS.captures(&remaining) {
-        if let Some(parsed) = parse_days(&caps[1]) {
-            days = Some(parsed);
+
+    // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
+    if let Some(caps) = RE_IN_OFFSET.captures(&remaining) {
+        if let Ok(n) = caps[1].parse::<u32>() {
+            if let Some(unit) = unit_from_str(&caps[2]) {
+                in_offset = Some((n, unit));
+                remaining = remaining[caps.get(0).unwrap().end()..].to_string();
+            }
+        }
+    }
+
+    if in_offset.is_none() {
+        // 12h time (must be checked before 24h to avoid partial match)
+        if let Some(caps) = RE_TIME_12H.captures(&remaining) {
+            let mut hour: u32 = caps[1].parse().ok()?;
+            let minute: u32 = caps[2].parse().ok()?;
+            let ampm = caps[3].to_ascii_uppercase();
+
+            if hour > 12 || minute >= 60 || hour == 0 {
+                return None;
+            }
+
+            if ampm == "PM" && hour != 12 {
+                hour += 12;
+            } else if ampm == "AM" && hour == 12 {
+                hour = 0;
+            }
+
+            time = NaiveTime::from_hms_opt(hour, minute, 0);
+            if time.is_none() {
+                return None;
+            }
+            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                + &remaining[caps.get(0).unwrap().end()..];
+        } else if let Some(caps) = RE_TIME_24H.captures(&remaining) {
+            let hour: u32 = caps[1].parse().ok()?;
+            let minute: u32 = caps[2].parse().ok()?;
+
+            time = NaiveTime::from_hms_opt(hour, minute, 0);
+            if time.is_none() {
+                return None;
+            }
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         }
+
+        // Bare hour: "8 call Alex" -> bare_hour=8, "0 call Sacha" -> bare_hour=0
+        if time.is_none() {
+            if let Some(caps) = RE_BARE_HOUR.captures(&remaining) {
+                if let Ok(n) = caps[1].parse::<u32>() {
+                    if n <= 24 {
+                        bare_hour = Some(n);
+                        remaining = remaining[caps.get(0).unwrap().end()..].to_string();
+                    }
+                }
+            }
+        }
+
+        // Full date (must be checked before short date)
+        if let Some(caps) = RE_DATE_FULL.captures(&remaining) {
+            let day: u32 = caps[1].parse().ok()?;
+            let month: u32 = caps[2].parse().ok()?;
+            let year: i32 = caps[3].parse().ok()?;
+
+            date = NaiveDate::from_ymd_opt(year, month, day);
+            if date.is_none() {
+                return None;
+            }
+            year_explicit = true;
+            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                + &remaining[caps.get(0).unwrap().end()..];
+        } else if let Some(caps) = RE_DATE_SHORT.captures(&remaining) {
+            let day: u32 = caps[1].parse().ok()?;
+            let month: u32 = caps[2].parse().ok()?;
+            let year = Local::now().year();
+
+            date = NaiveDate::from_ymd_opt(year, month, day);
+            if date.is_none() {
+                return None;
+            }
+            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                + &remaining[caps.get(0).unwrap().end()..];
+        }
+
+        // Days of week
+        if let Some(caps) = RE_DAYS.captures(&remaining) {
+            if let Some(parsed) = parse_days(&caps[1]) {
+                days = Some(parsed);
+                remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                    + &remaining[caps.get(0).unwrap().end()..];
+            }
+        }
     }
 
-    // Repetition: "every N unit" or "every unit"
+    // Repetition: "every N unit" or "every unit" (checked for both offset and time modes)
     let mut repetition: Option<Repetition> = None;
     if let Some(caps) = RE_EVERY.captures(&remaining) {
         let interval: u32 = caps
@@ -218,7 +260,7 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
 
     let message = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if time.is_none() && date.is_none() {
+    if time.is_none() && date.is_none() && in_offset.is_none() && bare_hour.is_none() {
         return None;
     }
     if message.is_empty() {
@@ -231,12 +273,48 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         year_explicit,
         days,
         repetition,
+        in_offset,
+        bare_hour,
         message,
     })
 }
 
 pub fn resolve_datetime(event: &ParsedEvent) -> Option<NaiveDateTime> {
     let now = Local::now().naive_local();
+
+    // Handle bare hour (e.g., "8 call Alex" -> next 08:00)
+    if let Some(h) = event.bare_hour {
+        let hour = if h == 24 { 0 } else { h };
+        let t = NaiveTime::from_hms_opt(hour, 0, 0)?;
+        let today = now.date();
+        let dt = today.and_time(t);
+        return if dt > now {
+            Some(dt)
+        } else {
+            let tomorrow = today.succ_opt()?;
+            Some(tomorrow.and_time(t))
+        };
+    }
+
+    // Handle relative offset (e.g., "8 min call her", "2 hours reminder")
+    if let Some((value, unit)) = &event.in_offset {
+        return match unit {
+            TimeUnit::Minutes => Some(now + chrono::Duration::minutes(*value as i64)),
+            TimeUnit::Hours => Some(now + chrono::Duration::hours(*value as i64)),
+            TimeUnit::Days => Some(now + chrono::Duration::days(*value as i64)),
+            TimeUnit::Weeks => Some(now + chrono::Duration::weeks(*value as i64)),
+            TimeUnit::Months => {
+                let new_date = now.date().checked_add_months(chrono::Months::new(*value))?;
+                Some(new_date.and_time(now.time()))
+            }
+            TimeUnit::Years => {
+                let new_date = now
+                    .date()
+                    .checked_add_months(chrono::Months::new(*value * 12))?;
+                Some(new_date.and_time(now.time()))
+            }
+        };
+    }
 
     let dt = match (event.time, event.date) {
         (Some(t), Some(d)) => {
@@ -415,6 +493,8 @@ mod tests {
             year_explicit: false,
             days: None,
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: "test".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -429,6 +509,8 @@ mod tests {
             year_explicit: true,
             days: None,
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: "old".into(),
         };
         assert!(resolve_datetime(&event).is_none());
@@ -443,6 +525,8 @@ mod tests {
             year_explicit: false,
             days: None,
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: "wrap".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -476,14 +560,9 @@ mod tests {
     #[test]
     fn parse_days_mixed() {
         let days = parse_days("mon-wed,fri").unwrap();
-        let expected: HashSet<Weekday> = [
-            Weekday::Mon,
-            Weekday::Tue,
-            Weekday::Wed,
-            Weekday::Fri,
-        ]
-        .into_iter()
-        .collect();
+        let expected: HashSet<Weekday> = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Fri]
+            .into_iter()
+            .collect();
         assert_eq!(days, expected);
     }
 
@@ -548,6 +627,8 @@ mod tests {
             year_explicit: false,
             days: Some(days),
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: "skip".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -576,7 +657,7 @@ mod tests {
         assert_eq!(d.month(), 5);
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 2);
-        assert_eq!(rep.unit, RepeatUnit::Weeks);
+        assert_eq!(rep.unit, TimeUnit::Weeks);
         assert_eq!(e.message, "call office");
     }
 
@@ -586,7 +667,7 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(9, 0, 0));
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 1);
-        assert_eq!(rep.unit, RepeatUnit::Days);
+        assert_eq!(rep.unit, TimeUnit::Days);
         assert_eq!(e.message, "standup");
     }
 
@@ -596,7 +677,7 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(10, 0, 0));
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 1);
-        assert_eq!(rep.unit, RepeatUnit::Months);
+        assert_eq!(rep.unit, TimeUnit::Months);
         assert_eq!(e.message, "pay rent");
     }
 
@@ -606,7 +687,7 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(8, 0, 0));
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 1);
-        assert_eq!(rep.unit, RepeatUnit::Hours);
+        assert_eq!(rep.unit, TimeUnit::Hours);
         assert_eq!(e.message, "check logs");
     }
 
@@ -616,7 +697,151 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(12, 0, 0));
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 1);
-        assert_eq!(rep.unit, RepeatUnit::Years);
+        assert_eq!(rep.unit, TimeUnit::Years);
         assert_eq!(e.message, "happy new year");
+    }
+
+    // --- Bare hour tests ---
+
+    #[test]
+    fn parse_bare_hour() {
+        let e = parse("8 call Alex").unwrap();
+        assert_eq!(e.bare_hour, Some(8));
+        assert!(e.time.is_none());
+        assert!(e.date.is_none());
+        assert!(e.in_offset.is_none());
+        assert_eq!(e.message, "call Alex");
+    }
+
+    #[test]
+    fn parse_bare_hour_24() {
+        let e = parse("24 call Poly").unwrap();
+        assert_eq!(e.bare_hour, Some(24));
+        assert_eq!(e.message, "call Poly");
+    }
+
+    #[test]
+    fn parse_bare_hour_25_returns_none() {
+        assert!(parse("25 call Alex").is_none());
+    }
+
+    #[test]
+    fn parse_bare_hour_0() {
+        let e = parse("0 call Alex").unwrap();
+        assert_eq!(e.bare_hour, Some(0));
+        assert_eq!(e.message, "call Alex");
+    }
+
+    #[test]
+    fn parse_bare_hour_does_not_match_date() {
+        let e = parse("8.11 birthday").unwrap();
+        assert!(e.time.is_none());
+        assert!(e.bare_hour.is_none());
+        assert!(e.date.is_some());
+        assert_eq!(e.date.unwrap().day(), 8);
+        assert_eq!(e.date.unwrap().month(), 11);
+    }
+
+    #[test]
+    fn parse_bare_hour_with_date() {
+        let e = parse("8 26.11 birthday").unwrap();
+        assert_eq!(e.bare_hour, Some(8));
+        assert!(e.time.is_none());
+        assert!(e.date.is_some());
+        assert_eq!(e.date.unwrap().day(), 26);
+        assert_eq!(e.date.unwrap().month(), 11);
+        assert_eq!(e.message, "birthday");
+    }
+
+    // --- Relative offset tests ---
+
+    #[test]
+    fn parse_minutes_offset() {
+        let e = parse("8 min call her").unwrap();
+        assert_eq!(e.in_offset, Some((8, TimeUnit::Minutes)));
+        assert!(e.time.is_none());
+        assert!(e.date.is_none());
+        assert_eq!(e.message, "call her");
+    }
+
+    #[test]
+    fn parse_minutes_offset_with_repetition() {
+        let e = parse("8 min every hour check server").unwrap();
+        assert_eq!(e.in_offset, Some((8, TimeUnit::Minutes)));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, TimeUnit::Hours);
+        assert_eq!(e.message, "check server");
+    }
+
+    #[test]
+    fn parse_minutes_long_form() {
+        let e = parse("15 minutes stretch").unwrap();
+        assert_eq!(e.in_offset, Some((15, TimeUnit::Minutes)));
+        assert_eq!(e.message, "stretch");
+    }
+
+    #[test]
+    fn parse_minutes_singular() {
+        let e = parse("1 minute reminder").unwrap();
+        assert_eq!(e.in_offset, Some((1, TimeUnit::Minutes)));
+        assert_eq!(e.message, "reminder");
+    }
+
+    #[test]
+    fn parse_minutes_mins_form() {
+        let e = parse("30 mins break").unwrap();
+        assert_eq!(e.in_offset, Some((30, TimeUnit::Minutes)));
+        assert_eq!(e.message, "break");
+    }
+
+    #[test]
+    fn parse_hours_offset() {
+        let e = parse("2 hours call her").unwrap();
+        assert_eq!(e.in_offset, Some((2, TimeUnit::Hours)));
+        assert_eq!(e.message, "call her");
+    }
+
+    #[test]
+    fn parse_days_offset() {
+        let e = parse("3 days check report").unwrap();
+        assert_eq!(e.in_offset, Some((3, TimeUnit::Days)));
+        assert_eq!(e.message, "check report");
+    }
+
+    #[test]
+    fn resolve_in_offset_minutes() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: Some((10, TimeUnit::Minutes)),
+            bare_hour: None,
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        let diff = dt.signed_duration_since(now).num_minutes();
+        assert!(diff >= 9 && diff <= 11);
+    }
+
+    #[test]
+    fn resolve_in_offset_hours() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: Some((2, TimeUnit::Hours)),
+            bare_hour: None,
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        let diff = dt.signed_duration_since(now).num_hours();
+        assert!(diff >= 1 && diff <= 3);
     }
 }

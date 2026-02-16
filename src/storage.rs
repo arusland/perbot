@@ -73,6 +73,9 @@ pub struct StoredEvent {
     pub repeat_interval: Option<u32>,
     pub repeat_unit: Option<String>,
     pub dismissed: bool,
+    pub in_offset: Option<u32>,
+    pub in_offset_unit: Option<String>,
+    pub bare_hour: Option<u32>,
 }
 
 /// SQLite-based storage for parsed events.
@@ -113,7 +116,10 @@ impl EventStorage {
                 days            TEXT,
                 repeat_interval INTEGER,
                 repeat_unit     TEXT,
-                dismissed       INTEGER NOT NULL DEFAULT 0
+                dismissed       INTEGER NOT NULL DEFAULT 0,
+                in_offset       INTEGER,
+                in_offset_unit  TEXT,
+                bare_hour       INTEGER
             )",
             [],
         )?;
@@ -182,20 +188,35 @@ impl EventStorage {
             Some(rep) => (
                 Some(rep.interval),
                 Some(match rep.unit {
-                    crate::parser::RepeatUnit::Minutes => "minutes",
-                    crate::parser::RepeatUnit::Hours => "hours",
-                    crate::parser::RepeatUnit::Days => "days",
-                    crate::parser::RepeatUnit::Weeks => "weeks",
-                    crate::parser::RepeatUnit::Months => "months",
-                    crate::parser::RepeatUnit::Years => "years",
+                    crate::parser::TimeUnit::Minutes => "minutes",
+                    crate::parser::TimeUnit::Hours => "hours",
+                    crate::parser::TimeUnit::Days => "days",
+                    crate::parser::TimeUnit::Weeks => "weeks",
+                    crate::parser::TimeUnit::Months => "months",
+                    crate::parser::TimeUnit::Years => "years",
+                }),
+            ),
+            None => (None, None),
+        };
+
+        let (in_offset, in_offset_unit) = match &event.in_offset {
+            Some((value, unit)) => (
+                Some(*value),
+                Some(match unit {
+                    crate::parser::TimeUnit::Minutes => "minutes",
+                    crate::parser::TimeUnit::Hours => "hours",
+                    crate::parser::TimeUnit::Days => "days",
+                    crate::parser::TimeUnit::Weeks => "weeks",
+                    crate::parser::TimeUnit::Months => "months",
+                    crate::parser::TimeUnit::Years => "years",
                 }),
             ),
             None => (None, None),
         };
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 chat_id,
                 date_str,
@@ -206,6 +227,9 @@ impl EventStorage {
                 days_str,
                 repeat_interval,
                 repeat_unit,
+                in_offset,
+                in_offset_unit,
+                event.bare_hour,
             ],
         )?;
 
@@ -215,7 +239,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
              FROM events WHERE id = ?1",
         )?;
 
@@ -231,7 +255,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
              FROM events WHERE chat_id = ?1 ORDER BY target_datetime ASC",
         )?;
 
@@ -243,7 +267,7 @@ impl EventStorage {
     /// Retrieves all pending (not yet fired) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
              FROM events WHERE fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -255,7 +279,7 @@ impl EventStorage {
     /// Retrieves pending events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
              FROM events WHERE chat_id = ?1 AND fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -390,6 +414,10 @@ impl EventStorage {
             NaiveDateTime::parse_from_str(&target_str, "%Y-%m-%d %H:%M:%S").unwrap();
         let created_at = NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").unwrap();
 
+        let in_offset: Option<u32> = row.get(13)?;
+        let in_offset_unit: Option<String> = row.get(14)?;
+        let bare_hour: Option<u32> = row.get(15)?;
+
         Ok(StoredEvent {
             id: row.get(0)?,
             chat_id: row.get(1)?,
@@ -404,6 +432,9 @@ impl EventStorage {
             repeat_interval,
             repeat_unit,
             dismissed: row.get::<_, i32>(12)? != 0,
+            in_offset,
+            in_offset_unit,
+            bare_hour,
         })
     }
 }
@@ -419,6 +450,8 @@ mod tests {
             year_explicit: true,
             days: None,
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: message.to_string(),
         }
     }
@@ -662,6 +695,8 @@ mod tests {
             year_explicit: true,
             days: Some(days),
             repetition: None,
+            in_offset: None,
+            bare_hour: None,
             message: "weekday meeting".to_string(),
         };
         let target = NaiveDateTime::new(
@@ -693,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_repetition_round_trip() {
-        use crate::parser::{RepeatUnit, Repetition};
+        use crate::parser::{TimeUnit, Repetition};
 
         let storage = EventStorage::open_in_memory().unwrap();
         let event = ParsedEvent {
@@ -703,8 +738,10 @@ mod tests {
             days: None,
             repetition: Some(Repetition {
                 interval: 2,
-                unit: RepeatUnit::Weeks,
+                unit: TimeUnit::Weeks,
             }),
+            in_offset: None,
+            bare_hour: None,
             message: "call office".to_string(),
         };
         let target = NaiveDateTime::new(
