@@ -19,6 +19,21 @@ pub struct Repetition {
     pub unit: TimeUnit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ordinal {
+    First,
+    Second,
+    Third,
+    Fourth,
+    Last,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonthlyPattern {
+    OrdinalWeekday(Ordinal, Weekday),
+    LastDay,
+}
+
 pub struct ParsedEvent {
     /// "26.11", "31.12.2027"
     pub date: Option<NaiveDate>,
@@ -34,6 +49,8 @@ pub struct ParsedEvent {
     pub in_offset: Option<(u32, TimeUnit)>,
     /// "8 call Alex" → 8, "0 call Sacha" → 0, "24 call Poly" → 24
     pub bare_hour: Option<u32>,
+    /// "first sunday", "last monday", "last day of the month"
+    pub monthly_pattern: Option<MonthlyPattern>,
     /// remainder after extracting all time/date components
     pub message: String,
 }
@@ -63,6 +80,72 @@ static RE_BARE_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,2})\
 static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
 });
+
+static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|day)(?:\s+of\s+the\s+month)?\b").unwrap()
+});
+
+fn weekday_from_full(s: &str) -> Option<Weekday> {
+    match s.to_ascii_lowercase().as_str() {
+        "monday" => Some(Weekday::Mon),
+        "tuesday" => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday" => Some(Weekday::Thu),
+        "friday" => Some(Weekday::Fri),
+        "saturday" => Some(Weekday::Sat),
+        "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn ordinal_from_str(s: &str) -> Option<Ordinal> {
+    match s.to_ascii_lowercase().as_str() {
+        "first" | "1st" => Some(Ordinal::First),
+        "second" | "2nd" => Some(Ordinal::Second),
+        "third" | "3rd" => Some(Ordinal::Third),
+        "fourth" | "4th" => Some(Ordinal::Fourth),
+        "last" => Some(Ordinal::Last),
+        _ => None,
+    }
+}
+
+fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Option<NaiveDate> {
+    let first = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let offset = (weekday.num_days_from_monday() as i64
+        - first.weekday().num_days_from_monday() as i64)
+        .rem_euclid(7) as u32;
+    let day = 1 + offset + (n - 1) * 7;
+    let d = NaiveDate::from_ymd_opt(year, month, day)?;
+    if d.month() == month {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+fn last_weekday_of_month(year: i32, month: u32, weekday: Weekday) -> Option<NaiveDate> {
+    let last = last_day_of_month_date(year, month)?;
+    let offset = (last.weekday().num_days_from_monday() as i64
+        - weekday.num_days_from_monday() as i64)
+        .rem_euclid(7) as u32;
+    NaiveDate::from_ymd_opt(year, month, last.day() - offset)
+}
+
+fn last_day_of_month_date(year: i32, month: u32) -> Option<NaiveDate> {
+    if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)?.pred_opt()
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)?.pred_opt()
+    }
+}
+
+fn next_month(year: i32, month: u32) -> (i32, u32) {
+    if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    }
+}
 
 fn day_from_str(s: &str) -> Option<Weekday> {
     match s.to_ascii_lowercase().as_str() {
@@ -150,6 +233,7 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
     let mut in_offset: Option<(u32, TimeUnit)> = None;
     let mut bare_hour: Option<u32> = None;
     let mut days: Option<HashSet<Weekday>> = None;
+    let mut monthly_pattern: Option<MonthlyPattern> = None;
 
     // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
     if let Some(caps) = RE_IN_OFFSET.captures(&remaining) {
@@ -234,12 +318,36 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
                 + &remaining[caps.get(0).unwrap().end()..];
         }
 
-        // Days of week
-        if let Some(caps) = RE_DAYS.captures(&remaining) {
-            if let Some(parsed) = parse_days(&caps[1]) {
-                days = Some(parsed);
-                remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                    + &remaining[caps.get(0).unwrap().end()..];
+        // Monthly pattern: "first sunday", "last monday", "last day of the month"
+        if let Some(caps) = RE_MONTHLY.captures(&remaining) {
+            if let Some(ord) = ordinal_from_str(&caps[1]) {
+                let target = caps[2].to_ascii_lowercase();
+                let pattern = if target == "day" {
+                    if ord == Ordinal::Last {
+                        Some(MonthlyPattern::LastDay)
+                    } else {
+                        None
+                    }
+                } else {
+                    weekday_from_full(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
+                };
+
+                if pattern.is_some() {
+                    monthly_pattern = pattern;
+                    remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                        + &remaining[caps.get(0).unwrap().end()..];
+                }
+            }
+        }
+
+        // Days of week (skip if monthly pattern already matched)
+        if monthly_pattern.is_none() {
+            if let Some(caps) = RE_DAYS.captures(&remaining) {
+                if let Some(parsed) = parse_days(&caps[1]) {
+                    days = Some(parsed);
+                    remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                        + &remaining[caps.get(0).unwrap().end()..];
+                }
             }
         }
     }
@@ -260,7 +368,12 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
 
     let message = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if time.is_none() && date.is_none() && in_offset.is_none() && bare_hour.is_none() {
+    if time.is_none()
+        && date.is_none()
+        && in_offset.is_none()
+        && bare_hour.is_none()
+        && monthly_pattern.is_none()
+    {
         return None;
     }
     if message.is_empty() {
@@ -275,6 +388,7 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         repetition,
         in_offset,
         bare_hour,
+        monthly_pattern,
         message,
     })
 }
@@ -314,6 +428,42 @@ pub fn resolve_datetime(event: &ParsedEvent) -> Option<NaiveDateTime> {
                 Some(new_date.and_time(now.time()))
             }
         };
+    }
+
+    // Handle monthly pattern (e.g., "first sunday", "last monday", "last day")
+    if let Some(ref pattern) = event.monthly_pattern {
+        let time = event
+            .time
+            .unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let today = now.date();
+        let mut year = today.year();
+        let mut month = today.month();
+
+        for _ in 0..3 {
+            let target_date = match pattern {
+                MonthlyPattern::OrdinalWeekday(ordinal, weekday) => match ordinal {
+                    Ordinal::First => nth_weekday_of_month(year, month, *weekday, 1),
+                    Ordinal::Second => nth_weekday_of_month(year, month, *weekday, 2),
+                    Ordinal::Third => nth_weekday_of_month(year, month, *weekday, 3),
+                    Ordinal::Fourth => nth_weekday_of_month(year, month, *weekday, 4),
+                    Ordinal::Last => last_weekday_of_month(year, month, *weekday),
+                },
+                MonthlyPattern::LastDay => last_day_of_month_date(year, month),
+            };
+
+            if let Some(d) = target_date {
+                let dt = d.and_time(time);
+                if dt > now {
+                    return Some(dt);
+                }
+            }
+
+            let (ny, nm) = next_month(year, month);
+            year = ny;
+            month = nm;
+        }
+
+        return None;
     }
 
     let dt = match (event.time, event.date) {
@@ -495,6 +645,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "test".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -511,6 +662,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "old".into(),
         };
         assert!(resolve_datetime(&event).is_none());
@@ -527,6 +679,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "wrap".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -629,6 +782,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "skip".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -820,6 +974,7 @@ mod tests {
             repetition: None,
             in_offset: Some((10, TimeUnit::Minutes)),
             bare_hour: None,
+            monthly_pattern: None,
             message: "test".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
@@ -838,10 +993,276 @@ mod tests {
             repetition: None,
             in_offset: Some((2, TimeUnit::Hours)),
             bare_hour: None,
+            monthly_pattern: None,
             message: "test".into(),
         };
         let dt = resolve_datetime(&event).unwrap();
         let diff = dt.signed_duration_since(now).num_hours();
         assert!(diff >= 1 && diff <= 3);
+    }
+
+    // --- Monthly pattern tests ---
+
+    #[test]
+    fn parse_first_sunday() {
+        let e = parse("10:00 first sunday call mom").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 0, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+        );
+        assert!(e.days.is_none());
+        assert_eq!(e.message, "call mom");
+    }
+
+    #[test]
+    fn parse_last_monday() {
+        let e = parse("9:30 last monday team sync").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(9, 30, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon))
+        );
+        assert_eq!(e.message, "team sync");
+    }
+
+    #[test]
+    fn parse_second_thursday() {
+        let e = parse("14:00 second thursday board meeting").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(14, 0, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Second,
+                Weekday::Thu
+            ))
+        );
+        assert_eq!(e.message, "board meeting");
+    }
+
+    #[test]
+    fn parse_third_friday() {
+        let e = parse("17:00 3rd friday happy hour").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(17, 0, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::Third, Weekday::Fri))
+        );
+        assert_eq!(e.message, "happy hour");
+    }
+
+    #[test]
+    fn parse_fourth_wednesday() {
+        let e = parse("11:00 4th wednesday review").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(11, 0, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Fourth,
+                Weekday::Wed
+            ))
+        );
+        assert_eq!(e.message, "review");
+    }
+
+    #[test]
+    fn parse_last_day_of_the_month() {
+        let e = parse("18:00 last day of the month pay rent").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(18, 0, 0));
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::LastDay));
+        assert_eq!(e.message, "pay rent");
+    }
+
+    #[test]
+    fn parse_last_day_short() {
+        let e = parse("18:00 last day pay bills").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(18, 0, 0));
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::LastDay));
+        assert_eq!(e.message, "pay bills");
+    }
+
+    #[test]
+    fn parse_monthly_pattern_case_insensitive() {
+        let e = parse("8:00 First Saturday chores").unwrap();
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sat))
+        );
+        assert_eq!(e.message, "chores");
+    }
+
+    #[test]
+    fn parse_monthly_pattern_no_time_defaults_valid() {
+        let e = parse("first tuesday standup").unwrap();
+        assert!(e.time.is_none());
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Tue))
+        );
+        assert_eq!(e.message, "standup");
+    }
+
+    #[test]
+    fn parse_first_day_ignored() {
+        // "first day" is not supported (only "last day")
+        // "first" won't match as monthly pattern for "day", so it falls through
+        assert!(parse("first day something").is_none());
+    }
+
+    #[test]
+    fn parse_monthly_with_repetition() {
+        let e = parse("10:00 first sunday every month call mom").unwrap();
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+        );
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 1);
+        assert_eq!(rep.unit, TimeUnit::Months);
+        assert_eq!(e.message, "call mom");
+    }
+
+    #[test]
+    fn resolve_monthly_first_sunday() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: NaiveTime::from_hms_opt(10, 0, 0),
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun)),
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        assert!(dt > now);
+        assert_eq!(dt.date().weekday(), Weekday::Sun);
+        // Verify it's the first Sunday: day must be <= 7
+        assert!(dt.date().day() <= 7);
+    }
+
+    #[test]
+    fn resolve_monthly_last_monday() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: NaiveTime::from_hms_opt(9, 0, 0),
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon)),
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        assert!(dt > now);
+        assert_eq!(dt.date().weekday(), Weekday::Mon);
+        // Verify it's the last Monday: no Monday exists 7 days later in the same month
+        let next_week = dt.date() + chrono::Duration::days(7);
+        assert_ne!(next_week.month(), dt.date().month());
+    }
+
+    #[test]
+    fn resolve_monthly_last_day() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: NaiveTime::from_hms_opt(18, 0, 0),
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::LastDay),
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        assert!(dt > now);
+        // Verify it's the last day: next day is a different month
+        let next_day = dt.date().succ_opt().unwrap();
+        assert_ne!(next_day.month(), dt.date().month());
+    }
+
+    #[test]
+    fn resolve_monthly_no_time_uses_midnight() {
+        let now = Local::now().naive_local();
+        let event = ParsedEvent {
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Second,
+                Weekday::Wed,
+            )),
+            message: "test".into(),
+        };
+        let dt = resolve_datetime(&event).unwrap();
+        assert!(dt > now);
+        assert_eq!(dt.time(), NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        assert_eq!(dt.date().weekday(), Weekday::Wed);
+    }
+
+    // --- Helper function unit tests ---
+
+    #[test]
+    fn test_nth_weekday_of_month() {
+        // March 2026: first day is Sunday
+        // First Monday = March 2
+        assert_eq!(
+            nth_weekday_of_month(2026, 3, Weekday::Mon, 1),
+            NaiveDate::from_ymd_opt(2026, 3, 2)
+        );
+        // Second Monday = March 9
+        assert_eq!(
+            nth_weekday_of_month(2026, 3, Weekday::Mon, 2),
+            NaiveDate::from_ymd_opt(2026, 3, 9)
+        );
+        // First Sunday = March 1
+        assert_eq!(
+            nth_weekday_of_month(2026, 3, Weekday::Sun, 1),
+            NaiveDate::from_ymd_opt(2026, 3, 1)
+        );
+        // Fourth Friday = March 27
+        assert_eq!(
+            nth_weekday_of_month(2026, 3, Weekday::Fri, 4),
+            NaiveDate::from_ymd_opt(2026, 3, 27)
+        );
+    }
+
+    #[test]
+    fn test_last_weekday_of_month() {
+        // March 2026: last day is Tuesday March 31
+        assert_eq!(
+            last_weekday_of_month(2026, 3, Weekday::Tue),
+            NaiveDate::from_ymd_opt(2026, 3, 31)
+        );
+        // Last Sunday in March 2026 = March 29
+        assert_eq!(
+            last_weekday_of_month(2026, 3, Weekday::Sun),
+            NaiveDate::from_ymd_opt(2026, 3, 29)
+        );
+    }
+
+    #[test]
+    fn test_last_day_of_month_date() {
+        assert_eq!(
+            last_day_of_month_date(2026, 2),
+            NaiveDate::from_ymd_opt(2026, 2, 28)
+        );
+        assert_eq!(
+            last_day_of_month_date(2024, 2),
+            NaiveDate::from_ymd_opt(2024, 2, 29)
+        );
+        assert_eq!(
+            last_day_of_month_date(2026, 12),
+            NaiveDate::from_ymd_opt(2026, 12, 31)
+        );
     }
 }

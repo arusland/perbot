@@ -76,6 +76,7 @@ pub struct StoredEvent {
     pub in_offset: Option<u32>,
     pub in_offset_unit: Option<String>,
     pub bare_hour: Option<u32>,
+    pub monthly_pattern: Option<String>,
 }
 
 /// SQLite-based storage for parsed events.
@@ -119,7 +120,8 @@ impl EventStorage {
                 dismissed       INTEGER NOT NULL DEFAULT 0,
                 in_offset       INTEGER,
                 in_offset_unit  TEXT,
-                bare_hour       INTEGER
+                bare_hour       INTEGER,
+                monthly_pattern TEXT
             )",
             [],
         )?;
@@ -214,9 +216,32 @@ impl EventStorage {
             None => (None, None),
         };
 
+        let monthly_pattern_str = event.monthly_pattern.as_ref().map(|p| match p {
+            crate::parser::MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                let ord_str = match ord {
+                    crate::parser::Ordinal::First => "first",
+                    crate::parser::Ordinal::Second => "second",
+                    crate::parser::Ordinal::Third => "third",
+                    crate::parser::Ordinal::Fourth => "fourth",
+                    crate::parser::Ordinal::Last => "last",
+                };
+                let wd_str = match wd {
+                    chrono::Weekday::Mon => "mon",
+                    chrono::Weekday::Tue => "tue",
+                    chrono::Weekday::Wed => "wed",
+                    chrono::Weekday::Thu => "thu",
+                    chrono::Weekday::Fri => "fri",
+                    chrono::Weekday::Sat => "sat",
+                    chrono::Weekday::Sun => "sun",
+                };
+                format!("{}_{}", ord_str, wd_str)
+            }
+            crate::parser::MonthlyPattern::LastDay => "last_day".to_string(),
+        });
+
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 chat_id,
                 date_str,
@@ -230,6 +255,7 @@ impl EventStorage {
                 in_offset,
                 in_offset_unit,
                 event.bare_hour,
+                monthly_pattern_str,
             ],
         )?;
 
@@ -239,7 +265,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
              FROM events WHERE id = ?1",
         )?;
 
@@ -255,7 +281,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
              FROM events WHERE chat_id = ?1 ORDER BY target_datetime ASC",
         )?;
 
@@ -267,7 +293,7 @@ impl EventStorage {
     /// Retrieves all pending (not yet fired) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
              FROM events WHERE fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -279,7 +305,7 @@ impl EventStorage {
     /// Retrieves pending events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
              FROM events WHERE chat_id = ?1 AND fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -417,6 +443,7 @@ impl EventStorage {
         let in_offset: Option<u32> = row.get(13)?;
         let in_offset_unit: Option<String> = row.get(14)?;
         let bare_hour: Option<u32> = row.get(15)?;
+        let monthly_pattern: Option<String> = row.get(16)?;
 
         Ok(StoredEvent {
             id: row.get(0)?,
@@ -435,6 +462,7 @@ impl EventStorage {
             in_offset,
             in_offset_unit,
             bare_hour,
+            monthly_pattern,
         })
     }
 }
@@ -452,6 +480,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: message.to_string(),
         }
     }
@@ -697,6 +726,7 @@ mod tests {
             repetition: None,
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "weekday meeting".to_string(),
         };
         let target = NaiveDateTime::new(
@@ -728,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_repetition_round_trip() {
-        use crate::parser::{TimeUnit, Repetition};
+        use crate::parser::{Repetition, TimeUnit};
 
         let storage = EventStorage::open_in_memory().unwrap();
         let event = ParsedEvent {
@@ -742,6 +772,7 @@ mod tests {
             }),
             in_offset: None,
             bare_hour: None,
+            monthly_pattern: None,
             message: "call office".to_string(),
         };
         let target = NaiveDateTime::new(
@@ -811,5 +842,78 @@ mod tests {
         let pending = storage.get_pending().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, id2);
+    }
+
+    #[test]
+    fn test_monthly_pattern_round_trip() {
+        use crate::parser::{MonthlyPattern, Ordinal};
+
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = ParsedEvent {
+            date: None,
+            time: Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap()),
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                chrono::Weekday::Sun,
+            )),
+            message: "call mom".to_string(),
+        };
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 3, 7).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.monthly_pattern, Some("first_sun".to_string()));
+        assert_eq!(stored.message, "call mom");
+    }
+
+    #[test]
+    fn test_monthly_pattern_last_day_round_trip() {
+        use crate::parser::MonthlyPattern;
+
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = ParsedEvent {
+            date: None,
+            time: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
+            year_explicit: false,
+            days: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: Some(MonthlyPattern::LastDay),
+            message: "pay rent".to_string(),
+        };
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
+            NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.monthly_pattern, Some("last_day".to_string()));
+    }
+
+    #[test]
+    fn test_monthly_pattern_none_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let event = create_test_event("no pattern");
+        let target = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+        );
+
+        let id = storage.insert(123, &event, target).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.monthly_pattern, None);
     }
 }
