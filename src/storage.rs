@@ -102,10 +102,26 @@ impl EventStorage {
 
     /// Initializes the database schema.
     fn init_schema(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA foreign_keys = ON")?;
+
+        // Chats table (must be created before events due to foreign key)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS chats (
+                id          INTEGER PRIMARY KEY,
+                chat_type   TEXT NOT NULL,
+                title       TEXT,
+                username    TEXT,
+                first_name  TEXT,
+                last_name   TEXT,
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            [],
+        )?;
+
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS events (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id         INTEGER NOT NULL,
+                chat_id         INTEGER NOT NULL REFERENCES chats(id),
                 date            TEXT,
                 time            TEXT,
                 year_explicit   INTEGER NOT NULL DEFAULT 0,
@@ -138,20 +154,6 @@ impl EventStorage {
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_target_datetime ON events(target_datetime)",
-            [],
-        )?;
-
-        // Chats table
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS chats (
-                id          INTEGER PRIMARY KEY,
-                chat_type   TEXT NOT NULL,
-                title       TEXT,
-                username    TEXT,
-                first_name  TEXT,
-                last_name   TEXT,
-                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
             [],
         )?;
 
@@ -402,6 +404,19 @@ impl EventStorage {
 mod tests {
     use super::*;
 
+    fn ensure_chat(storage: &EventStorage, chat_id: i64) {
+        storage
+            .upsert_chat(&ChatInfo {
+                id: chat_id,
+                chat_type: ChatType::Private,
+                title: None,
+                username: None,
+                first_name: None,
+                last_name: None,
+            })
+            .unwrap();
+    }
+
     fn make_stored_event(message: &str) -> StoredEvent {
         StoredEvent {
             id: 0,
@@ -436,6 +451,7 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         let mut event = make_stored_event("test message");
         event.chat_id = 12345;
+        ensure_chat(&storage, 12345);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
@@ -452,6 +468,8 @@ mod tests {
     #[test]
     fn test_get_by_chat() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 111);
+        ensure_chat(&storage, 222);
         let mut event1 = make_stored_event("event 1");
         event1.chat_id = 111;
         let mut event2 = make_stored_event("event 2");
@@ -475,6 +493,7 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         let mut event = make_stored_event("fire me");
         event.chat_id = 123;
+        ensure_chat(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
 
@@ -492,6 +511,7 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         let mut event = make_stored_event("pending");
         event.chat_id = 123;
+        ensure_chat(&storage, 123);
 
         let id1 = storage.insert_event(&event).unwrap();
         let id2 = storage.insert_event(&event).unwrap();
@@ -508,6 +528,7 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         let mut event = make_stored_event("delete me");
         event.chat_id = 123;
+        ensure_chat(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
         assert!(storage.get(id).unwrap().is_some());
@@ -521,6 +542,7 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         let mut event = make_stored_event("test");
         event.chat_id = 123;
+        ensure_chat(&storage, 123);
 
         let id1 = storage.insert_event(&event).unwrap();
         let id2 = storage.insert_event(&event).unwrap();
@@ -637,6 +659,7 @@ mod tests {
     #[test]
     fn test_days_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 999);
         let mut event = make_stored_event("weekday meeting");
         event.chat_id = 999;
         event.days = Some("mon,tue,wed,thu,fri".to_string());
@@ -656,6 +679,7 @@ mod tests {
     #[test]
     fn test_days_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 999);
         let mut event = make_stored_event("no days");
         event.chat_id = 999;
 
@@ -668,6 +692,7 @@ mod tests {
     #[test]
     fn test_repetition_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("call office");
         event.chat_id = 123;
         event.date = Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap());
@@ -691,6 +716,7 @@ mod tests {
     #[test]
     fn test_repetition_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("no repeat");
         event.chat_id = 123;
 
@@ -705,6 +731,7 @@ mod tests {
     #[test]
     fn test_dismissed_flag() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("dismiss me");
         event.chat_id = 123;
 
@@ -722,6 +749,7 @@ mod tests {
     #[test]
     fn test_dismissed_excluded_from_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("pending test");
         event.chat_id = 123;
 
@@ -738,6 +766,7 @@ mod tests {
     #[test]
     fn test_monthly_pattern_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("call mom");
         event.chat_id = 123;
         event.date = None;
@@ -759,6 +788,7 @@ mod tests {
     #[test]
     fn test_monthly_pattern_last_day_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("pay rent");
         event.chat_id = 123;
         event.date = None;
@@ -779,6 +809,7 @@ mod tests {
     #[test]
     fn test_monthly_pattern_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("no pattern");
         event.chat_id = 123;
 
