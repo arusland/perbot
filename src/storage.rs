@@ -2,6 +2,29 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rusqlite::{params, Connection, Result};
 use std::path::Path;
 
+/// A stored event with database metadata.
+#[derive(Debug, Clone)]
+pub struct StoredEvent {
+    pub id: i64,
+    pub chat_id: i64,
+    pub date: Option<NaiveDate>,
+    pub time: Option<NaiveTime>,
+    pub year_explicit: bool,
+    pub days: Option<String>,
+    pub message: String,
+    pub target_datetime: NaiveDateTime,
+    pub created_at: NaiveDateTime,
+    pub fired: bool,
+    pub repeat_interval: Option<u32>,
+    pub repeat_unit: Option<String>,
+    pub dismissed: bool,
+    pub in_offset: Option<u32>,
+    pub in_offset_unit: Option<String>,
+    pub bare_hour: Option<u32>,
+    pub monthly_pattern: Option<String>,
+    pub raw_msg: String,
+}
+
 /// Chat type enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatType {
@@ -53,29 +76,6 @@ pub struct ChatInfo {
     pub username: Option<String>,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
-}
-
-/// A stored event with database metadata.
-#[derive(Debug, Clone)]
-pub struct StoredEvent {
-    pub id: i64,
-    pub chat_id: i64,
-    pub date: Option<NaiveDate>,
-    pub time: Option<NaiveTime>,
-    pub year_explicit: bool,
-    pub days: Option<String>,
-    pub message: String,
-    pub target_datetime: NaiveDateTime,
-    pub created_at: NaiveDateTime,
-    pub fired: bool,
-    pub repeat_interval: Option<u32>,
-    pub repeat_unit: Option<String>,
-    pub dismissed: bool,
-    pub in_offset: Option<u32>,
-    pub in_offset_unit: Option<String>,
-    pub bare_hour: Option<u32>,
-    pub monthly_pattern: Option<String>,
-    pub raw_msg: String,
 }
 
 /// SQLite-based storage for parsed events.
