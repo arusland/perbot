@@ -818,4 +818,20 @@ mod tests {
 
         assert_eq!(stored.monthly_pattern, None);
     }
+
+    #[test]
+    fn test_big_chat_id_exceeding_i32() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let big_chat_id: i64 = i32::MAX as i64 + 1; // 2_147_483_648
+        ensure_chat(&storage, big_chat_id);
+
+        let mut event = make_stored_event("big id test");
+        event.chat_id = big_chat_id;
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.chat_id, big_chat_id);
+        assert_eq!(stored.message, "big id test");
+    }
 }
