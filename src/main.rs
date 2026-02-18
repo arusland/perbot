@@ -1,3 +1,4 @@
+mod mapper;
 mod parser;
 mod storage;
 
@@ -96,16 +97,16 @@ async fn main() {
                     return Ok(());
                 }
 
-                if let Some(event) = parser::parse(text) {
-                    if let Some(target_datetime) = parser::resolve_datetime(&event) {
+                if let Some(parsed) = parser::parse(text) {
+                    if let Some(stored) = mapper::map(parsed, msg.chat.id.0) {
                         let now = chrono::Local::now().naive_local();
-                        let delay = target_datetime.signed_duration_since(now);
+                        let delay = stored.target_datetime.signed_duration_since(now);
                         let delay_secs = delay.num_seconds().max(0) as u64;
 
                         // Save event to storage
                         let event_id = {
                             let storage_guard = storage.lock().unwrap();
-                            storage_guard.insert(msg.chat.id.0, &event, target_datetime)
+                            storage_guard.insert_event(&stored)
                         };
 
                         let event_id = match event_id {
@@ -119,7 +120,8 @@ async fn main() {
                             }
                         };
 
-                        let message_text = event.message.clone();
+                        let message_text = stored.message.clone();
+                        let target_datetime = stored.target_datetime;
                         let chat_id = msg.chat.id;
                         let bot_clone = bot.clone();
                         let storage_clone = Arc::clone(&storage);

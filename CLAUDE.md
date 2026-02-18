@@ -11,8 +11,9 @@ Perbot is a Telegram reminder bot written in Rust. Users send messages containin
 ```bash
 cargo build                  # Debug build
 cargo build --release        # Release build
-cargo test                   # Run all tests (28 tests across parser and storage)
+cargo test                   # Run all tests (across parser, mapper, and storage)
 cargo test parser::tests     # Run only parser tests
+cargo test mapper::tests     # Run only mapper tests
 cargo test storage::tests    # Run only storage tests
 cargo test <test_name>       # Run a single test by name
 ```
@@ -25,13 +26,15 @@ cargo test <test_name>       # Run a single test by name
 
 ## Architecture
 
-Three source files in `src/`:
+Four source files in `src/`:
 
-- **main.rs** — Bot entry point. Initializes teloxide REPL, loads pending events from SQLite on startup and reschedules them via `tokio::spawn` + `tokio::time::sleep`. Handles incoming messages: parses text for datetime, stores events, spawns delayed send tasks, marks events fired. All responses use MarkdownV2 parse mode (escaped via `escape_markdown`). Storage is shared as `Arc<Mutex<EventStorage>>`.
+- **main.rs** — Bot entry point. Initializes teloxide REPL, loads pending events from SQLite on startup and reschedules them via `tokio::spawn` + `tokio::time::sleep`. Handles incoming messages: parses text with `parser::parse`, maps to `StoredEvent` with `mapper::map`, saves via `storage.insert_event`, spawns delayed send tasks, marks events fired. All responses use MarkdownV2 parse mode (escaped via `escape_markdown`). Storage is shared as `Arc<Mutex<EventStorage>>`.
 
-- **parser.rs** — Stateless datetime extraction. `parse(text) -> Option<ParsedEvent>` uses regex to extract time from the beginning of a message; remainder becomes the event message. `resolve_datetime(&ParsedEvent) -> Option<NaiveDateTime>` resolves to a future datetime (advances to next day/year if the parsed time/date is in the past and no explicit year was given).
+- **parser.rs** — Stateless datetime extraction. `parse(text) -> Option<ParsedEvent>` uses regex to extract time from the beginning of a message; remainder becomes the event message.
 
-- **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages two tables: `events` (id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired) and `chats` (id, chat_type, title, username, first_name, last_name, updated_at). Provides `open(path)` for file-backed DB and `open_in_memory()` for tests.
+- **mapper.rs** — Converts `ParsedEvent` into `StoredEvent`. `resolve_datetime(&ParsedEvent) -> Option<NaiveDateTime>` resolves to a future datetime (advances to next day/year if the parsed time/date is in the past and no explicit year was given). `map(ParsedEvent, chat_id) -> Option<StoredEvent>` calls `resolve_datetime` and serializes all fields (days, repetition, offset, monthly pattern) into their storage representations.
+
+- **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages two tables: `events` (id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired) and `chats` (id, chat_type, title, username, first_name, last_name, updated_at). Provides `open(path)` for file-backed DB and `open_in_memory()` for tests. `insert_event(&StoredEvent)` persists a mapped event.
 
 ## Datetime formats supported
 - `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — always at the start of the message.

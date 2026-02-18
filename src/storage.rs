@@ -2,8 +2,6 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rusqlite::{params, Connection, Result};
 use std::path::Path;
 
-use crate::parser::ParsedEvent;
-
 /// Chat type enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatType {
@@ -77,6 +75,7 @@ pub struct StoredEvent {
     pub in_offset_unit: Option<String>,
     pub bare_hour: Option<u32>,
     pub monthly_pattern: Option<String>,
+    pub raw_msg: String,
 }
 
 /// SQLite-based storage for parsed events.
@@ -121,7 +120,8 @@ impl EventStorage {
                 in_offset       INTEGER,
                 in_offset_unit  TEXT,
                 bare_hour       INTEGER,
-                monthly_pattern TEXT
+                monthly_pattern TEXT,
+                raw_msg         TEXT NOT NULL DEFAULT ''
             )",
             [],
         )?;
@@ -158,104 +158,33 @@ impl EventStorage {
         Ok(())
     }
 
-    /// Inserts a new event into the database.
-    pub fn insert(
-        &self,
-        chat_id: i64,
-        event: &ParsedEvent,
-        target_datetime: NaiveDateTime,
-    ) -> Result<i64> {
+    /// Inserts a new event into the database from a mapped `StoredEvent`.
+    pub fn insert_event(&self, event: &StoredEvent) -> Result<i64> {
         let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
         let time_str = event.time.map(|t| t.format("%H:%M:%S").to_string());
-        let target_str = target_datetime.format("%Y-%m-%d %H:%M:%S").to_string();
-        let days_str = event.days.as_ref().map(|days| {
-            let mut day_strs: Vec<&str> = days
-                .iter()
-                .map(|d| match d {
-                    chrono::Weekday::Mon => "mon",
-                    chrono::Weekday::Tue => "tue",
-                    chrono::Weekday::Wed => "wed",
-                    chrono::Weekday::Thu => "thu",
-                    chrono::Weekday::Fri => "fri",
-                    chrono::Weekday::Sat => "sat",
-                    chrono::Weekday::Sun => "sun",
-                })
-                .collect();
-            let order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-            day_strs.sort_by_key(|d| order.iter().position(|o| o == d).unwrap_or(7));
-            day_strs.join(",")
-        });
-
-        let (repeat_interval, repeat_unit) = match &event.repetition {
-            Some(rep) => (
-                Some(rep.interval),
-                Some(match rep.unit {
-                    crate::parser::TimeUnit::Minutes => "minutes",
-                    crate::parser::TimeUnit::Hours => "hours",
-                    crate::parser::TimeUnit::Days => "days",
-                    crate::parser::TimeUnit::Weeks => "weeks",
-                    crate::parser::TimeUnit::Months => "months",
-                    crate::parser::TimeUnit::Years => "years",
-                }),
-            ),
-            None => (None, None),
-        };
-
-        let (in_offset, in_offset_unit) = match &event.in_offset {
-            Some((value, unit)) => (
-                Some(*value),
-                Some(match unit {
-                    crate::parser::TimeUnit::Minutes => "minutes",
-                    crate::parser::TimeUnit::Hours => "hours",
-                    crate::parser::TimeUnit::Days => "days",
-                    crate::parser::TimeUnit::Weeks => "weeks",
-                    crate::parser::TimeUnit::Months => "months",
-                    crate::parser::TimeUnit::Years => "years",
-                }),
-            ),
-            None => (None, None),
-        };
-
-        let monthly_pattern_str = event.monthly_pattern.as_ref().map(|p| match p {
-            crate::parser::MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                let ord_str = match ord {
-                    crate::parser::Ordinal::First => "first",
-                    crate::parser::Ordinal::Second => "second",
-                    crate::parser::Ordinal::Third => "third",
-                    crate::parser::Ordinal::Fourth => "fourth",
-                    crate::parser::Ordinal::Last => "last",
-                };
-                let wd_str = match wd {
-                    chrono::Weekday::Mon => "mon",
-                    chrono::Weekday::Tue => "tue",
-                    chrono::Weekday::Wed => "wed",
-                    chrono::Weekday::Thu => "thu",
-                    chrono::Weekday::Fri => "fri",
-                    chrono::Weekday::Sat => "sat",
-                    chrono::Weekday::Sun => "sun",
-                };
-                format!("{}_{}", ord_str, wd_str)
-            }
-            crate::parser::MonthlyPattern::LastDay => "last_day".to_string(),
-        });
+        let target_str = event
+            .target_datetime
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, target_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
-                chat_id,
+                event.chat_id,
                 date_str,
                 time_str,
                 event.year_explicit as i32,
                 event.message,
                 target_str,
-                days_str,
-                repeat_interval,
-                repeat_unit,
-                in_offset,
-                in_offset_unit,
+                event.days,
+                event.repeat_interval,
+                event.repeat_unit,
+                event.in_offset,
+                event.in_offset_unit,
                 event.bare_hour,
-                monthly_pattern_str,
+                event.monthly_pattern,
+                event.raw_msg,
             ],
         )?;
 
@@ -265,7 +194,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
              FROM events WHERE id = ?1",
         )?;
 
@@ -281,7 +210,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
              FROM events WHERE chat_id = ?1 ORDER BY target_datetime ASC",
         )?;
 
@@ -293,7 +222,7 @@ impl EventStorage {
     /// Retrieves all pending (not yet fired) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
              FROM events WHERE fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -305,7 +234,7 @@ impl EventStorage {
     /// Retrieves pending events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern
+            "SELECT id, chat_id, date, time, year_explicit, message, target_datetime, created_at, fired, days, repeat_interval, repeat_unit, dismissed, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
              FROM events WHERE chat_id = ?1 AND fired = 0 AND dismissed = 0 ORDER BY target_datetime ASC",
         )?;
 
@@ -444,6 +373,7 @@ impl EventStorage {
         let in_offset_unit: Option<String> = row.get(14)?;
         let bare_hour: Option<u32> = row.get(15)?;
         let monthly_pattern: Option<String> = row.get(16)?;
+        let raw_msg: String = row.get::<_, Option<String>>(17)?.unwrap_or_default();
 
         Ok(StoredEvent {
             id: row.get(0)?,
@@ -463,6 +393,7 @@ impl EventStorage {
             in_offset_unit,
             bare_hour,
             monthly_pattern,
+            raw_msg,
         })
     }
 }
@@ -471,30 +402,42 @@ impl EventStorage {
 mod tests {
     use super::*;
 
-    fn create_test_event(message: &str) -> ParsedEvent {
-        ParsedEvent {
+    fn make_stored_event(message: &str) -> StoredEvent {
+        StoredEvent {
+            id: 0,
+            chat_id: 0,
             date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),
             time: Some(NaiveTime::from_hms_opt(23, 59, 0).unwrap()),
             year_explicit: true,
             days: None,
-            repetition: None,
+            message: message.to_string(),
+            target_datetime: NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+                NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
+            ),
+            created_at: NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            fired: false,
+            repeat_interval: None,
+            repeat_unit: None,
+            dismissed: false,
             in_offset: None,
+            in_offset_unit: None,
             bare_hour: None,
             monthly_pattern: None,
-            message: message.to_string(),
+            raw_msg: String::new(),
         }
     }
 
     #[test]
     fn test_insert_and_get() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("test message");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("test message");
+        event.chat_id = 12345;
 
-        let id = storage.insert(12345, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.id, id);
@@ -509,16 +452,16 @@ mod tests {
     #[test]
     fn test_get_by_chat() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event1 = create_test_event("event 1");
-        let event2 = create_test_event("event 2");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event1 = make_stored_event("event 1");
+        event1.chat_id = 111;
+        let mut event2 = make_stored_event("event 2");
+        event2.chat_id = 111;
+        let mut event3 = make_stored_event("event 1");
+        event3.chat_id = 222;
 
-        storage.insert(111, &event1, target).unwrap();
-        storage.insert(111, &event2, target).unwrap();
-        storage.insert(222, &event1, target).unwrap();
+        storage.insert_event(&event1).unwrap();
+        storage.insert_event(&event2).unwrap();
+        storage.insert_event(&event3).unwrap();
 
         let events = storage.get_by_chat(111).unwrap();
         assert_eq!(events.len(), 2);
@@ -530,13 +473,10 @@ mod tests {
     #[test]
     fn test_mark_fired() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("fire me");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("fire me");
+        event.chat_id = 123;
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
 
         let stored = storage.get(id).unwrap().unwrap();
         assert!(!stored.fired);
@@ -550,14 +490,11 @@ mod tests {
     #[test]
     fn test_get_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("pending");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("pending");
+        event.chat_id = 123;
 
-        let id1 = storage.insert(123, &event, target).unwrap();
-        let id2 = storage.insert(123, &event, target).unwrap();
+        let id1 = storage.insert_event(&event).unwrap();
+        let id2 = storage.insert_event(&event).unwrap();
 
         storage.mark_fired(id1).unwrap();
 
@@ -569,13 +506,10 @@ mod tests {
     #[test]
     fn test_delete() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("delete me");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("delete me");
+        event.chat_id = 123;
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         assert!(storage.get(id).unwrap().is_some());
 
         storage.delete(id).unwrap();
@@ -585,15 +519,12 @@ mod tests {
     #[test]
     fn test_delete_fired() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("test");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("test");
+        event.chat_id = 123;
 
-        let id1 = storage.insert(123, &event, target).unwrap();
-        let id2 = storage.insert(123, &event, target).unwrap();
-        let id3 = storage.insert(123, &event, target).unwrap();
+        let id1 = storage.insert_event(&event).unwrap();
+        let id2 = storage.insert_event(&event).unwrap();
+        let id3 = storage.insert_event(&event).unwrap();
 
         storage.mark_fired(id1).unwrap();
         storage.mark_fired(id2).unwrap();
@@ -705,36 +636,17 @@ mod tests {
 
     #[test]
     fn test_days_round_trip() {
-        use chrono::Weekday;
-        use std::collections::HashSet;
-
         let storage = EventStorage::open_in_memory().unwrap();
-        let days: HashSet<Weekday> = [
-            Weekday::Mon,
-            Weekday::Tue,
-            Weekday::Wed,
-            Weekday::Thu,
-            Weekday::Fri,
-        ]
-        .into_iter()
-        .collect();
-        let event = ParsedEvent {
-            date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),
-            time: Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap()),
-            year_explicit: true,
-            days: Some(days),
-            repetition: None,
-            in_offset: None,
-            bare_hour: None,
-            monthly_pattern: None,
-            message: "weekday meeting".to_string(),
-        };
-        let target = NaiveDateTime::new(
+        let mut event = make_stored_event("weekday meeting");
+        event.chat_id = 999;
+        event.days = Some("mon,tue,wed,thu,fri".to_string());
+        event.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
+        event.target_datetime = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
             NaiveTime::from_hms_opt(13, 30, 0).unwrap(),
         );
 
-        let id = storage.insert(999, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.days, Some("mon,tue,wed,thu,fri".to_string()));
@@ -744,13 +656,10 @@ mod tests {
     #[test]
     fn test_days_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("no days");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("no days");
+        event.chat_id = 999;
 
-        let id = storage.insert(999, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.days, None);
@@ -758,29 +667,20 @@ mod tests {
 
     #[test]
     fn test_repetition_round_trip() {
-        use crate::parser::{Repetition, TimeUnit};
-
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = ParsedEvent {
-            date: Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap()),
-            time: Some(NaiveTime::from_hms_opt(14, 55, 0).unwrap()),
-            year_explicit: false,
-            days: None,
-            repetition: Some(Repetition {
-                interval: 2,
-                unit: TimeUnit::Weeks,
-            }),
-            in_offset: None,
-            bare_hour: None,
-            monthly_pattern: None,
-            message: "call office".to_string(),
-        };
-        let target = NaiveDateTime::new(
+        let mut event = make_stored_event("call office");
+        event.chat_id = 123;
+        event.date = Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap());
+        event.time = Some(NaiveTime::from_hms_opt(14, 55, 0).unwrap());
+        event.year_explicit = false;
+        event.repeat_interval = Some(2);
+        event.repeat_unit = Some("weeks".to_string());
+        event.target_datetime = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 5, 20).unwrap(),
             NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
         );
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.repeat_interval, Some(2));
@@ -791,13 +691,10 @@ mod tests {
     #[test]
     fn test_repetition_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("no repeat");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("no repeat");
+        event.chat_id = 123;
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.repeat_interval, None);
@@ -808,13 +705,10 @@ mod tests {
     #[test]
     fn test_dismissed_flag() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("dismiss me");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("dismiss me");
+        event.chat_id = 123;
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
 
         let stored = storage.get(id).unwrap().unwrap();
         assert!(!stored.dismissed);
@@ -828,14 +722,11 @@ mod tests {
     #[test]
     fn test_dismissed_excluded_from_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("pending test");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("pending test");
+        event.chat_id = 123;
 
-        let id1 = storage.insert(123, &event, target).unwrap();
-        let id2 = storage.insert(123, &event, target).unwrap();
+        let id1 = storage.insert_event(&event).unwrap();
+        let id2 = storage.insert_event(&event).unwrap();
 
         storage.mark_dismissed(id1).unwrap();
 
@@ -846,29 +737,19 @@ mod tests {
 
     #[test]
     fn test_monthly_pattern_round_trip() {
-        use crate::parser::{MonthlyPattern, Ordinal};
-
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = ParsedEvent {
-            date: None,
-            time: Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap()),
-            year_explicit: false,
-            days: None,
-            repetition: None,
-            in_offset: None,
-            bare_hour: None,
-            monthly_pattern: Some(MonthlyPattern::OrdinalWeekday(
-                Ordinal::First,
-                chrono::Weekday::Sun,
-            )),
-            message: "call mom".to_string(),
-        };
-        let target = NaiveDateTime::new(
+        let mut event = make_stored_event("call mom");
+        event.chat_id = 123;
+        event.date = None;
+        event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        event.year_explicit = false;
+        event.monthly_pattern = Some("first_sun".to_string());
+        event.target_datetime = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 3, 7).unwrap(),
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         );
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.monthly_pattern, Some("first_sun".to_string()));
@@ -877,26 +758,19 @@ mod tests {
 
     #[test]
     fn test_monthly_pattern_last_day_round_trip() {
-        use crate::parser::MonthlyPattern;
-
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = ParsedEvent {
-            date: None,
-            time: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
-            year_explicit: false,
-            days: None,
-            repetition: None,
-            in_offset: None,
-            bare_hour: None,
-            monthly_pattern: Some(MonthlyPattern::LastDay),
-            message: "pay rent".to_string(),
-        };
-        let target = NaiveDateTime::new(
+        let mut event = make_stored_event("pay rent");
+        event.chat_id = 123;
+        event.date = None;
+        event.time = Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap());
+        event.year_explicit = false;
+        event.monthly_pattern = Some("last_day".to_string());
+        event.target_datetime = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
             NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
         );
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.monthly_pattern, Some("last_day".to_string()));
@@ -905,13 +779,10 @@ mod tests {
     #[test]
     fn test_monthly_pattern_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
-        let event = create_test_event("no pattern");
-        let target = NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
-            NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
-        );
+        let mut event = make_stored_event("no pattern");
+        event.chat_id = 123;
 
-        let id = storage.insert(123, &event, target).unwrap();
+        let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.monthly_pattern, None);
