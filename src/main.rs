@@ -4,7 +4,7 @@ mod storage;
 
 use std::process;
 use std::sync::{Arc, Mutex};
-use storage::{ChatInfo, ChatType, EventStorage};
+use storage::{play, ChatInfo, ChatType, EventStorage, StoredEvent};
 use teloxide::{prelude::*, types::ParseMode};
 
 #[tokio::main]
@@ -27,34 +27,14 @@ async fn main() {
     match pending_events {
         Ok(events) => {
             log::info!("Loading {} pending events from storage", events.len());
-            let now = chrono::Local::now().naive_local();
-
             for event in events {
-                let delay = event.target_datetime.signed_duration_since(now);
-                let delay_secs = delay.num_seconds().max(0) as u64;
-
-                let bot_clone = bot.clone();
-                let chat_id = ChatId(event.chat_id);
-                let message_text = event.message.clone();
                 let event_id = event.id;
-                let storage_clone = Arc::clone(&storage);
-
-                tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-                    let _ = bot_clone.send_message(chat_id, &message_text).await;
-
-                    // Mark event as fired
-                    if let Ok(storage) = storage_clone.lock() {
-                        let _ = storage.mark_fired(event_id);
-                    }
-                });
-
                 log::info!(
-                    "Rescheduled event {} for {} (in {} seconds)",
+                    "Rescheduled event {} for {:?}",
                     event_id,
-                    event.target_datetime,
-                    delay_secs
+                    event.next_datetime
                 );
+                schedule_event(bot.clone(), event_id, event, Arc::clone(&storage));
             }
         }
         Err(e) => log::error!("Failed to load pending events: {}", e),
@@ -98,50 +78,31 @@ async fn main() {
                 }
 
                 if let Some(parsed) = parser::parse(text) {
-                    if let Some(stored) = mapper::map(parsed, msg.chat.id.0) {
-                        let now = chrono::Local::now().naive_local();
-                        let delay = stored.target_datetime.signed_duration_since(now);
-                        let delay_secs = delay.num_seconds().max(0) as u64;
+                    let stored = play(mapper::map(parsed, msg.chat.id.0));
 
-                        // Save event to storage
-                        let event_id = {
-                            let storage_guard = storage.lock().unwrap();
-                            storage_guard.insert_event(&stored)
-                        };
+                    // Save event to storage
+                    let event_id = {
+                        let storage_guard = storage.lock().unwrap();
+                        storage_guard.insert_event(&stored)
+                    };
 
-                        let event_id = match event_id {
-                            Ok(id) => {
-                                log::info!("Saved event with id: {}", id);
-                                Some(id)
-                            }
-                            Err(e) => {
-                                log::error!("Failed to save event: {}", e);
-                                None
-                            }
-                        };
+                    let event_id = match event_id {
+                        Ok(id) => {
+                            log::info!("Saved event with id: {}", id);
+                            id
+                        }
+                        Err(e) => {
+                            log::error!("Failed to save event: {}", e);
+                            return Ok(());
+                        }
+                    };
 
-                        let message_text = stored.message.clone();
-                        let target_datetime = stored.target_datetime;
-                        let chat_id = msg.chat.id;
-                        let bot_clone = bot.clone();
-                        let storage_clone = Arc::clone(&storage);
-
-                        tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-                            let _ = bot_clone.send_message(chat_id, &message_text).await;
-
-                            // Mark event as fired
-                            if let Some(id) = event_id {
-                                if let Ok(storage) = storage_clone.lock() {
-                                    let _ = storage.mark_fired(id);
-                                }
-                            }
-                        });
-
-                        println!("target_datetime: {:?}", target_datetime);
+                    if let Some(dt) = stored.next_datetime {
+                        println!("next_datetime: {:?}", dt);
+                        schedule_event(bot.clone(), event_id, stored, Arc::clone(&storage));
                         format!(
                             "Scheduled message for {}",
-                            target_datetime.format("%H:%M %d\\.%m\\.%Y")
+                            dt.format("%H:%M %d\\.%m\\.%Y")
                         )
                     } else {
                         format!("*{}*", escape_markdown(text))
@@ -187,6 +148,43 @@ async fn main() {
         }
     })
     .await;
+}
+
+/// Spawns a delayed task that sends the event message when due, then calls
+/// `play` to compute the next occurrence and saves the result to the database.
+/// If the event is still active after `play`, a new task is spawned recursively.
+fn schedule_event(
+    bot: Bot,
+    event_id: i64,
+    event: StoredEvent,
+    storage: Arc<Mutex<EventStorage>>,
+) {
+    let Some(dt) = event.next_datetime else {
+        return;
+    };
+    let now = chrono::Local::now().naive_local();
+    let delay_secs = dt.signed_duration_since(now).num_seconds().max(0) as u64;
+    let chat_id = ChatId(event.chat_id);
+    let message = event.message.clone();
+
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+        let _ = bot.send_message(chat_id, &message).await;
+
+        // Compute next occurrence and persist it
+        let next = play(event);
+        {
+            let Ok(storage_guard) = storage.lock() else {
+                return;
+            };
+            let _ = storage_guard.update_schedule(event_id, next.active, next.next_datetime);
+        }
+
+        // Schedule the next occurrence if still active
+        if next.active {
+            schedule_event(bot, event_id, next, storage);
+        }
+    });
 }
 
 fn escape_markdown(text: &str) -> String {
