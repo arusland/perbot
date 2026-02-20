@@ -154,8 +154,7 @@ fn next_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
-fn calculate_next_datetime(event: &StoredEvent) -> Option<NaiveDateTime> {
-    let now = Local::now().naive_local();
+fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
 
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
@@ -290,7 +289,11 @@ fn calculate_next_datetime(event: &StoredEvent) -> Option<NaiveDateTime> {
 /// future datetime can be determined, otherwise `active = false` and
 /// `next_datetime = None`.
 pub fn play(event: StoredEvent) -> StoredEvent {
-    let next_datetime = calculate_next_datetime(&event);
+    play_at(event, Local::now().naive_local())
+}
+
+pub fn play_at(event: StoredEvent, now: NaiveDateTime) -> StoredEvent {
+    let next_datetime = calculate_next_datetime(&event, now);
     StoredEvent {
         active: next_datetime.is_some(),
         next_datetime,
