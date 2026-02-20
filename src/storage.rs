@@ -21,7 +21,17 @@ pub struct StoredEvent {
     pub in_offset_unit: Option<String>,
     pub bare_hour: Option<u32>,
     pub monthly_pattern: Option<String>,
-    pub raw_msg: String,
+    pub msg_id: i64,
+}
+
+/// A stored user message.
+#[derive(Debug, Clone)]
+pub struct StoredMessage {
+    pub id: i64,
+    pub user_id: Option<i64>,
+    pub chat_id: i64,
+    pub created_at: NaiveDateTime,
+    pub message: String,
 }
 
 /// Chat type enumeration.
@@ -328,6 +338,17 @@ impl EventStorage {
         )?;
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER,
+                chat_id     INTEGER NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                message     TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS events (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id         INTEGER NOT NULL REFERENCES chats(id),
@@ -345,7 +366,7 @@ impl EventStorage {
                 in_offset_unit  TEXT,
                 bare_hour       INTEGER,
                 monthly_pattern TEXT,
-                raw_msg         TEXT NOT NULL DEFAULT ''
+                msg_id          INTEGER NOT NULL REFERENCES messages(id)
             )",
             [],
         )?;
@@ -377,7 +398,7 @@ impl EventStorage {
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg)
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 event.chat_id,
@@ -394,7 +415,7 @@ impl EventStorage {
                 event.in_offset_unit,
                 event.bare_hour,
                 event.monthly_pattern,
-                event.raw_msg,
+                event.msg_id,
             ],
         )?;
 
@@ -404,7 +425,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE id = ?1",
         )?;
 
@@ -420,7 +441,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
         )?;
 
@@ -432,7 +453,7 @@ impl EventStorage {
     /// Retrieves all active (pending) events.
     pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -444,7 +465,7 @@ impl EventStorage {
     /// Retrieves active events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, raw_msg
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -522,6 +543,15 @@ impl EventStorage {
         Ok(())
     }
 
+    /// Inserts a user message and returns its ID.
+    pub fn insert_message(&self, user_id: Option<i64>, chat_id: i64, message: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO messages (user_id, chat_id, message) VALUES (?1, ?2, ?3)",
+            params![user_id, chat_id, message],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     /// Retrieves chat information by ID.
     pub fn get_chat(&self, id: i64) -> Result<Option<StoredChat>> {
         let mut stmt = self.conn.prepare(
@@ -589,7 +619,7 @@ impl EventStorage {
         let in_offset_unit: Option<String> = row.get(13)?;
         let bare_hour: Option<u32> = row.get(14)?;
         let monthly_pattern: Option<String> = row.get(15)?;
-        let raw_msg: String = row.get::<_, Option<String>>(16)?.unwrap_or_default();
+        let msg_id: i64 = row.get(16)?;
 
         Ok(StoredEvent {
             id: row.get(0)?,
@@ -608,7 +638,7 @@ impl EventStorage {
             in_offset_unit,
             bare_hour,
             monthly_pattern,
-            raw_msg,
+            msg_id,
         })
     }
 }
@@ -628,6 +658,10 @@ mod tests {
                 last_name: None,
             })
             .unwrap();
+    }
+
+    fn ensure_message(storage: &EventStorage, chat_id: i64) -> i64 {
+        storage.insert_message(None, chat_id, "test").unwrap()
     }
 
     fn make_stored_event(message: &str) -> StoredEvent {
@@ -654,7 +688,7 @@ mod tests {
             in_offset_unit: None,
             bare_hour: None,
             monthly_pattern: None,
-            raw_msg: String::new(),
+            msg_id: 0,
         }
     }
 
@@ -680,16 +714,17 @@ mod tests {
             in_offset_unit: None,
             bare_hour: None,
             monthly_pattern: None,
-            raw_msg: String::new(),
+            msg_id: 0,
         }
     }
 
     #[test]
     fn test_insert_and_get() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 12345);
         let mut event = make_stored_event("test message");
         event.chat_id = 12345;
-        ensure_chat(&storage, 12345);
+        event.msg_id = ensure_message(&storage, 12345);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
@@ -708,12 +743,17 @@ mod tests {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 111);
         ensure_chat(&storage, 222);
+        let msg_id_111 = ensure_message(&storage, 111);
+        let msg_id_222 = ensure_message(&storage, 222);
         let mut event1 = make_stored_event("event 1");
         event1.chat_id = 111;
+        event1.msg_id = msg_id_111;
         let mut event2 = make_stored_event("event 2");
         event2.chat_id = 111;
+        event2.msg_id = msg_id_111;
         let mut event3 = make_stored_event("event 1");
         event3.chat_id = 222;
+        event3.msg_id = msg_id_222;
 
         storage.insert_event(&event1).unwrap();
         storage.insert_event(&event2).unwrap();
@@ -729,9 +769,10 @@ mod tests {
     #[test]
     fn test_mark_inactive() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("deactivate me");
         event.chat_id = 123;
-        ensure_chat(&storage, 123);
+        event.msg_id = ensure_message(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
 
@@ -747,9 +788,10 @@ mod tests {
     #[test]
     fn test_get_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("pending");
         event.chat_id = 123;
-        ensure_chat(&storage, 123);
+        event.msg_id = ensure_message(&storage, 123);
 
         let id1 = storage.insert_event(&event).unwrap();
         let id2 = storage.insert_event(&event).unwrap();
@@ -764,9 +806,10 @@ mod tests {
     #[test]
     fn test_delete() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("delete me");
         event.chat_id = 123;
-        ensure_chat(&storage, 123);
+        event.msg_id = ensure_message(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
         assert!(storage.get(id).unwrap().is_some());
@@ -778,9 +821,10 @@ mod tests {
     #[test]
     fn test_delete_inactive() {
         let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
         let mut event = make_stored_event("test");
         event.chat_id = 123;
-        ensure_chat(&storage, 123);
+        event.msg_id = ensure_message(&storage, 123);
 
         let id1 = storage.insert_event(&event).unwrap();
         let id2 = storage.insert_event(&event).unwrap();
@@ -900,6 +944,7 @@ mod tests {
         ensure_chat(&storage, 999);
         let mut event = make_stored_event("weekday meeting");
         event.chat_id = 999;
+        event.msg_id = ensure_message(&storage, 999);
         event.days = Some("mon,tue,wed,thu,fri".to_string());
         event.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
         event.next_datetime = Some(NaiveDateTime::new(
@@ -920,6 +965,7 @@ mod tests {
         ensure_chat(&storage, 999);
         let mut event = make_stored_event("no days");
         event.chat_id = 999;
+        event.msg_id = ensure_message(&storage, 999);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
@@ -933,6 +979,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("call office");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
         event.date = Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap());
         event.time = Some(NaiveTime::from_hms_opt(14, 55, 0).unwrap());
         event.year_explicit = false;
@@ -957,6 +1004,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("no repeat");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
@@ -972,6 +1020,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("pending test");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
 
         let id1 = storage.insert_event(&event).unwrap();
         let id2 = storage.insert_event(&event).unwrap();
@@ -989,6 +1038,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("call mom");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
         event.date = None;
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         event.year_explicit = false;
@@ -1011,6 +1061,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("pay rent");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
         event.date = None;
         event.time = Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap());
         event.year_explicit = false;
@@ -1032,6 +1083,7 @@ mod tests {
         ensure_chat(&storage, 123);
         let mut event = make_stored_event("no pattern");
         event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
@@ -1047,6 +1099,7 @@ mod tests {
 
         let mut event = make_stored_event("big id test");
         event.chat_id = big_chat_id;
+        event.msg_id = ensure_message(&storage, big_chat_id);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();

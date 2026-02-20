@@ -65,6 +65,19 @@ async fn main() {
             }
 
             let reply_text = if let Some(text) = msg.text() {
+                // Store every incoming user message
+                let msg_id = {
+                    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
+                    let storage_guard = storage.lock().unwrap();
+                    match storage_guard.insert_message(user_id, msg.chat.id.0, text) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!("Failed to save message: {}", e);
+                            return Ok(());
+                        }
+                    }
+                };
+
                 if text == "exit" {
                     log::info!("Received exit command. Shutting down...");
                     tokio::spawn(async {
@@ -78,7 +91,7 @@ async fn main() {
                 }
 
                 if let Some(parsed) = parser::parse(text) {
-                    let stored = play(mapper::map(parsed, msg.chat.id.0));
+                    let stored = play(mapper::map(parsed, msg.chat.id.0, msg_id));
 
                     // Save event to storage
                     let event_id = {
@@ -100,10 +113,7 @@ async fn main() {
                     if let Some(dt) = stored.next_datetime {
                         println!("next_datetime: {:?}", dt);
                         schedule_event(bot.clone(), event_id, stored, Arc::clone(&storage));
-                        format!(
-                            "Scheduled message for {}",
-                            dt.format("%H:%M %d\\.%m\\.%Y")
-                        )
+                        format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
                     } else {
                         format!("*{}*", escape_markdown(text))
                     }
@@ -153,12 +163,7 @@ async fn main() {
 /// Spawns a delayed task that sends the event message when due, then calls
 /// `play` to compute the next occurrence and saves the result to the database.
 /// If the event is still active after `play`, a new task is spawned recursively.
-fn schedule_event(
-    bot: Bot,
-    event_id: i64,
-    event: StoredEvent,
-    storage: Arc<Mutex<EventStorage>>,
-) {
+fn schedule_event(bot: Bot, event_id: i64, event: StoredEvent, storage: Arc<Mutex<EventStorage>>) {
     let Some(dt) = event.next_datetime else {
         return;
     };

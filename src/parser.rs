@@ -53,8 +53,6 @@ pub struct ParsedEvent {
     pub monthly_pattern: Option<MonthlyPattern>,
     /// remainder after extracting all time/date components
     pub message: String,
-    /// original raw message from the user
-    pub raw_msg: String,
 }
 
 static RE_TIME_12H: LazyLock<Regex> =
@@ -354,7 +352,6 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         bare_hour,
         monthly_pattern,
         message,
-        raw_msg: input.to_string(),
     })
 }
 

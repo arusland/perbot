@@ -6,7 +6,7 @@ use crate::storage::StoredEvent;
 /// Converts a `ParsedEvent` into a `StoredEvent` ready for persistence.
 /// Does not calculate datetimes — call `storage::play` on the result to
 /// compute `next_datetime` and set `active`.
-pub fn map(event: ParsedEvent, chat_id: i64) -> StoredEvent {
+pub fn map(event: ParsedEvent, chat_id: i64, message_id: i64) -> StoredEvent {
     let now = Local::now().naive_local();
 
     let days = event.days.as_ref().map(|days| {
@@ -103,6 +103,6 @@ pub fn map(event: ParsedEvent, chat_id: i64) -> StoredEvent {
         in_offset_unit,
         bare_hour: event.bare_hour,
         monthly_pattern,
-        raw_msg: event.raw_msg,
+        msg_id: message_id,
     }
 }
