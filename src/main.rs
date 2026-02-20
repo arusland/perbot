@@ -1,10 +1,7 @@
-mod mapper;
-mod parser;
-mod storage;
-
 use std::process;
 use std::sync::{Arc, Mutex};
-use storage::{ChatInfo, ChatType, EventStorage, StoredEvent};
+use telegram_bot::{mapper, parser, storage};
+use telegram_bot::storage::{ChatInfo, ChatType, EventStorage, StoredEvent};
 use teloxide::{prelude::*, types::ParseMode};
 
 #[tokio::main]
