@@ -74,6 +74,7 @@ pub struct StoredChat {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub updated_at: NaiveDateTime,
+    pub created_at: NaiveDateTime,
 }
 
 /// Chat info for upserting (without updated_at).
@@ -332,7 +333,8 @@ impl EventStorage {
                 username    TEXT,
                 first_name  TEXT,
                 last_name   TEXT,
-                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             )",
             [],
         )?;
@@ -519,8 +521,8 @@ impl EventStorage {
     /// Inserts or updates chat information.
     pub fn upsert_chat(&self, chat: &ChatInfo) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO chats (id, chat_type, title, username, first_name, last_name, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+            "INSERT INTO chats (id, chat_type, title, username, first_name, last_name, updated_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))
              ON CONFLICT(id) DO UPDATE SET
                 chat_type = excluded.chat_type,
                 title = excluded.title,
@@ -555,7 +557,7 @@ impl EventStorage {
     /// Retrieves chat information by ID.
     pub fn get_chat(&self, id: i64) -> Result<Option<StoredChat>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_type, title, username, first_name, last_name, updated_at
+            "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
              FROM chats WHERE id = ?1",
         )?;
 
@@ -571,7 +573,7 @@ impl EventStorage {
     /// Retrieves all stored chats.
     pub fn get_all_chats(&self) -> Result<Vec<StoredChat>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_type, title, username, first_name, last_name, updated_at
+            "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
              FROM chats ORDER BY updated_at DESC",
         )?;
 
@@ -584,9 +586,11 @@ impl EventStorage {
     fn row_to_chat(row: &rusqlite::Row) -> Result<StoredChat> {
         let chat_type_str: String = row.get(1)?;
         let updated_str: String = row.get(6)?;
+        let created_str: String = row.get(7)?;
 
         let chat_type = ChatType::from_str(&chat_type_str).unwrap_or(ChatType::Private);
         let updated_at = NaiveDateTime::parse_from_str(&updated_str, "%Y-%m-%d %H:%M:%S").unwrap();
+        let created_at = NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").unwrap();
 
         Ok(StoredChat {
             id: row.get(0)?,
@@ -596,6 +600,7 @@ impl EventStorage {
             first_name: row.get(4)?,
             last_name: row.get(5)?,
             updated_at,
+            created_at,
         })
     }
 
