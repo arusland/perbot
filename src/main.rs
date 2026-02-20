@@ -4,7 +4,7 @@ mod storage;
 
 use std::process;
 use std::sync::{Arc, Mutex};
-use storage::{play, ChatInfo, ChatType, EventStorage, StoredEvent};
+use storage::{ChatInfo, ChatType, EventStorage, StoredEvent};
 use teloxide::{prelude::*, types::ParseMode};
 
 #[tokio::main]
@@ -66,8 +66,8 @@ async fn main() {
 
             let reply_text = if let Some(text) = msg.text() {
                 // Store every incoming user message
+                let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
                 let msg_id = {
-                    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
                     let storage_guard = storage.lock().unwrap();
                     match storage_guard.insert_message(user_id, msg.chat.id.0, text) {
                         Ok(id) => id,
@@ -78,8 +78,9 @@ async fn main() {
                     }
                 };
 
-                if text == "exit" {
+                if text == "exit" && user_id == Some(admin_id.0) {
                     log::info!("Received exit command. Shutting down...");
+                    let _ = bot.send_message(admin_id, "Shutting down...").await;
                     tokio::spawn(async {
                         // TODO: Implement proper shutdown logic
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -91,7 +92,7 @@ async fn main() {
                 }
 
                 if let Some(parsed) = parser::parse(text) {
-                    let stored = play(mapper::map(parsed, msg.chat.id.0, msg_id));
+                    let stored = storage::play(mapper::map(parsed, msg.chat.id.0, msg_id));
 
                     // Save event to storage
                     let event_id = {
@@ -177,7 +178,7 @@ fn schedule_event(bot: Bot, event_id: i64, event: StoredEvent, storage: Arc<Mute
         let _ = bot.send_message(chat_id, &message).await;
 
         // Compute next occurrence and persist it
-        let next = play(event);
+        let next = storage::play(event);
         {
             let Ok(storage_guard) = storage.lock() else {
                 return;
