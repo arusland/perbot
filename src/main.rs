@@ -1,4 +1,4 @@
-use perbot::parser::ParsedEvent;
+use perbot::parser::EventInfo;
 use perbot::storage::{ChatInfo, ChatType, EventStorage};
 use perbot::{parser, scheduler};
 use std::process;
@@ -165,7 +165,7 @@ async fn main() {
 /// Spawns a delayed task that sends the event message when due, then calls
 /// `calc_next` to compute the next occurrence and saves the result to the database.
 /// If the event is still active after `calc_next`, a new task is spawned recursively.
-fn schedule_event(bot: Bot, event_id: i64, event: ParsedEvent, storage: Arc<Mutex<EventStorage>>) {
+fn schedule_event(bot: Bot, event_id: i64, event: EventInfo, storage: Arc<Mutex<EventStorage>>) {
     let Some(dt) = event.next_datetime else {
         return;
     };

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::parser::{
-    parse_days, unit_from_str, MonthlyPattern, Ordinal, ParsedEvent, Repetition, TimeUnit,
+    parse_days, unit_from_str, EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
 };
 
 /// A stored user message.
@@ -237,8 +237,8 @@ impl EventStorage {
         Ok(())
     }
 
-    /// Inserts a new event into the database from a `ParsedEvent`.
-    pub fn insert_event(&self, event: &ParsedEvent) -> Result<i64> {
+    /// Inserts a new event into the database from a `EventInfo`.
+    pub fn insert_event(&self, event: &EventInfo) -> Result<i64> {
         let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
         let time_str = event.time.map(|t| t.format("%H:%M:%S").to_string());
         let next_str = event
@@ -287,7 +287,7 @@ impl EventStorage {
     }
 
     /// Retrieves an event by its ID.
-    pub fn get(&self, id: i64) -> Result<Option<ParsedEvent>> {
+    pub fn get(&self, id: i64) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE id = ?1",
@@ -303,7 +303,7 @@ impl EventStorage {
     }
 
     /// Retrieves all events for a given chat.
-    pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<ParsedEvent>> {
+    pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
@@ -315,7 +315,7 @@ impl EventStorage {
     }
 
     /// Retrieves all active (pending) events.
-    pub fn get_pending(&self) -> Result<Vec<ParsedEvent>> {
+    pub fn get_pending(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
@@ -327,7 +327,7 @@ impl EventStorage {
     }
 
     /// Retrieves active events for a specific chat.
-    pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<ParsedEvent>> {
+    pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
@@ -466,8 +466,8 @@ impl EventStorage {
         })
     }
 
-    /// Converts a database row to a ParsedEvent, deserializing all fields.
-    fn row_to_event(row: &rusqlite::Row) -> Result<ParsedEvent> {
+    /// Converts a database row to a EventInfo, deserializing all fields.
+    fn row_to_event(row: &rusqlite::Row) -> Result<EventInfo> {
         let date_str: Option<String> = row.get(2)?;
         let time_str: Option<String> = row.get(3)?;
         let next_str: Option<String> = row.get(7)?;
@@ -502,7 +502,7 @@ impl EventStorage {
         let monthly_str: Option<String> = row.get(15)?;
         let monthly_pattern = monthly_str.and_then(|s| deserialize_monthly_pattern(&s));
 
-        Ok(ParsedEvent {
+        Ok(EventInfo {
             id: row.get(0)?,
             chat_id: row.get(1)?,
             date,
@@ -525,7 +525,7 @@ impl EventStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, Repetition, TimeUnit};
+    use crate::parser::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit};
 
     fn ensure_chat(storage: &EventStorage, chat_id: i64) {
         storage
@@ -544,8 +544,8 @@ mod tests {
         storage.insert_message(None, chat_id, "test").unwrap()
     }
 
-    fn make_event(message: &str) -> ParsedEvent {
-        ParsedEvent {
+    fn make_event(message: &str) -> EventInfo {
+        EventInfo {
             id: 0,
             chat_id: 0,
             date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),

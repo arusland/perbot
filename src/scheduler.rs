@@ -1,25 +1,25 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 
-use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, TimeUnit};
+use crate::parser::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
 
 /// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
 /// future datetime can be determined, otherwise `active = false` and
 /// `next_datetime = None`.
-pub fn calc_next(event: ParsedEvent) -> ParsedEvent {
+pub fn calc_next(event: EventInfo) -> EventInfo {
     calc_next_at(event, Local::now().naive_local())
 }
 
-pub fn calc_next_at(event: ParsedEvent, now: NaiveDateTime) -> ParsedEvent {
+pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
     let next_datetime = calculate_next_datetime(&event, now);
-    ParsedEvent {
+    EventInfo {
         active: next_datetime.is_some(),
         next_datetime,
         ..event
     }
 }
 
-fn calculate_next_datetime(event: &ParsedEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<NaiveDateTime> {
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
         let hour = if h == 24 { 0 } else { h };
@@ -237,11 +237,11 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: TimeUnit) -> Option<NaiveD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, TimeUnit};
+    use crate::parser::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
     use std::collections::HashSet;
 
-    fn make_play_event() -> ParsedEvent {
-        ParsedEvent {
+    fn make_play_event() -> EventInfo {
+        EventInfo {
             id: 0,
             chat_id: 0,
             date: None,

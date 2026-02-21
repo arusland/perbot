@@ -4,7 +4,7 @@
 * This document contains several tables with test cases
 * First column contains current time in format YYYY-MM-DD HH:MM:SS
 * Second column is actor's type: USER or SYSTEM
-* When actor is USER, third column contains user's input in chat like "12:45 call Poly", test framework should parse it as ParsedEvent and than map it to StoredEvent (now it's current StoredEvent)
+* When actor is USER, third column contains user's input in chat like "12:45 call Poly", test framework should parse it as EventInfo and than map it to StoredEvent (now it's current StoredEvent)
 * When actor is SYSTEM, test framework call function storage::play_at with current StoredEvent and current time from first column. Now returned value is new current StoredEvent. And current event's next_datetime must be equals to the time in third column (format YYYY-MM-DD HH:MM:SS). If after call play_at new StoredEvent.active==false then third column must be NONE.
 
 ## Cases

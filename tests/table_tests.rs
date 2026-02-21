@@ -108,11 +108,11 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 }
 
 /// Execute a single table: walk the rows in order, maintaining a "current
-/// ParsedEvent" that is updated by USER rows (parse) and SYSTEM rows
+/// EventInfo" that is updated by USER rows (parse) and SYSTEM rows
 /// (calc_next_at, then assert next_datetime or active==false for NONE).
 /// Collects all failures before panicking so every failing row is shown.
 fn run_table(table_idx: usize, table: &Table) {
-    let mut current_event: Option<parser::ParsedEvent> = None;
+    let mut current_event: Option<parser::EventInfo> = None;
     // (step, detail_message, actual_value_for_arrow)
     let mut failures: Vec<(usize, String, String)> = Vec::new();
 

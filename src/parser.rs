@@ -35,7 +35,7 @@ pub enum MonthlyPattern {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParsedEvent {
+pub struct EventInfo {
     /// "26.11", "31.12.2027"
     pub date: Option<NaiveDate>,
     /// "13:23", "5:24 PM"
@@ -194,7 +194,7 @@ pub fn unit_from_str(s: &str) -> Option<TimeUnit> {
     }
 }
 
-pub fn parse(input: &str) -> Option<ParsedEvent> {
+pub fn parse(input: &str) -> Option<EventInfo> {
     let mut remaining = input.to_string();
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
@@ -349,7 +349,7 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         return None;
     }
 
-    Some(ParsedEvent {
+    Some(EventInfo {
         date,
         time,
         year_explicit,
