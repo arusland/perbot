@@ -4,7 +4,7 @@ use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, TimeUnit};
 use crate::storage::StoredEvent;
 
 /// Converts a `ParsedEvent` into a `StoredEvent` ready for persistence.
-/// Does not calculate datetimes — call `storage::play` on the result to
+/// Does not calculate datetimes — call `scheduler::calc_next` on the result to
 /// compute `next_datetime` and set `active`.
 pub fn map(event: ParsedEvent, chat_id: i64, message_id: i64) -> StoredEvent {
     let now = Local::now().naive_local();
