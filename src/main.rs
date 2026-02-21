@@ -12,7 +12,7 @@ async fn main() {
     let bot = Bot::from_env();
 
     let storage = Arc::new(Mutex::new(
-        EventStorage::open("events.db").expect("Failed to open database"),
+        EventStorage::open("perbot.db").expect("Failed to open database"),
     ));
 
     // Load and reschedule pending events from storage
