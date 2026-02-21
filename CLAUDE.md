@@ -11,9 +11,8 @@ Perbot is a Telegram reminder bot written in Rust. Users send messages containin
 ```bash
 cargo build                    # Debug build
 cargo build --release          # Release build
-cargo test                     # Run all tests (across parser, mapper, storage, and scheduler)
+cargo test                     # Run all tests (across parser, storage, and scheduler)
 cargo test parser::tests       # Run only parser tests
-cargo test mapper::tests       # Run only mapper tests
 cargo test storage::tests      # Run only storage tests
 cargo test scheduler::tests    # Run only scheduler tests
 cargo test <test_name>         # Run a single test by name
@@ -27,17 +26,15 @@ cargo test <test_name>         # Run a single test by name
 
 ## Architecture
 
-Five source files in `src/`:
+Four source files in `src/`:
 
-- **main.rs** — Bot entry point. Initializes teloxide REPL, loads pending events from SQLite on startup and reschedules them via `schedule_event`. Handles incoming messages: every text message is stored via `storage.insert_message` (capturing user_id and chat_id) to obtain a `msg_id`. Then parses with `parser::parse`, maps with `mapper::map`, computes datetime with `scheduler::calc_next`, sets `msg_id` on the event, saves via `storage.insert_event`, then calls `schedule_event`. `schedule_event` spawns a delayed task that sends the message, calls `calc_next` again after sending to compute the next occurrence, saves the result via `update_schedule`, and re-spawns itself if the event is still active. All responses use MarkdownV2 parse mode (escaped via `escape_markdown`). Storage is shared as `Arc<Mutex<EventStorage>>`.
+- **main.rs** — Bot entry point. Initializes teloxide REPL, loads pending events from SQLite on startup and reschedules them via `schedule_event`. Handles incoming messages: every text message is stored via `storage.insert_message` (capturing user_id and chat_id) to obtain a `msg_id`. Then parses with `parser::parse`, sets `chat_id` and `msg_id` directly on the `ParsedEvent`, computes datetime with `scheduler::calc_next`, saves via `storage.insert_event`, then calls `schedule_event`. `schedule_event` spawns a delayed task that sends the message, calls `calc_next` again after sending to compute the next occurrence, saves the result via `update_schedule`, and re-spawns itself if the event is still active. All responses use MarkdownV2 parse mode (escaped via `escape_markdown`). Storage is shared as `Arc<Mutex<EventStorage>>`.
 
-- **parser.rs** — Stateless datetime extraction. `parse(text) -> Option<ParsedEvent>` uses regex to extract time from the beginning of a message; remainder becomes the event message.
+- **parser.rs** — Stateless datetime extraction. `parse(text) -> Option<ParsedEvent>` uses regex to extract time from the beginning of a message; remainder becomes the event message. `ParsedEvent` carries both the parsed datetime fields (rich types: `HashSet<Weekday>`, `Repetition`, `MonthlyPattern`, etc.) and DB-tracking fields (`id`, `chat_id`, `active`, `next_datetime`, `created_at`, `msg_id`) defaulted to zero/false/None by `parse()`.
 
-- **mapper.rs** — Pure field mapper. `map(ParsedEvent, chat_id) -> StoredEvent` serializes all fields (days, repetition, offset, monthly pattern) into their storage string representations. Sets `active = false` and `next_datetime = None` — call `scheduler::calc_next` on the result to compute the actual schedule.
+- **scheduler.rs** — Pure datetime computation. `calc_next(ParsedEvent) -> ParsedEvent` and `calc_next_at(ParsedEvent, NaiveDateTime) -> ParsedEvent` calculate the next occurrence directly from `ParsedEvent`'s rich-typed fields and return the event with `active` and `next_datetime` set. Contains all related helpers: `calculate_next_datetime`, weekday utilities, monthly pattern logic, and `advance_by`.
 
-- **scheduler.rs** — Pure datetime computation. `calc_next(StoredEvent) -> StoredEvent` and `calc_next_at(StoredEvent, NaiveDateTime) -> StoredEvent` calculate the next occurrence from a stored event's fields and return the event with `active` and `next_datetime` set. Contains all related helpers: `calculate_next_datetime`, weekday utilities, monthly pattern logic, and `advance_by`.
-
-- **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages three tables: `chats` (id, chat_type, title, username, first_name, last_name, updated_at), `messages` (id, user_id, chat_id, created_at, message), and `events` (id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id). `msg_id` in events is a nullable foreign key referencing `messages(id)`. Provides `open(path)` for file-backed DB and `open_in_memory()` for tests. `insert_message(user_id, chat_id, message)` stores every incoming user message and returns its ID. `insert_event(&StoredEvent)` persists an event. `update_schedule(id, active, next_datetime)` updates the schedule after each fire.
+- **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages three tables: `chats` (id, chat_type, title, username, first_name, last_name, updated_at), `messages` (id, user_id, chat_id, created_at, message), and `events` (id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id). `msg_id` in events is a nullable foreign key referencing `messages(id)`. Provides `open(path)` for file-backed DB and `open_in_memory()` for tests. `insert_message(user_id, chat_id, message)` stores every incoming user message and returns its ID. `insert_event(&ParsedEvent)` serializes rich types to DB strings internally and persists the event. `update_schedule(id, active, next_datetime)` updates the schedule after each fire. `get_pending()` and other getters deserialize DB rows back into `ParsedEvent` values.
 
 ## Test Cases
 

@@ -1,25 +1,25 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 
-use crate::storage::StoredEvent;
+use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, TimeUnit};
 
-/// Calculates the next occurrence datetime for a stored event and returns the
+/// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
 /// future datetime can be determined, otherwise `active = false` and
 /// `next_datetime = None`.
-pub fn calc_next(event: StoredEvent) -> StoredEvent {
+pub fn calc_next(event: ParsedEvent) -> ParsedEvent {
     calc_next_at(event, Local::now().naive_local())
 }
 
-pub fn calc_next_at(event: StoredEvent, now: NaiveDateTime) -> StoredEvent {
+pub fn calc_next_at(event: ParsedEvent, now: NaiveDateTime) -> ParsedEvent {
     let next_datetime = calculate_next_datetime(&event, now);
-    StoredEvent {
+    ParsedEvent {
         active: next_datetime.is_some(),
         next_datetime,
         ..event
     }
 }
 
-fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn calculate_next_datetime(event: &ParsedEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
         let hour = if h == 24 { 0 } else { h };
@@ -34,29 +34,28 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
         };
     }
 
-    // Handle relative offset (e.g., in_offset=8, in_offset_unit="minutes")
-    if let (Some(value), Some(unit_str)) = (event.in_offset, event.in_offset_unit.as_deref()) {
-        return match unit_str {
-            "minutes" => Some(now + chrono::Duration::minutes(value as i64)),
-            "hours" => Some(now + chrono::Duration::hours(value as i64)),
-            "days" => Some(now + chrono::Duration::days(value as i64)),
-            "weeks" => Some(now + chrono::Duration::weeks(value as i64)),
-            "months" => {
+    // Handle relative offset (e.g., in_offset=Some((8, TimeUnit::Minutes)))
+    if let Some((value, unit)) = event.in_offset {
+        return match unit {
+            TimeUnit::Minutes => Some(now + chrono::Duration::minutes(value as i64)),
+            TimeUnit::Hours => Some(now + chrono::Duration::hours(value as i64)),
+            TimeUnit::Days => Some(now + chrono::Duration::days(value as i64)),
+            TimeUnit::Weeks => Some(now + chrono::Duration::weeks(value as i64)),
+            TimeUnit::Months => {
                 let new_date = now.date().checked_add_months(chrono::Months::new(value))?;
                 Some(new_date.and_time(now.time()))
             }
-            "years" => {
+            TimeUnit::Years => {
                 let new_date = now
                     .date()
                     .checked_add_months(chrono::Months::new(value * 12))?;
                 Some(new_date.and_time(now.time()))
             }
-            _ => None,
         };
     }
 
-    // Handle monthly pattern (e.g., "first_sun", "last_mon", "last_day")
-    if let Some(ref pattern_str) = event.monthly_pattern {
+    // Handle monthly pattern (e.g., OrdinalWeekday(First, Sun), LastDay)
+    if let Some(ref pattern) = event.monthly_pattern {
         let time = event
             .time
             .unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -65,16 +64,22 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
         let mut month = today.month();
 
         for _ in 0..3 {
-            let target_date = if pattern_str == "last_day" {
-                last_day_of_month_date(year, month)
-            } else if let Some((n, weekday)) = parse_ordinal_weekday(pattern_str) {
-                if n == 0 {
-                    last_weekday_of_month(year, month, weekday)
-                } else {
-                    nth_weekday_of_month(year, month, weekday, n)
+            let target_date = match pattern {
+                MonthlyPattern::LastDay => last_day_of_month_date(year, month),
+                MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                    let n = match ord {
+                        Ordinal::First => 1,
+                        Ordinal::Second => 2,
+                        Ordinal::Third => 3,
+                        Ordinal::Fourth => 4,
+                        Ordinal::Last => 0,
+                    };
+                    if n == 0 {
+                        last_weekday_of_month(year, month, *wd)
+                    } else {
+                        nth_weekday_of_month(year, month, *wd, n)
+                    }
                 }
-            } else {
-                None
             };
 
             if let Some(d) = target_date {
@@ -99,14 +104,10 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
                 Some(dt)
             } else if event.year_explicit {
                 // Explicit year: one-shot unless a repeat interval is set
-                if let (Some(base), Some(interval), Some(unit_str)) = (
-                    event.next_datetime,
-                    event.repeat_interval,
-                    event.repeat_unit.as_deref(),
-                ) {
+                if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
                     let mut next = base;
                     while next <= now {
-                        next = advance_by(next, interval, unit_str)?;
+                        next = advance_by(next, rep.interval, rep.unit)?;
                     }
                     Some(next)
                 } else {
@@ -121,22 +122,15 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
         (Some(t), None) => {
             // One-shot event (no repetition): if already scheduled and the time
             // has now passed, it has fired and should not repeat.
-            if event.next_datetime.is_some()
-                && event.repeat_interval.is_none()
-                && event.days.is_none()
-            {
+            if event.next_datetime.is_some() && event.repetition.is_none() && event.days.is_none() {
                 return None;
             }
             // Repeating event: advance from the previously scheduled datetime by
             // the repeat interval until a future datetime is found.
-            if let (Some(base), Some(interval), Some(unit_str)) = (
-                event.next_datetime,
-                event.repeat_interval,
-                event.repeat_unit.as_deref(),
-            ) {
+            if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
                 let mut next = base;
                 while next <= now {
-                    next = advance_by(next, interval, unit_str)?;
+                    next = advance_by(next, rep.interval, rep.unit)?;
                 }
                 return Some(next);
             }
@@ -166,12 +160,11 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
     }?;
 
     // If days-of-week restriction is set, advance to the next allowed day
-    if let Some(ref days_str) = event.days {
-        let allowed: Vec<Weekday> = days_str.split(',').filter_map(str_to_weekday).collect();
+    if let Some(ref days) = event.days {
         let time = dt.time();
         let mut candidate = dt.date();
         for _ in 0..7 {
-            if allowed.contains(&candidate.weekday()) && candidate.and_time(time) > now {
+            if days.contains(&candidate.weekday()) && candidate.and_time(time) > now {
                 return Some(candidate.and_time(time));
             }
             candidate = candidate.succ_opt()?;
@@ -180,34 +173,6 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
     } else {
         Some(dt)
     }
-}
-
-fn str_to_weekday(s: &str) -> Option<Weekday> {
-    match s {
-        "mon" => Some(Weekday::Mon),
-        "tue" => Some(Weekday::Tue),
-        "wed" => Some(Weekday::Wed),
-        "thu" => Some(Weekday::Thu),
-        "fri" => Some(Weekday::Fri),
-        "sat" => Some(Weekday::Sat),
-        "sun" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
-
-/// Parses a stored ordinal-weekday pattern like "first_sun" or "last_mon".
-/// Returns `(n, weekday)` where `n = 0` means "last occurrence".
-fn parse_ordinal_weekday(s: &str) -> Option<(u32, Weekday)> {
-    let (ord_str, wd_str) = s.split_once('_')?;
-    let n = match ord_str {
-        "first" => 1,
-        "second" => 2,
-        "third" => 3,
-        "fourth" => 4,
-        "last" => 0,
-        _ => return None,
-    };
-    Some((n, str_to_weekday(wd_str)?))
 }
 
 fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Option<NaiveDate> {
@@ -248,34 +213,35 @@ fn next_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
-fn advance_by(dt: NaiveDateTime, interval: u32, unit: &str) -> Option<NaiveDateTime> {
+fn advance_by(dt: NaiveDateTime, interval: u32, unit: TimeUnit) -> Option<NaiveDateTime> {
     match unit {
-        "minutes" => Some(dt + chrono::Duration::minutes(interval as i64)),
-        "hours" => Some(dt + chrono::Duration::hours(interval as i64)),
-        "days" => Some(dt + chrono::Duration::days(interval as i64)),
-        "weeks" => Some(dt + chrono::Duration::weeks(interval as i64)),
-        "months" => {
+        TimeUnit::Minutes => Some(dt + chrono::Duration::minutes(interval as i64)),
+        TimeUnit::Hours => Some(dt + chrono::Duration::hours(interval as i64)),
+        TimeUnit::Days => Some(dt + chrono::Duration::days(interval as i64)),
+        TimeUnit::Weeks => Some(dt + chrono::Duration::weeks(interval as i64)),
+        TimeUnit::Months => {
             let new_date = dt
                 .date()
                 .checked_add_months(chrono::Months::new(interval))?;
             Some(new_date.and_time(dt.time()))
         }
-        "years" => {
+        TimeUnit::Years => {
             let new_date = dt
                 .date()
                 .checked_add_months(chrono::Months::new(interval * 12))?;
             Some(new_date.and_time(dt.time()))
         }
-        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, TimeUnit};
+    use std::collections::HashSet;
 
-    fn make_play_event() -> StoredEvent {
-        StoredEvent {
+    fn make_play_event() -> ParsedEvent {
+        ParsedEvent {
             id: 0,
             chat_id: 0,
             date: None,
@@ -289,10 +255,8 @@ mod tests {
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
             ),
-            repeat_interval: None,
-            repeat_unit: None,
+            repetition: None,
             in_offset: None,
-            in_offset_unit: None,
             bare_hour: None,
             monthly_pattern: None,
             msg_id: 0,
@@ -341,19 +305,10 @@ mod tests {
         let now = Local::now().naive_local();
         let today = now.date();
         let target_day = today.weekday().succ();
-        let day_str = match target_day {
-            Weekday::Mon => "mon",
-            Weekday::Tue => "tue",
-            Weekday::Wed => "wed",
-            Weekday::Thu => "thu",
-            Weekday::Fri => "fri",
-            Weekday::Sat => "sat",
-            Weekday::Sun => "sun",
-        };
 
         let mut event = make_play_event();
         event.time = Some(t);
-        event.days = Some(day_str.to_string());
+        event.days = Some(HashSet::from([target_day]));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -365,8 +320,7 @@ mod tests {
     fn play_in_offset_minutes() {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
-        event.in_offset = Some(10);
-        event.in_offset_unit = Some("minutes".to_string());
+        event.in_offset = Some((10, TimeUnit::Minutes));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -378,8 +332,7 @@ mod tests {
     fn play_in_offset_hours() {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
-        event.in_offset = Some(2);
-        event.in_offset_unit = Some("hours".to_string());
+        event.in_offset = Some((2, TimeUnit::Hours));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -392,7 +345,7 @@ mod tests {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
-        event.monthly_pattern = Some("first_sun".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -406,7 +359,7 @@ mod tests {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
-        event.monthly_pattern = Some("last_mon".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -421,7 +374,7 @@ mod tests {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap());
-        event.monthly_pattern = Some("last_day".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::LastDay);
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -434,7 +387,10 @@ mod tests {
     fn play_monthly_no_time_uses_midnight() {
         let now = Local::now().naive_local();
         let mut event = make_play_event();
-        event.monthly_pattern = Some("second_wed".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Second,
+            Weekday::Wed,
+        ));
         let result = calc_next(event);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();

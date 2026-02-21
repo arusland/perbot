@@ -1,5 +1,6 @@
-use perbot::storage::{ChatInfo, ChatType, EventStorage, StoredEvent};
-use perbot::{mapper, parser, scheduler};
+use perbot::parser::ParsedEvent;
+use perbot::storage::{ChatInfo, ChatType, EventStorage};
+use perbot::{parser, scheduler};
 use std::process;
 use std::sync::{Arc, Mutex};
 use teloxide::{prelude::*, types::ParseMode};
@@ -89,7 +90,10 @@ async fn main() {
                 }
 
                 if let Some(parsed) = parser::parse(text) {
-                    let stored = scheduler::calc_next(mapper::map(parsed, msg.chat.id.0, msg_id));
+                    let mut event = parsed;
+                    event.chat_id = msg.chat.id.0;
+                    event.msg_id = msg_id;
+                    let stored = scheduler::calc_next(event);
 
                     // Save event to storage
                     let event_id = {
@@ -161,7 +165,7 @@ async fn main() {
 /// Spawns a delayed task that sends the event message when due, then calls
 /// `calc_next` to compute the next occurrence and saves the result to the database.
 /// If the event is still active after `calc_next`, a new task is spawned recursively.
-fn schedule_event(bot: Bot, event_id: i64, event: StoredEvent, storage: Arc<Mutex<EventStorage>>) {
+fn schedule_event(bot: Bot, event_id: i64, event: ParsedEvent, storage: Arc<Mutex<EventStorage>>) {
     let Some(dt) = event.next_datetime else {
         return;
     };

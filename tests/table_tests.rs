@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use perbot::{mapper, parser, scheduler, storage};
+use perbot::{parser, scheduler};
 
 struct TableRow {
     ts: NaiveDateTime,
@@ -108,18 +108,18 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 }
 
 /// Execute a single table: walk the rows in order, maintaining a "current
-/// StoredEvent" that is updated by USER rows (parse + map) and SYSTEM rows
+/// ParsedEvent" that is updated by USER rows (parse) and SYSTEM rows
 /// (calc_next_at, then assert next_datetime or active==false for NONE).
 /// Collects all failures before panicking so every failing row is shown.
 fn run_table(table_idx: usize, table: &Table) {
-    let mut current_event: Option<storage::StoredEvent> = None;
+    let mut current_event: Option<parser::ParsedEvent> = None;
     // (step, detail_message, actual_value_for_arrow)
     let mut failures: Vec<(usize, String, String)> = Vec::new();
 
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
             "USER" => match parser::parse(&row.value) {
-                Some(parsed) => current_event = Some(mapper::map(parsed, 0, 0)),
+                Some(parsed) => current_event = Some(parsed),
                 None => {
                     failures.push((
                         step,

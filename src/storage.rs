@@ -1,28 +1,11 @@
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use rusqlite::{params, Connection, Result};
+use std::collections::HashSet;
 use std::path::Path;
 
-/// A stored event with database metadata.
-#[derive(Debug, Clone)]
-pub struct StoredEvent {
-    pub id: i64,
-    pub chat_id: i64,
-    pub date: Option<NaiveDate>,
-    pub time: Option<NaiveTime>,
-    pub year_explicit: bool,
-    pub days: Option<String>,
-    pub message: String,
-    pub active: bool,
-    pub next_datetime: Option<NaiveDateTime>,
-    pub created_at: NaiveDateTime,
-    pub repeat_interval: Option<u32>,
-    pub repeat_unit: Option<String>,
-    pub in_offset: Option<u32>,
-    pub in_offset_unit: Option<String>,
-    pub bare_hour: Option<u32>,
-    pub monthly_pattern: Option<String>,
-    pub msg_id: i64,
-}
+use crate::parser::{
+    parse_days, unit_from_str, MonthlyPattern, Ordinal, ParsedEvent, Repetition, TimeUnit,
+};
 
 /// A stored user message.
 #[derive(Debug, Clone)]
@@ -86,6 +69,79 @@ pub struct ChatInfo {
     pub username: Option<String>,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+}
+
+// --- Private serialization helpers ---
+
+fn serialize_days(days: &HashSet<Weekday>) -> String {
+    let order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let weekday_to_str = |d: &Weekday| match d {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
+    };
+    let mut day_strs: Vec<&str> = days.iter().map(weekday_to_str).collect();
+    day_strs.sort_by_key(|d| order.iter().position(|o| o == d).unwrap_or(7));
+    day_strs.join(",")
+}
+
+fn serialize_time_unit(unit: TimeUnit) -> &'static str {
+    match unit {
+        TimeUnit::Minutes => "minutes",
+        TimeUnit::Hours => "hours",
+        TimeUnit::Days => "days",
+        TimeUnit::Weeks => "weeks",
+        TimeUnit::Months => "months",
+        TimeUnit::Years => "years",
+    }
+}
+
+fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
+    match p {
+        MonthlyPattern::OrdinalWeekday(ord, wd) => {
+            let ord_str = match ord {
+                Ordinal::First => "first",
+                Ordinal::Second => "second",
+                Ordinal::Third => "third",
+                Ordinal::Fourth => "fourth",
+                Ordinal::Last => "last",
+            };
+            let wd_str = match wd {
+                Weekday::Mon => "mon",
+                Weekday::Tue => "tue",
+                Weekday::Wed => "wed",
+                Weekday::Thu => "thu",
+                Weekday::Fri => "fri",
+                Weekday::Sat => "sat",
+                Weekday::Sun => "sun",
+            };
+            format!("{}_{}", ord_str, wd_str)
+        }
+        MonthlyPattern::LastDay => "last_day".to_string(),
+    }
+}
+
+// --- Private deserialization helpers ---
+
+fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
+    if s == "last_day" {
+        return Some(MonthlyPattern::LastDay);
+    }
+    let (ord_str, wd_str) = s.split_once('_')?;
+    let ord = match ord_str {
+        "first" => Ordinal::First,
+        "second" => Ordinal::Second,
+        "third" => Ordinal::Third,
+        "fourth" => Ordinal::Fourth,
+        "last" => Ordinal::Last,
+        _ => return None,
+    };
+    let wd = parse_days(wd_str)?.into_iter().next()?;
+    Some(MonthlyPattern::OrdinalWeekday(ord, wd))
 }
 
 /// SQLite-based storage for parsed events.
@@ -181,13 +237,29 @@ impl EventStorage {
         Ok(())
     }
 
-    /// Inserts a new event into the database from a mapped `StoredEvent`.
-    pub fn insert_event(&self, event: &StoredEvent) -> Result<i64> {
+    /// Inserts a new event into the database from a `ParsedEvent`.
+    pub fn insert_event(&self, event: &ParsedEvent) -> Result<i64> {
         let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
         let time_str = event.time.map(|t| t.format("%H:%M:%S").to_string());
         let next_str = event
             .next_datetime
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        let days_str = event.days.as_ref().map(|d| serialize_days(d));
+        let (repeat_interval, repeat_unit) = match &event.repetition {
+            Some(rep) => (
+                Some(rep.interval),
+                Some(serialize_time_unit(rep.unit).to_string()),
+            ),
+            None => (None, None),
+        };
+        let (in_offset_val, in_offset_unit) = match event.in_offset {
+            Some((v, u)) => (Some(v), Some(serialize_time_unit(u).to_string())),
+            None => (None, None),
+        };
+        let monthly_str = event
+            .monthly_pattern
+            .as_ref()
+            .map(serialize_monthly_pattern);
 
         self.conn.execute(
             "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id)
@@ -200,13 +272,13 @@ impl EventStorage {
                 event.message,
                 event.active as i32,
                 next_str,
-                event.days,
-                event.repeat_interval,
-                event.repeat_unit,
-                event.in_offset,
-                event.in_offset_unit,
+                days_str,
+                repeat_interval,
+                repeat_unit,
+                in_offset_val,
+                in_offset_unit,
                 event.bare_hour,
-                event.monthly_pattern,
+                monthly_str,
                 event.msg_id,
             ],
         )?;
@@ -215,7 +287,7 @@ impl EventStorage {
     }
 
     /// Retrieves an event by its ID.
-    pub fn get(&self, id: i64) -> Result<Option<StoredEvent>> {
+    pub fn get(&self, id: i64) -> Result<Option<ParsedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE id = ?1",
@@ -231,7 +303,7 @@ impl EventStorage {
     }
 
     /// Retrieves all events for a given chat.
-    pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
+    pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<ParsedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
@@ -243,7 +315,7 @@ impl EventStorage {
     }
 
     /// Retrieves all active (pending) events.
-    pub fn get_pending(&self) -> Result<Vec<StoredEvent>> {
+    pub fn get_pending(&self) -> Result<Vec<ParsedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
@@ -255,7 +327,7 @@ impl EventStorage {
     }
 
     /// Retrieves active events for a specific chat.
-    pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<StoredEvent>> {
+    pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<ParsedEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
@@ -394,15 +466,12 @@ impl EventStorage {
         })
     }
 
-    /// Converts a database row to a StoredEvent.
-    fn row_to_event(row: &rusqlite::Row) -> Result<StoredEvent> {
+    /// Converts a database row to a ParsedEvent, deserializing all fields.
+    fn row_to_event(row: &rusqlite::Row) -> Result<ParsedEvent> {
         let date_str: Option<String> = row.get(2)?;
         let time_str: Option<String> = row.get(3)?;
         let next_str: Option<String> = row.get(7)?;
         let created_str: String = row.get(8)?;
-        let days: Option<String> = row.get(9)?;
-        let repeat_interval: Option<u32> = row.get(10)?;
-        let repeat_unit: Option<String> = row.get(11)?;
 
         let date = date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
         let time = time_str.and_then(|s| NaiveTime::parse_from_str(&s, "%H:%M:%S").ok());
@@ -410,30 +479,45 @@ impl EventStorage {
             next_str.and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok());
         let created_at = NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").unwrap();
 
-        let in_offset: Option<u32> = row.get(12)?;
-        let in_offset_unit: Option<String> = row.get(13)?;
-        let bare_hour: Option<u32> = row.get(14)?;
-        let monthly_pattern: Option<String> = row.get(15)?;
-        let msg_id: i64 = row.get(16)?;
+        let days_str: Option<String> = row.get(9)?;
+        let days = days_str.and_then(|s| parse_days(&s));
 
-        Ok(StoredEvent {
+        let repeat_interval: Option<u32> = row.get(10)?;
+        let repeat_unit_str: Option<String> = row.get(11)?;
+        let repetition = match (repeat_interval, repeat_unit_str) {
+            (Some(interval), Some(unit_str)) => {
+                unit_from_str(&unit_str).map(|unit| Repetition { interval, unit })
+            }
+            _ => None,
+        };
+
+        let in_offset_val: Option<u32> = row.get(12)?;
+        let in_offset_unit_str: Option<String> = row.get(13)?;
+        let in_offset = match (in_offset_val, in_offset_unit_str) {
+            (Some(v), Some(u)) => unit_from_str(&u).map(|unit| (v, unit)),
+            _ => None,
+        };
+
+        let bare_hour: Option<u32> = row.get(14)?;
+        let monthly_str: Option<String> = row.get(15)?;
+        let monthly_pattern = monthly_str.and_then(|s| deserialize_monthly_pattern(&s));
+
+        Ok(ParsedEvent {
             id: row.get(0)?,
             chat_id: row.get(1)?,
             date,
             time,
             year_explicit: row.get::<_, i32>(4)? != 0,
-            days,
             message: row.get(5)?,
             active: row.get::<_, i32>(6)? != 0,
             next_datetime,
             created_at,
-            repeat_interval,
-            repeat_unit,
+            days,
+            repetition,
             in_offset,
-            in_offset_unit,
             bare_hour,
             monthly_pattern,
-            msg_id,
+            msg_id: row.get(16)?,
         })
     }
 }
@@ -441,6 +525,7 @@ impl EventStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::{MonthlyPattern, Ordinal, ParsedEvent, Repetition, TimeUnit};
 
     fn ensure_chat(storage: &EventStorage, chat_id: i64) {
         storage
@@ -459,8 +544,8 @@ mod tests {
         storage.insert_message(None, chat_id, "test").unwrap()
     }
 
-    fn make_stored_event(message: &str) -> StoredEvent {
-        StoredEvent {
+    fn make_event(message: &str) -> ParsedEvent {
+        ParsedEvent {
             id: 0,
             chat_id: 0,
             date: Some(NaiveDate::from_ymd_opt(2027, 12, 31).unwrap()),
@@ -477,10 +562,8 @@ mod tests {
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
             ),
-            repeat_interval: None,
-            repeat_unit: None,
+            repetition: None,
             in_offset: None,
-            in_offset_unit: None,
             bare_hour: None,
             monthly_pattern: None,
             msg_id: 0,
@@ -491,7 +574,7 @@ mod tests {
     fn test_insert_and_get() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 12345);
-        let mut event = make_stored_event("test message");
+        let mut event = make_event("test message");
         event.chat_id = 12345;
         event.msg_id = ensure_message(&storage, 12345);
 
@@ -514,13 +597,13 @@ mod tests {
         ensure_chat(&storage, 222);
         let msg_id_111 = ensure_message(&storage, 111);
         let msg_id_222 = ensure_message(&storage, 222);
-        let mut event1 = make_stored_event("event 1");
+        let mut event1 = make_event("event 1");
         event1.chat_id = 111;
         event1.msg_id = msg_id_111;
-        let mut event2 = make_stored_event("event 2");
+        let mut event2 = make_event("event 2");
         event2.chat_id = 111;
         event2.msg_id = msg_id_111;
-        let mut event3 = make_stored_event("event 1");
+        let mut event3 = make_event("event 1");
         event3.chat_id = 222;
         event3.msg_id = msg_id_222;
 
@@ -539,7 +622,7 @@ mod tests {
     fn test_mark_inactive() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("deactivate me");
+        let mut event = make_event("deactivate me");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -558,7 +641,7 @@ mod tests {
     fn test_get_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("pending");
+        let mut event = make_event("pending");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -576,7 +659,7 @@ mod tests {
     fn test_delete() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("delete me");
+        let mut event = make_event("delete me");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -591,7 +674,7 @@ mod tests {
     fn test_delete_inactive() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("test");
+        let mut event = make_event("test");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -711,10 +794,16 @@ mod tests {
     fn test_days_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 999);
-        let mut event = make_stored_event("weekday meeting");
+        let mut event = make_event("weekday meeting");
         event.chat_id = 999;
         event.msg_id = ensure_message(&storage, 999);
-        event.days = Some("mon,tue,wed,thu,fri".to_string());
+        event.days = Some(HashSet::from([
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+        ]));
         event.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
         event.next_datetime = Some(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
@@ -724,7 +813,16 @@ mod tests {
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
-        assert_eq!(stored.days, Some("mon,tue,wed,thu,fri".to_string()));
+        assert_eq!(
+            stored.days,
+            Some(HashSet::from([
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri,
+            ]))
+        );
         assert_eq!(stored.message, "weekday meeting");
     }
 
@@ -732,7 +830,7 @@ mod tests {
     fn test_days_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 999);
-        let mut event = make_stored_event("no days");
+        let mut event = make_event("no days");
         event.chat_id = 999;
         event.msg_id = ensure_message(&storage, 999);
 
@@ -746,14 +844,16 @@ mod tests {
     fn test_repetition_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("call office");
+        let mut event = make_event("call office");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
         event.date = Some(NaiveDate::from_ymd_opt(2027, 5, 20).unwrap());
         event.time = Some(NaiveTime::from_hms_opt(14, 55, 0).unwrap());
         event.year_explicit = false;
-        event.repeat_interval = Some(2);
-        event.repeat_unit = Some("weeks".to_string());
+        event.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Weeks,
+        });
         event.next_datetime = Some(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 5, 20).unwrap(),
             NaiveTime::from_hms_opt(14, 55, 0).unwrap(),
@@ -762,8 +862,13 @@ mod tests {
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
-        assert_eq!(stored.repeat_interval, Some(2));
-        assert_eq!(stored.repeat_unit, Some("weeks".to_string()));
+        assert_eq!(
+            stored.repetition,
+            Some(Repetition {
+                interval: 2,
+                unit: TimeUnit::Weeks
+            })
+        );
         assert!(stored.active);
     }
 
@@ -771,15 +876,14 @@ mod tests {
     fn test_repetition_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("no repeat");
+        let mut event = make_event("no repeat");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
-        assert_eq!(stored.repeat_interval, None);
-        assert_eq!(stored.repeat_unit, None);
+        assert_eq!(stored.repetition, None);
         assert!(stored.active);
     }
 
@@ -787,7 +891,7 @@ mod tests {
     fn test_inactive_excluded_from_pending() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("pending test");
+        let mut event = make_event("pending test");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -805,13 +909,13 @@ mod tests {
     fn test_monthly_pattern_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("call mom");
+        let mut event = make_event("call mom");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
         event.date = None;
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         event.year_explicit = false;
-        event.monthly_pattern = Some("first_sun".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
         event.next_datetime = Some(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 3, 7).unwrap(),
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
@@ -820,7 +924,10 @@ mod tests {
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
-        assert_eq!(stored.monthly_pattern, Some("first_sun".to_string()));
+        assert_eq!(
+            stored.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+        );
         assert_eq!(stored.message, "call mom");
     }
 
@@ -828,13 +935,13 @@ mod tests {
     fn test_monthly_pattern_last_day_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("pay rent");
+        let mut event = make_event("pay rent");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
         event.date = None;
         event.time = Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap());
         event.year_explicit = false;
-        event.monthly_pattern = Some("last_day".to_string());
+        event.monthly_pattern = Some(MonthlyPattern::LastDay);
         event.next_datetime = Some(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 2, 28).unwrap(),
             NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
@@ -843,14 +950,14 @@ mod tests {
         let id = storage.insert_event(&event).unwrap();
         let stored = storage.get(id).unwrap().unwrap();
 
-        assert_eq!(stored.monthly_pattern, Some("last_day".to_string()));
+        assert_eq!(stored.monthly_pattern, Some(MonthlyPattern::LastDay));
     }
 
     #[test]
     fn test_monthly_pattern_none_round_trip() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_stored_event("no pattern");
+        let mut event = make_event("no pattern");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -866,7 +973,7 @@ mod tests {
         let big_chat_id: i64 = i32::MAX as i64 + 1; // 2_147_483_648
         ensure_chat(&storage, big_chat_id);
 
-        let mut event = make_stored_event("big id test");
+        let mut event = make_event("big id test");
         event.chat_id = big_chat_id;
         event.msg_id = ensure_message(&storage, big_chat_id);
 

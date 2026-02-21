@@ -1,4 +1,4 @@
-use chrono::{Datelike, Local, NaiveDate, NaiveTime, Weekday};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -34,6 +34,7 @@ pub enum MonthlyPattern {
     LastDay,
 }
 
+#[derive(Debug, Clone)]
 pub struct ParsedEvent {
     /// "26.11", "31.12.2027"
     pub date: Option<NaiveDate>,
@@ -53,6 +54,12 @@ pub struct ParsedEvent {
     pub monthly_pattern: Option<MonthlyPattern>,
     /// remainder after extracting all time/date components
     pub message: String,
+    pub id: i64,
+    pub chat_id: i64,
+    pub active: bool,
+    pub next_datetime: Option<NaiveDateTime>,
+    pub created_at: NaiveDateTime,
+    pub msg_id: i64,
 }
 
 static RE_TIME_12H: LazyLock<Regex> =
@@ -175,7 +182,7 @@ pub fn parse_days(s: &str) -> Option<HashSet<Weekday>> {
     }
 }
 
-fn unit_from_str(s: &str) -> Option<TimeUnit> {
+pub fn unit_from_str(s: &str) -> Option<TimeUnit> {
     match s.to_ascii_lowercase().as_str() {
         "min" | "mins" | "minute" | "minutes" => Some(TimeUnit::Minutes),
         "hour" | "hours" => Some(TimeUnit::Hours),
@@ -352,6 +359,12 @@ pub fn parse(input: &str) -> Option<ParsedEvent> {
         bare_hour,
         monthly_pattern,
         message,
+        id: 0,
+        chat_id: 0,
+        active: false,
+        next_datetime: None,
+        created_at: Local::now().naive_local(),
+        msg_id: 0,
     })
 }
 
