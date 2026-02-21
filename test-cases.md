@@ -91,3 +91,20 @@
 | 2026-02-20 23:59:59 | SYSTEM | 2026-02-21 20:00:00            |
 | 2026-02-21 20:00:01 | SYSTEM | 2026-03-21 20:00:00            |
 | 2026-03-21 20:00:01 | SYSTEM | 2026-04-21 20:00:00            |
+
+### Case 11: One-shot with explicit date — fires once on the given date, then deactivates
+
+| Current Time        | Actor  | Input / Expected Next            |
+|---------------------|--------|----------------------------------|
+| 2026-02-21 09:00:00 | USER   | 11:26 12.10.2026 call the office |
+| 2026-02-21 09:00:00 | SYSTEM | 2026-10-12 11:26:00              |
+| 2026-10-12 11:26:01 | SYSTEM | NONE                             |
+
+### Case 12: Explicit date with repetition — fires on the given date, then repeats every 2 weeks
+
+| Current Time        | Actor  | Input / Expected Next                    |
+|---------------------|---------|-----------------------------------------|
+| 2026-02-21 09:00:00 | USER   | 11:26 12.10.2026 every 2 weeks sync team |
+| 2026-02-21 09:00:00 | SYSTEM | 2026-10-12 11:26:00                      |
+| 2026-10-12 11:26:01 | SYSTEM | 2026-10-26 11:26:00                      |
+| 2026-10-26 11:26:01 | SYSTEM | 2026-11-09 11:26:00                      |

@@ -255,7 +255,20 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
             if dt > now {
                 Some(dt)
             } else if event.year_explicit {
-                None
+                // Explicit year: one-shot unless a repeat interval is set
+                if let (Some(base), Some(interval), Some(unit_str)) = (
+                    event.next_datetime,
+                    event.repeat_interval,
+                    event.repeat_unit.as_deref(),
+                ) {
+                    let mut next = base;
+                    while next <= now {
+                        next = advance_by(next, interval, unit_str)?;
+                    }
+                    Some(next)
+                } else {
+                    None
+                }
             } else {
                 // Short date in the past — try next year
                 let next = NaiveDate::from_ymd_opt(d.year() + 1, d.month(), d.day())?;
