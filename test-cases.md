@@ -56,3 +56,38 @@
 | 2026-02-28 13:00:00 | USER   | 12:45 call Poly       |
 | 2026-02-28 13:00:00 | SYSTEM | 2026-03-01 12:45:00   |
 | 2026-03-01 12:45:01 | SYSTEM | NONE                  |
+
+### Case 7: Every 3 days — fires at next 15:30, does not deactivate
+
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 15:30:00            |
+| 2026-02-20 15:30:01 | SYSTEM | 2026-02-23 15:30:00            |
+| 2026-02-23 15:30:01 | SYSTEM | 2026-02-26 15:30:00            |
+
+### Case 8: Every year — fires at next 1:34, does not deactivate
+
+| Current Time        | Actor  | Input / Expected Next       |
+|---------------------|--------|-----------------------------|
+| 2026-02-20 23:59:59 | USER   | 1:34 every year check lease |
+| 2026-02-21 00:00:00 | SYSTEM | 2026-02-21 01:34:00         |
+| 2026-02-21 01:34:01 | SYSTEM | 2027-02-21 01:34:00         |
+
+### Case 9: Every year - fires at next 1:34 next year, does not deactivate
+
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-12-31 23:59:59 | USER   | 1:06 every year happy new year |
+| 2026-12-31 23:59:59 | SYSTEM | 2027-01-01 01:06:00            |
+| 2027-01-01 01:06:01 | SYSTEM | 2028-01-01 01:06:00            |
+| 2028-01-01 01:06:01 | SYSTEM | 2029-01-01 01:06:00            |
+
+### Case 10: every month - fires at next 20:00, does not deactivate
+
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-02-20 23:59:59 | USER   | 20:00 every month run report   |
+| 2026-02-20 23:59:59 | SYSTEM | 2026-02-21 20:00:00            |
+| 2026-02-21 20:00:01 | SYSTEM | 2026-03-21 20:00:00            |
+| 2026-03-21 20:00:01 | SYSTEM | 2026-04-21 20:00:00            |

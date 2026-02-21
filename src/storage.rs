@@ -154,6 +154,26 @@ fn next_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
+fn advance_by(dt: NaiveDateTime, interval: u32, unit: &str) -> Option<NaiveDateTime> {
+    match unit {
+        "minutes" => Some(dt + chrono::Duration::minutes(interval as i64)),
+        "hours" => Some(dt + chrono::Duration::hours(interval as i64)),
+        "days" => Some(dt + chrono::Duration::days(interval as i64)),
+        "weeks" => Some(dt + chrono::Duration::weeks(interval as i64)),
+        "months" => {
+            let new_date = dt.date().checked_add_months(chrono::Months::new(interval))?;
+            Some(new_date.and_time(dt.time()))
+        }
+        "years" => {
+            let new_date = dt
+                .date()
+                .checked_add_months(chrono::Months::new(interval * 12))?;
+            Some(new_date.and_time(dt.time()))
+        }
+        _ => None,
+    }
+}
+
 fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
 
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
@@ -249,6 +269,19 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
                 && event.days.is_none()
             {
                 return None;
+            }
+            // Repeating event: advance from the previously scheduled datetime by
+            // the repeat interval until a future datetime is found.
+            if let (Some(base), Some(interval), Some(unit_str)) = (
+                event.next_datetime,
+                event.repeat_interval,
+                event.repeat_unit.as_deref(),
+            ) {
+                let mut next = base;
+                while next <= now {
+                    next = advance_by(next, interval, unit_str)?;
+                }
+                return Some(next);
             }
             let today = now.date();
             let dt = today.and_time(t);
