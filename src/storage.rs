@@ -242,6 +242,14 @@ fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<Na
             }
         }
         (Some(t), None) => {
+            // One-shot event (no repetition): if already scheduled and the time
+            // has now passed, it has fired and should not repeat.
+            if event.next_datetime.is_some()
+                && event.repeat_interval.is_none()
+                && event.days.is_none()
+            {
+                return None;
+            }
             let today = now.date();
             let dt = today.and_time(t);
             if dt > now {

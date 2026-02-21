@@ -36,6 +36,10 @@ Four source files in `src/`:
 
 - **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages three tables: `chats` (id, chat_type, title, username, first_name, last_name, updated_at), `messages` (id, user_id, chat_id, created_at, message), and `events` (id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id). `msg_id` in events is a nullable foreign key referencing `messages(id)`. Provides `open(path)` for file-backed DB and `open_in_memory()` for tests. `insert_message(user_id, chat_id, message)` stores every incoming user message and returns its ID. `insert_event(&StoredEvent)` persists an event. `update_schedule(id, active, next_datetime)` updates the schedule after each fire. `play(StoredEvent) -> StoredEvent` calculates the next occurrence from the event's stored fields and returns the event with `active` and `next_datetime` set.
 
+## Test Cases
+
+`test-cases.md` in the project root contains markdown tables that drive the integration test in `tests/table_tests.rs`. Each table is a scenario; rows alternate between `USER` actions (a raw chat message to parse and map) and `SYSTEM` actions (call `storage::play_at` with the given timestamp and assert that `next_datetime` equals the expected value, or that the event is inactive when the expected value is `NONE`). To add new scenarios, append new `###` sections with the same table format to `test-cases.md` — no code changes required.
+
 ## Datetime formats supported
 - `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — always at the start of the message.
 - `13:45 mon-fri` — every Monday, Tuesday, Wednesday, Thursday, and Friday at 13:45.
