@@ -161,7 +161,9 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: &str) -> Option<NaiveDateT
         "days" => Some(dt + chrono::Duration::days(interval as i64)),
         "weeks" => Some(dt + chrono::Duration::weeks(interval as i64)),
         "months" => {
-            let new_date = dt.date().checked_add_months(chrono::Months::new(interval))?;
+            let new_date = dt
+                .date()
+                .checked_add_months(chrono::Months::new(interval))?;
             Some(new_date.and_time(dt.time()))
         }
         "years" => {
@@ -175,7 +177,6 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: &str) -> Option<NaiveDateT
 }
 
 fn calculate_next_datetime(event: &StoredEvent, now: NaiveDateTime) -> Option<NaiveDateTime> {
-
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
         let hour = if h == 24 { 0 } else { h };

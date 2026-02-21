@@ -1009,6 +1009,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "perbot"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "log",
+ "pretty_env_logger",
+ "regex",
+ "rusqlite",
+ "teloxide",
+ "tokio",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1556,19 +1569,6 @@ name = "takecell"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20f34339676cdcab560c9a82300c4c2581f68b9369aedf0fae86f2ff9565ff3e"
-
-[[package]]
-name = "telegram_bot"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "log",
- "pretty_env_logger",
- "regex",
- "rusqlite",
- "teloxide",
- "tokio",
-]
 
 [[package]]
 name = "teloxide"

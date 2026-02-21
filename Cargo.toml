@@ -1,5 +1,6 @@
 [package]
-name = "telegram_bot"
+name = "perbot"
+description = "Telegram event scheduler bot"
 version = "0.1.0"
 edition = "2021"
 

@@ -1,5 +1,5 @@
-use telegram_bot::{mapper, parser, storage};
 use chrono::NaiveDateTime;
+use perbot::{mapper, parser, storage};
 
 /// Parse all markdown tables from the given content.
 ///
@@ -90,7 +90,9 @@ fn run_table(table_idx: usize, rows: &[(NaiveDateTime, String, String)]) {
                     assert!(
                         result.next_datetime.is_none(),
                         "Table {}, step {}: expected next_datetime=None, got {:?}",
-                        table_idx, step, result.next_datetime
+                        table_idx,
+                        step,
+                        result.next_datetime
                     );
                 } else {
                     let expected = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
@@ -110,7 +112,10 @@ fn run_table(table_idx: usize, rows: &[(NaiveDateTime, String, String)]) {
                 }
                 current_event = Some(result);
             }
-            other => panic!("Table {}, step {}: unknown actor '{}'", table_idx, step, other),
+            other => panic!(
+                "Table {}, step {}: unknown actor '{}'",
+                table_idx, step, other
+            ),
         }
     }
 }
