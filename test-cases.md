@@ -9,7 +9,7 @@
 
 ## Cases
 
-### Case 1: Future today — event fires later the same day
+### Case 1: Future today — event fires once
 
 | Current Time        | Actor  | Input / Expected Next |
 |---------------------|--------|-----------------------|
@@ -23,6 +23,7 @@
 |---------------------|--------|-----------------------|
 | 2026-02-20 14:00:00 | USER   | 12:45 call Poly       |
 | 2026-02-20 14:00:00 | SYSTEM | 2026-02-21 12:45:00   |
+| 2026-02-21 12:45:01 | SYSTEM | NONE                  |
 
 ### Case 3: Exact time — 12:45:00 equals now, not strictly future, fires next day
 
@@ -30,6 +31,7 @@
 |---------------------|--------|-----------------------|
 | 2026-02-20 12:45:00 | USER   | 12:45 call Poly       |
 | 2026-02-20 12:45:00 | SYSTEM | 2026-02-21 12:45:00   |
+| 2026-02-21 12:45:01 | SYSTEM | NONE                  |
 
 ### Case 4: One second before — barely future, fires today
 
@@ -37,6 +39,7 @@
 |---------------------|--------|-----------------------|
 | 2026-02-20 12:44:59 | USER   | 12:45 call Poly       |
 | 2026-02-20 12:44:59 | SYSTEM | 2026-02-20 12:45:00   |
+| 2026-02-20 12:45:01 | SYSTEM | NONE                  |
 
 ### Case 5: Midnight — fires at 12:45 the same day
 
@@ -44,6 +47,7 @@
 |---------------------|--------|-----------------------|
 | 2026-02-20 00:00:00 | USER   | 12:45 call Poly       |
 | 2026-02-20 00:00:00 | SYSTEM | 2026-02-20 12:45:00   |
+| 2026-02-20 12:45:01 | SYSTEM | NONE                  |
 
 ### Case 6: End of month — fires next day crossing month boundary
 
@@ -51,11 +55,4 @@
 |---------------------|--------|-----------------------|
 | 2026-02-28 13:00:00 | USER   | 12:45 call Poly       |
 | 2026-02-28 13:00:00 | SYSTEM | 2026-03-01 12:45:00   |
-
-### Case 7: Multi-step reschedule — fire at 12:45:01, next occurrence is tomorrow
-
-| Current Time        | Actor  | Input / Expected Next |
-|---------------------|--------|-----------------------|
-| 2026-02-20 10:00:00 | USER   | 12:45 call Poly       |
-| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 12:45:00   |
-| 2026-02-20 12:45:01 | SYSTEM | 2026-02-21 12:45:00   |
+| 2026-03-01 12:45:01 | SYSTEM | NONE                  |
