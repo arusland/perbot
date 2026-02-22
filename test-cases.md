@@ -150,3 +150,42 @@
 | 2027-01-03 13:25:01 | SYSTEM | 2027-01-08 13:25:00                          |
 | 2027-12-31 09:00:01 | SYSTEM | 2027-12-31 13:25:00                          |
 | 2027-12-31 13:25:01 | SYSTEM | NONE                                         |
+
+### Case 17: Bare hour — future today, fires at 08:00 same day
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 07:00:00 | USER   | 8 call Alex           |
+| 2026-02-20 07:00:00 | SYSTEM | 2026-02-20 08:00:00   |
+| 2026-02-20 08:00:01 | SYSTEM | NONE                  |
+
+### Case 18: Bare hour — past today, fires at 08:00 next day
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 09:00:00 | USER   | 8 call Alex           |
+| 2026-02-20 09:00:00 | SYSTEM | 2026-02-21 08:00:00   |
+| 2026-02-21 08:00:01 | SYSTEM | NONE                  |
+
+### Case 19: Bare hour — exact match is not strictly future, fires next day
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 08:00:00 | USER   | 8 call Alex           |
+| 2026-02-20 08:00:00 | SYSTEM | 2026-02-21 08:00:00   |
+| 2026-02-21 08:00:01 | SYSTEM | NONE                  |
+
+### Case 20: Bare hour 24 — treated as 00:00, fires at next midnight
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 10:00:00 | USER   | 24 call Poly          |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-21 00:00:00   |
+| 2026-02-21 00:00:01 | SYSTEM | NONE                  |
+
+### Case 21: Bare hour 25 it's not a valid hour
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 10:00:00 | USER   | 25 call Poly          |
+| 2026-02-20 10:00:00 | SYSTEM | NONE                  |

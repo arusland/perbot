@@ -118,24 +118,20 @@ fn run_table(table_idx: usize, table: &Table) {
 
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
-            "USER" => match parser::parse(&row.value) {
-                Some(parsed) => current_event = Some(parsed),
-                None => {
-                    failures.push((
-                        step,
-                        format!("failed to parse '{}'", row.value),
-                        "None".to_string(),
-                    ));
-                    current_event = None;
-                }
-            },
+            "USER" => {
+                current_event = parser::parse(&row.value);
+            }
             "SYSTEM" => {
                 let event = match current_event.take() {
                     Some(e) => e,
                     None => {
+                        // parse returned None; SYSTEM NONE is the expected outcome
+                        if row.value == "NONE" {
+                            continue;
+                        }
                         failures.push((
                             step,
-                            "SYSTEM row but no current event".to_string(),
+                            format!("no current event (parse failed), expected {}", row.value),
                             String::new(),
                         ));
                         continue;

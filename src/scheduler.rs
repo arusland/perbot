@@ -22,6 +22,10 @@ pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
 fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<NaiveDateTime> {
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
+        // One-shot: already scheduled and no repetition means it has fired
+        if event.next_datetime.is_some() && event.repetition.is_none() {
+            return None;
+        }
         let hour = if h == 24 { 0 } else { h };
         let t = NaiveTime::from_hms_opt(hour, 0, 0)?;
         let today = now.date();
