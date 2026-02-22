@@ -28,6 +28,14 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
         }
         let hour = if h == 24 { 0 } else { h };
         let t = NaiveTime::from_hms_opt(hour, 0, 0)?;
+        // Repeating: advance from the previously scheduled datetime by the interval
+        if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
+            let mut next = base;
+            while next <= now {
+                next = advance_by(next, rep.interval, rep.unit)?;
+            }
+            return Some(next);
+        }
         let today = now.date();
         let dt = today.and_time(t);
         return if dt > now {
