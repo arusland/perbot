@@ -240,5 +240,7 @@ fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
         username,
         first_name,
         last_name,
+        updated_at: None,
+        created_at: None,
     }
 }

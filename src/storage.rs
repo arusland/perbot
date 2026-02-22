@@ -47,20 +47,9 @@ impl ChatType {
     }
 }
 
-/// Stored chat information.
-#[derive(Debug, Clone)]
-pub struct StoredChat {
-    pub id: i64,
-    pub chat_type: ChatType,
-    pub title: Option<String>,
-    pub username: Option<String>,
-    pub first_name: Option<String>,
-    pub last_name: Option<String>,
-    pub updated_at: NaiveDateTime,
-    pub created_at: NaiveDateTime,
-}
-
-/// Chat info for upserting (without updated_at).
+/// Chat information. Used both for upserting and for reading from the database.
+/// `updated_at` and `created_at` are `None` when constructing a value to upsert
+/// and `Some` when reading back from the database.
 #[derive(Debug, Clone)]
 pub struct ChatInfo {
     pub id: i64,
@@ -69,6 +58,8 @@ pub struct ChatInfo {
     pub username: Option<String>,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    pub updated_at: Option<NaiveDateTime>,
+    pub created_at: Option<NaiveDateTime>,
 }
 
 // --- Private serialization helpers ---
@@ -417,7 +408,7 @@ impl EventStorage {
     }
 
     /// Retrieves chat information by ID.
-    pub fn get_chat(&self, id: i64) -> Result<Option<StoredChat>> {
+    pub fn get_chat(&self, id: i64) -> Result<Option<ChatInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
              FROM chats WHERE id = ?1",
@@ -433,7 +424,7 @@ impl EventStorage {
     }
 
     /// Retrieves all stored chats.
-    pub fn get_all_chats(&self) -> Result<Vec<StoredChat>> {
+    pub fn get_all_chats(&self) -> Result<Vec<ChatInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
              FROM chats ORDER BY updated_at DESC",
@@ -444,17 +435,17 @@ impl EventStorage {
         rows.collect()
     }
 
-    /// Converts a database row to a StoredChat.
-    fn row_to_chat(row: &rusqlite::Row) -> Result<StoredChat> {
+    /// Converts a database row to a ChatInfo.
+    fn row_to_chat(row: &rusqlite::Row) -> Result<ChatInfo> {
         let chat_type_str: String = row.get(1)?;
         let updated_str: String = row.get(6)?;
         let created_str: String = row.get(7)?;
 
         let chat_type = ChatType::from_str(&chat_type_str).unwrap_or(ChatType::Private);
-        let updated_at = NaiveDateTime::parse_from_str(&updated_str, "%Y-%m-%d %H:%M:%S").unwrap();
-        let created_at = NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").unwrap();
+        let updated_at = NaiveDateTime::parse_from_str(&updated_str, "%Y-%m-%d %H:%M:%S").ok();
+        let created_at = NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").ok();
 
-        Ok(StoredChat {
+        Ok(ChatInfo {
             id: row.get(0)?,
             chat_type,
             title: row.get(2)?,
@@ -536,6 +527,8 @@ mod tests {
                 username: None,
                 first_name: None,
                 last_name: None,
+                updated_at: None,
+                created_at: None,
             })
             .unwrap();
     }
@@ -704,6 +697,8 @@ mod tests {
             username: Some("testuser".to_string()),
             first_name: Some("John".to_string()),
             last_name: Some("Doe".to_string()),
+            updated_at: None,
+            created_at: None,
         };
 
         storage.upsert_chat(&chat).unwrap();
@@ -727,6 +722,8 @@ mod tests {
             username: Some("olduser".to_string()),
             first_name: Some("Old".to_string()),
             last_name: Some("Name".to_string()),
+            updated_at: None,
+            created_at: None,
         };
 
         storage.upsert_chat(&chat1).unwrap();
@@ -738,6 +735,8 @@ mod tests {
             username: Some("newuser".to_string()),
             first_name: Some("New".to_string()),
             last_name: Some("Name".to_string()),
+            updated_at: None,
+            created_at: None,
         };
 
         storage.upsert_chat(&chat2).unwrap();
@@ -758,6 +757,8 @@ mod tests {
             username: Some("user1".to_string()),
             first_name: Some("User".to_string()),
             last_name: Some("One".to_string()),
+            updated_at: None,
+            created_at: None,
         };
 
         let chat2 = ChatInfo {
@@ -767,6 +768,8 @@ mod tests {
             username: None,
             first_name: None,
             last_name: None,
+            updated_at: None,
+            created_at: None,
         };
 
         storage.upsert_chat(&chat1).unwrap();
