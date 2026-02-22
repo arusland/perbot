@@ -227,11 +227,6 @@ impl EventStorage {
             [],
         )?;
 
-        // Migration: add years column to existing databases (ignored if already present)
-        let _ = self
-            .conn
-            .execute("ALTER TABLE events ADD COLUMN years TEXT", []);
-
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_chat_id ON events(chat_id)",
             [],
