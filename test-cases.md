@@ -108,3 +108,33 @@
 | 2026-02-21 09:00:00 | SYSTEM | 2026-10-12 11:26:00                      |
 | 2026-10-12 11:26:01 | SYSTEM | 2026-10-26 11:26:00                      |
 | 2026-10-26 11:26:01 | SYSTEM | 2026-11-09 11:26:00                      |
+
+### Case 13: Single weekday — created on that weekday, fires today then repeats weekly
+
+| Current Time        | Actor  | Input / Expected Next   |
+|---------------------|--------|-------------------------|
+| 2026-02-20 10:00:00 | USER   | 10:30 fri release day   |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:30:00     |
+| 2026-02-20 10:30:01 | SYSTEM | 2026-02-27 10:30:00     |
+| 2026-02-27 10:30:01 | SYSTEM | 2026-03-06 10:30:00     |
+
+### Case 14: Single weekday — created mid-week, skips to next matching day then repeats weekly
+
+| Current Time        | Actor  | Input / Expected Next   |
+|---------------------|--------|-------------------------|
+| 2026-02-23 09:00:00 | USER   | 10:30 FridaY release day   |
+| 2026-02-23 09:00:00 | SYSTEM | 2026-02-27 10:30:00     |
+| 2026-02-27 10:30:01 | SYSTEM | 2026-03-06 10:30:00     |
+
+### Case 15: Weekday range mon-fri — fires on each weekday, skips weekend
+
+| Current Time        | Actor  | Input / Expected Next        |
+|---------------------|--------|------------------------------|
+| 2026-02-19 10:26:00 | USER   | 10:25 mon-fri Daily standup  |
+| 2026-02-19 10:25:01 | SYSTEM | 2026-02-20 10:25:00          |
+| 2026-02-20 10:25:01 | SYSTEM | 2026-02-23 10:25:00          |
+| 2026-02-23 10:25:01 | SYSTEM | 2026-02-24 10:25:00          |
+| 2026-02-24 10:25:01 | SYSTEM | 2026-02-25 10:25:00          |
+| 2026-02-25 10:25:01 | SYSTEM | 2026-02-26 10:25:00          |
+| 2026-02-26 10:25:01 | SYSTEM | 2026-02-27 10:25:00          |
+| 2026-02-27 10:25:01 | SYSTEM | 2026-03-02 10:25:00          |
