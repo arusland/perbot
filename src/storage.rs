@@ -93,6 +93,20 @@ fn serialize_time_unit(unit: TimeUnit) -> &'static str {
     }
 }
 
+fn serialize_years(years: &HashSet<i32>) -> String {
+    let mut sorted: Vec<i32> = years.iter().copied().collect();
+    sorted.sort();
+    sorted.iter().map(|y| y.to_string()).collect::<Vec<_>>().join(",")
+}
+
+fn deserialize_years(s: &str) -> Option<HashSet<i32>> {
+    let set: HashSet<i32> = s
+        .split(',')
+        .filter_map(|y| y.trim().parse().ok())
+        .collect();
+    if set.is_empty() { None } else { Some(set) }
+}
+
 fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
     match p {
         MonthlyPattern::OrdinalWeekday(ord, wd) => {
@@ -207,10 +221,16 @@ impl EventStorage {
                 in_offset_unit  TEXT,
                 bare_hour       INTEGER,
                 monthly_pattern TEXT,
-                msg_id          INTEGER NOT NULL REFERENCES messages(id)
+                msg_id          INTEGER NOT NULL REFERENCES messages(id),
+                years           TEXT
             )",
             [],
         )?;
+
+        // Migration: add years column to existing databases (ignored if already present)
+        let _ = self
+            .conn
+            .execute("ALTER TABLE events ADD COLUMN years TEXT", []);
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_chat_id ON events(chat_id)",
@@ -253,10 +273,11 @@ impl EventStorage {
             .monthly_pattern
             .as_ref()
             .map(serialize_monthly_pattern);
+        let years_str = event.years.as_ref().map(|y| serialize_years(y));
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 event.chat_id,
                 date_str,
@@ -273,6 +294,7 @@ impl EventStorage {
                 event.bare_hour,
                 monthly_str,
                 event.msg_id,
+                years_str,
             ],
         )?;
 
@@ -282,7 +304,7 @@ impl EventStorage {
     /// Retrieves an event by its ID.
     pub fn get(&self, id: i64) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE id = ?1",
         )?;
 
@@ -298,7 +320,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
         )?;
 
@@ -310,7 +332,7 @@ impl EventStorage {
     /// Retrieves all active (pending) events.
     pub fn get_pending(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -322,7 +344,7 @@ impl EventStorage {
     /// Retrieves active events for a specific chat.
     pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -494,6 +516,8 @@ impl EventStorage {
         let bare_hour: Option<u32> = row.get(14)?;
         let monthly_str: Option<String> = row.get(15)?;
         let monthly_pattern = monthly_str.and_then(|s| deserialize_monthly_pattern(&s));
+        let years_str: Option<String> = row.get(17)?;
+        let years = years_str.and_then(|s| deserialize_years(&s));
 
         Ok(EventInfo {
             id: row.get(0)?,
@@ -506,6 +530,7 @@ impl EventStorage {
             next_datetime,
             created_at,
             days,
+            years,
             repetition,
             in_offset,
             bare_hour,
@@ -555,6 +580,7 @@ mod tests {
             time: Some(NaiveTime::from_hms_opt(23, 59, 0).unwrap()),
             year_explicit: true,
             days: None,
+            years: None,
             message: message.to_string(),
             active: true,
             next_datetime: Some(NaiveDateTime::new(
@@ -978,6 +1004,41 @@ mod tests {
         let stored = storage.get(id).unwrap().unwrap();
 
         assert_eq!(stored.monthly_pattern, None);
+    }
+
+    #[test]
+    fn test_years_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+        let mut event = make_event("yearly reminder");
+        event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
+        event.date = None;
+        event.year_explicit = false;
+        event.years = Some(HashSet::from([2027, 2028]));
+        event.time = Some(NaiveTime::from_hms_opt(11, 13, 0).unwrap());
+        event.next_datetime = None;
+        event.active = false;
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.years, Some(HashSet::from([2027, 2028])));
+        assert_eq!(stored.message, "yearly reminder");
+    }
+
+    #[test]
+    fn test_years_none_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+        let mut event = make_event("no years");
+        event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get(id).unwrap().unwrap();
+
+        assert_eq!(stored.years, None);
     }
 
     #[test]

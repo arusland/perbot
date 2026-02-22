@@ -54,6 +54,43 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
         };
     }
 
+    // Handle years restriction: fire at the given time within the specified years only,
+    // optionally filtered by weekdays. "11:13 2027,2028" fires every day; "13:25 2027 fri,sun"
+    // fires only on Fridays and Sundays.
+    if let Some(ref year_set) = event.years {
+        let time = event
+            .time
+            .unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let mut sorted_years: Vec<i32> = year_set.iter().copied().collect();
+        sorted_years.sort();
+        for &year in &sorted_years {
+            if now.date().year() > year {
+                continue; // entirely in the past
+            }
+            let start_date = if now.date().year() < year {
+                NaiveDate::from_ymd_opt(year, 1, 1)?
+            } else {
+                now.date()
+            };
+            let mut candidate = start_date;
+            loop {
+                if candidate.year() > year {
+                    break; // no more days in this year — try next year
+                }
+                let candidate_dt = candidate.and_time(time);
+                let day_ok = event
+                    .days
+                    .as_ref()
+                    .map_or(true, |days| days.contains(&candidate.weekday()));
+                if day_ok && candidate_dt > now {
+                    return Some(candidate_dt);
+                }
+                candidate = candidate.succ_opt()?;
+            }
+        }
+        return None;
+    }
+
     // Handle monthly pattern (e.g., OrdinalWeekday(First, Sun), LastDay)
     if let Some(ref pattern) = event.monthly_pattern {
         let time = event
@@ -248,6 +285,7 @@ mod tests {
             time: None,
             year_explicit: false,
             days: None,
+            years: None,
             message: String::new(),
             active: false,
             next_datetime: None,

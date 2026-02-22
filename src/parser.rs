@@ -44,6 +44,8 @@ pub struct EventInfo {
     pub year_explicit: bool,
     /// "13:45 mon-fri", "13:25 thu-fri,sun"
     pub days: Option<HashSet<Weekday>>,
+    /// "13:25 2027 fri,sun", "11:13 2027,2028"
+    pub years: Option<HashSet<i32>>,
     /// "every 2 weeks", "every hour"
     pub repetition: Option<Repetition>,
     /// "8 min call her", "2 hours reminder"
@@ -91,6 +93,9 @@ static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|day)(?:\s+of\s+the\s+month)?\b").unwrap()
 });
+
+static RE_YEARS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap());
 
 fn weekday_from_full(s: &str) -> Option<Weekday> {
     match s.to_ascii_lowercase().as_str() {
@@ -202,6 +207,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
     let mut in_offset: Option<(u32, TimeUnit)> = None;
     let mut bare_hour: Option<u32> = None;
     let mut days: Option<HashSet<Weekday>> = None;
+    let mut years: Option<HashSet<i32>> = None;
     let mut monthly_pattern: Option<MonthlyPattern> = None;
 
     // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
@@ -287,6 +293,22 @@ pub fn parse(input: &str) -> Option<EventInfo> {
                 + &remaining[caps.get(0).unwrap().end()..];
         }
 
+        // Years: "2027", "2027,2028" — only when no full date was already parsed
+        if date.is_none() {
+            if let Some(m) = RE_YEARS.find(&remaining) {
+                let year_set: HashSet<i32> = m
+                    .as_str()
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<i32>().ok())
+                    .filter(|&y| (2000..=2100).contains(&y))
+                    .collect();
+                if !year_set.is_empty() {
+                    years = Some(year_set);
+                    remaining = remaining[..m.start()].to_string() + &remaining[m.end()..];
+                }
+            }
+        }
+
         // Monthly pattern: "first sunday", "last monday", "last day of the month"
         if let Some(caps) = RE_MONTHLY.captures(&remaining) {
             if let Some(ord) = ordinal_from_str(&caps[1]) {
@@ -354,6 +376,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
         time,
         year_explicit,
         days,
+        years,
         repetition,
         in_offset,
         bare_hour,
