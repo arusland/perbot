@@ -1,5 +1,5 @@
 use perbot::parser::EventInfo;
-use perbot::storage::{ChatInfo, ChatType, EventStorage};
+use perbot::storage::{ChatInfo, ChatType, EventStorage, MessageInfo};
 use perbot::{parser, scheduler};
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -67,7 +67,14 @@ async fn main() {
                 let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
                 let msg_id = {
                     let storage_guard = storage.lock().unwrap();
-                    match storage_guard.insert_message(user_id, msg.chat.id.0, text) {
+                    let msg_info = MessageInfo {
+                        id: 0,
+                        user_id,
+                        chat_id: msg.chat.id.0,
+                        created_at: None,
+                        message: text.to_string(),
+                    };
+                    match storage_guard.insert_message(&msg_info) {
                         Ok(id) => id,
                         Err(e) => {
                             log::error!("Failed to save message: {}", e);

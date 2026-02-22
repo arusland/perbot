@@ -7,13 +7,15 @@ use crate::parser::{
     parse_days, unit_from_str, EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
 };
 
-/// A stored user message.
+/// User message information. Used both for inserting and for reading from the database.
+/// `id` and `created_at` are `None` when constructing a value to insert
+/// and `Some` when reading back from the database.
 #[derive(Debug, Clone)]
-pub struct StoredMessage {
+pub struct MessageInfo {
     pub id: i64,
     pub user_id: Option<i64>,
     pub chat_id: i64,
-    pub created_at: NaiveDateTime,
+    pub created_at: Option<NaiveDateTime>,
     pub message: String,
 }
 
@@ -399,10 +401,10 @@ impl EventStorage {
     }
 
     /// Inserts a user message and returns its ID.
-    pub fn insert_message(&self, user_id: Option<i64>, chat_id: i64, message: &str) -> Result<i64> {
+    pub fn insert_message(&self, msg: &MessageInfo) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO messages (user_id, chat_id, message) VALUES (?1, ?2, ?3)",
-            params![user_id, chat_id, message],
+            params![msg.user_id, msg.chat_id, msg.message],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -534,7 +536,15 @@ mod tests {
     }
 
     fn ensure_message(storage: &EventStorage, chat_id: i64) -> i64 {
-        storage.insert_message(None, chat_id, "test").unwrap()
+        storage
+            .insert_message(&MessageInfo {
+                id: 0,
+                user_id: None,
+                chat_id,
+                created_at: None,
+                message: "test".to_string(),
+            })
+            .unwrap()
     }
 
     fn make_event(message: &str) -> EventInfo {
