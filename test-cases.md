@@ -249,3 +249,73 @@
 | 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 09:30:00             |
 | 2026-02-20 09:30:01 | SYSTEM | 2026-02-21 09:30:00             |
 | 2026-02-21 09:30:01 | SYSTEM | 2026-02-22 09:30:00             |
+
+### Case 29: First Sunday of month — created mid-month, skips to next month's first Sunday
+
+| Current Time        | Actor  | Input / Expected Next              |
+|---------------------|---------|------------------------------------|
+| 2026-02-20 10:00:00 | USER   | 10:00 first sunday buy package     |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-03-01 10:00:00                |
+| 2026-03-01 10:00:01 | SYSTEM | 2026-04-05 10:00:00                |
+| 2026-04-05 10:00:01 | SYSTEM | 2026-05-03 10:00:00                |
+
+### Case 30: First Sunday of month — created before first Sunday of current month, fires this month
+
+| Current Time        | Actor  | Input / Expected Next              |
+|---------------------|--------|------------------------------------|
+| 2026-03-01 09:00:00 | USER   | 10:00 first sunday buy package     |
+| 2026-03-01 09:00:00 | SYSTEM | 2026-03-01 10:00:00                |
+| 2026-03-01 10:00:01 | SYSTEM | 2026-04-05 10:00:00                |
+
+### Case 31: Last Monday of month — created before last Monday of current month, fires this month
+
+| Current Time        | Actor  | Input / Expected Next              |
+|---------------------|--------|------------------------------------|
+| 2026-02-20 08:00:00 | USER   | 9:30 last monday sell package      |
+| 2026-02-20 08:00:00 | SYSTEM | 2026-02-23 09:30:00                |
+| 2026-02-23 09:30:01 | SYSTEM | 2026-03-30 09:30:00                |
+| 2026-03-30 09:30:01 | SYSTEM | 2026-04-27 09:30:00                |
+
+### Case 32: Last Saturday of month — created after last Saturday of current month, skips to next month
+
+| Current Time        | Actor  | Input / Expected Next              |
+|---------------------|--------|------------------------------------|
+| 2026-02-28 11:35:00 | USER   | 9:30 last sat sell package         |
+| 2026-02-28 11:35:00 | SYSTEM | 2026-03-28 09:30:00                |
+| 2026-03-28 09:30:01 | SYSTEM | 2026-04-25 09:30:00                |
+
+### Case 33: Last day of month — fires on last day of each month
+
+| Current Time        | Actor  | Input / Expected Next                  |
+|---------------------|--------|----------------------------------------|
+| 2026-02-05 10:00:00 | USER   | 18:00 last day of the month pay bills  |
+| 2026-02-05 10:00:00 | SYSTEM | 2026-02-28 18:00:00                    |
+| 2026-02-28 18:00:01 | SYSTEM | 2026-03-31 18:00:00                    |
+| 2026-03-31 18:00:01 | SYSTEM | 2026-04-30 18:00:00                    |
+| 2026-12-31 17:59:00 | SYSTEM | 2026-12-31 18:00:00                    |
+| 2026-12-31 18:00:01 | SYSTEM | 2027-01-31 18:00:00                    |
+
+
+### Case 34: Last day of month — "of the month" is optional
+
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-02-05 10:00:00 | USER   | 18:00 last day pay bills       |
+| 2026-02-05 10:00:00 | SYSTEM | 2026-02-28 18:00:00            |
+| 2026-02-28 18:00:01 | SYSTEM | 2026-03-31 18:00:00            |
+
+### Case 35: Last day of month — created on the last day itself (exact time not yet reached)
+
+| Current Time        | Actor  | Input / Expected Next                  |
+|---------------------|--------|----------------------------------------|
+| 2026-02-28 17:00:00 | USER   | 18:00 last day of the month pay bills  |
+| 2026-02-28 17:00:00 | SYSTEM | 2026-02-28 18:00:00                    |
+| 2026-02-28 18:00:01 | SYSTEM | 2026-03-31 18:00:00                    |
+
+### Case 36: Last day of month — created on the last day after the time, skips to next month
+
+| Current Time        | Actor  | Input / Expected Next                  |
+|---------------------|--------|----------------------------------------|
+| 2026-02-28 19:00:00 | USER   | 18:00 last day of the month pay bills  |
+| 2026-02-28 19:00:00 | SYSTEM | 2026-03-31 18:00:00                    |
+| 2026-03-31 18:00:01 | SYSTEM | 2026-04-30 18:00:00                    |

@@ -91,24 +91,11 @@ static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|day)(?:\s+of\s+the\s+month)?\b").unwrap()
+    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
 });
 
 static RE_YEARS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap());
-
-fn weekday_from_full(s: &str) -> Option<Weekday> {
-    match s.to_ascii_lowercase().as_str() {
-        "monday" => Some(Weekday::Mon),
-        "tuesday" => Some(Weekday::Tue),
-        "wednesday" => Some(Weekday::Wed),
-        "thursday" => Some(Weekday::Thu),
-        "friday" => Some(Weekday::Fri),
-        "saturday" => Some(Weekday::Sat),
-        "sunday" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
 
 fn ordinal_from_str(s: &str) -> Option<Ordinal> {
     match s.to_ascii_lowercase().as_str() {
@@ -320,7 +307,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
                         None
                     }
                 } else {
-                    weekday_from_full(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
+                    day_from_str(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
                 };
 
                 if pattern.is_some() {
