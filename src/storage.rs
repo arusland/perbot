@@ -115,6 +115,7 @@ fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
                 Ordinal::Second => "second",
                 Ordinal::Third => "third",
                 Ordinal::Fourth => "fourth",
+                Ordinal::Fifth => "fifth",
                 Ordinal::Last => "last",
             };
             let wd_str = match wd {
@@ -144,6 +145,7 @@ fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
         "second" => Ordinal::Second,
         "third" => Ordinal::Third,
         "fourth" => Ordinal::Fourth,
+        "fifth" => Ordinal::Fifth,
         "last" => Ordinal::Last,
         _ => return None,
     };

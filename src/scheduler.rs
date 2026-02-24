@@ -125,7 +125,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
         let mut year = today.year();
         let mut month = today.month();
 
-        for _ in 0..3 {
+        for _ in 0..13 {
             let target_date = match pattern {
                 MonthlyPattern::LastDay => last_day_of_month_date(year, month),
                 MonthlyPattern::OrdinalWeekday(ord, wd) => {
@@ -134,6 +134,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                         Ordinal::Second => 2,
                         Ordinal::Third => 3,
                         Ordinal::Fourth => 4,
+                        Ordinal::Fifth => 5,
                         Ordinal::Last => 0,
                     };
                     if n == 0 {

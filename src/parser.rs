@@ -25,6 +25,7 @@ pub enum Ordinal {
     Second,
     Third,
     Fourth,
+    Fifth,
     Last,
 }
 
@@ -91,7 +92,7 @@ static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
+    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
 });
 
 static RE_YEARS: LazyLock<Regex> =
@@ -103,6 +104,7 @@ fn ordinal_from_str(s: &str) -> Option<Ordinal> {
         "second" | "2nd" => Some(Ordinal::Second),
         "third" | "3rd" => Some(Ordinal::Third),
         "fourth" | "4th" => Some(Ordinal::Fourth),
+        "fifth" | "5th" => Some(Ordinal::Fifth),
         "last" => Some(Ordinal::Last),
         _ => None,
     }

@@ -54,6 +54,6 @@ Four source files in `src/`:
 - `10:00 first sunday call mom` - fire event at 10:00 on the first Sunday of the month
 - `9:30 last monday team sync` - fire event at 9:30 on the last Monday of the month
 - `14:00 second thursday board meeting` - fire event at 14:00 on the second Thursday of the month
-- `17:00 3rd friday happy hour` - ordinal can also be `1st`, `2nd`, `3rd`, `4th`
+- `17:00 3rd friday happy hour` - ordinal can also be `1st`, `2nd`, `3rd`, `4th`, `5th`
 - `18:00 last day of the month pay rent` - fire event at 18:00 on the last day of the month
 - `18:00 last day pay bills` - "of the month" is optional

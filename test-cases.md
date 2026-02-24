@@ -319,3 +319,30 @@
 | 2026-02-28 19:00:00 | USER   | 18:00 last day of the month pay bills  |
 | 2026-02-28 19:00:00 | SYSTEM | 2026-03-31 18:00:00                    |
 | 2026-03-31 18:00:01 | SYSTEM | 2026-04-30 18:00:00                    |
+
+### Case 37: 3rd Friday of month — created before 3rd Friday of current month, fires this month
+
+| Current Time        | Actor  | Input / Expected Next       |
+|---------------------|---------|-----------------------------|
+| 2026-02-16 10:00:00 | USER   | 17:00 3rd friday happy hour |
+| 2026-02-16 10:00:00 | SYSTEM | 2026-02-20 17:00:00         |
+| 2026-02-20 17:00:01 | SYSTEM | 2026-03-20 17:00:00         |
+| 2026-03-20 17:00:01 | SYSTEM | 2026-04-17 17:00:00         |
+
+### Case 38: 3rd Friday of month — created after 3rd Friday of current month, skips to next month
+
+| Current Time        | Actor  | Input / Expected Next       |
+|---------------------|---------|-----------------------------|
+| 2026-02-21 10:00:00 | USER   | 17:00 3rd friday happy hour |
+| 2026-02-21 10:00:00 | SYSTEM | 2026-03-20 17:00:00         |
+| 2026-03-20 17:00:01 | SYSTEM | 2026-04-17 17:00:00         |
+| 2026-04-17 17:00:01 | SYSTEM | 2026-05-15 17:00:00         |
+
+### Case 39: 5th Friday of month - some months will be skipped, not all months have 5 Fridays
+
+| Current Time        | Actor  | Input / Expected Next       |
+|---------------------|---------|-----------------------------|
+| 2026-02-16 10:00:00 | USER   | 17:00 5th friday happy hour |
+| 2026-02-16 10:00:00 | SYSTEM | 2026-05-29 17:00:00         |
+| 2026-05-29 17:00:01 | SYSTEM | 2026-07-31 17:00:00         |
+| 2026-07-31 17:00:01 | SYSTEM | 2026-10-30 17:00:00         |
