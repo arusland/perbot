@@ -198,3 +198,54 @@
 | 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 21:00:00       |
 | 2026-02-20 21:00:01 | SYSTEM | 2026-02-22 21:00:00       |
 | 2026-02-22 21:00:01 | SYSTEM | 2026-02-24 21:00:00       |
+
+### Case 23: In-offset minutes — one-shot, fires 8 minutes after creation
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 10:00:00 | USER   | 8 min call her        |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:08:00   |
+| 2026-02-20 10:08:01 | SYSTEM | NONE                  |
+
+### Case 24: In-offset hours — one-shot, fires 3 hours after creation
+
+| Current Time        | Actor  | Input / Expected Next      |
+|---------------------|--------|----------------------------|
+| 2026-02-20 10:00:00 | USER   | 3 hour check the oven     |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 13:00:00        |
+| 2026-02-20 13:00:01 | SYSTEM | NONE                       |
+
+### Case 25: In-offset minutes crossing midnight — fires next day
+
+| Current Time        | Actor  | Input / Expected Next      |
+|---------------------|--------|----------------------------|
+| 2026-02-20 23:55:00 | USER   | 10 min take the pizza out  |
+| 2026-02-20 23:55:00 | SYSTEM | 2026-02-21 00:05:00        |
+| 2026-02-21 00:05:01 | SYSTEM | NONE                       |
+
+### Case 26: In-offset minutes with hourly repetition
+
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-02-20 10:00:00 | USER   | 8 min every hour check server  |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:08:00            |
+| 2026-02-20 10:08:01 | SYSTEM | 2026-02-20 11:08:00            |
+| 2026-02-20 11:08:01 | SYSTEM | 2026-02-20 12:08:00            |
+
+### Case 27: In-offset hours with biweekly repetition
+
+| Current Time        | Actor  | Input / Expected Next              |
+|---------------------|---------|------------------------------------|
+| 2026-02-20 10:00:00 | USER   | 20 hours every 2 weeks sync report |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-21 06:00:00                |
+| 2026-02-21 06:00:01 | SYSTEM | 2026-03-07 06:00:00                |
+| 2026-03-07 06:00:01 | SYSTEM | 2026-03-21 06:00:00                |
+
+### Case 28: In-offset minutes with daily repetition
+
+| Current Time        | Actor  | Input / Expected Next           |
+|---------------------|--------|---------------------------------|
+| 2026-02-20 09:00:00 | USER   | 30 min every day morning water  |
+| 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 09:30:00             |
+| 2026-02-20 09:30:01 | SYSTEM | 2026-02-21 09:30:00             |
+| 2026-02-21 09:30:01 | SYSTEM | 2026-02-22 09:30:00             |

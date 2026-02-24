@@ -48,7 +48,7 @@ Four source files in `src/`:
 - `15:30 every 3 days` — start at next at 15:30 and then repeat every 3 days.
 - `8 call Alex` - fire event next 08:00 (from current time)
 - `24 call Poly` - fire event next 00:00
-- `25 call Alex` - do not parse any time
+- `25 call Alex` - do not parse invalid bare hour
 - `8 min call her` - fire event in 8 minutes
 - `8 min every hour` - fire event in 8 minutes and repeat every hour
 - `10:00 first sunday call mom` - fire event at 10:00 on the first Sunday of the month

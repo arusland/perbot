@@ -48,6 +48,19 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
 
     // Handle relative offset (e.g., in_offset=Some((8, TimeUnit::Minutes)))
     if let Some((value, unit)) = event.in_offset {
+        // One-shot: already scheduled and no repetition means it has fired
+        if event.next_datetime.is_some() && event.repetition.is_none() {
+            return None;
+        }
+        // Repeating: advance from the previously scheduled datetime by the interval
+        if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
+            let mut next = base;
+            while next <= now {
+                next = advance_by(next, rep.interval, rep.unit)?;
+            }
+            return Some(next);
+        }
+        // First scheduling: fire at now + offset
         return match unit {
             TimeUnit::Minutes => Some(now + chrono::Duration::minutes(value as i64)),
             TimeUnit::Hours => Some(now + chrono::Duration::hours(value as i64)),
