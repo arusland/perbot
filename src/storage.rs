@@ -96,15 +96,20 @@ fn serialize_time_unit(unit: TimeUnit) -> &'static str {
 fn serialize_years(years: &HashSet<i32>) -> String {
     let mut sorted: Vec<i32> = years.iter().copied().collect();
     sorted.sort();
-    sorted.iter().map(|y| y.to_string()).collect::<Vec<_>>().join(",")
+    sorted
+        .iter()
+        .map(|y| y.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn deserialize_years(s: &str) -> Option<HashSet<i32>> {
-    let set: HashSet<i32> = s
-        .split(',')
-        .filter_map(|y| y.trim().parse().ok())
-        .collect();
-    if set.is_empty() { None } else { Some(set) }
+    let set: HashSet<i32> = s.split(',').filter_map(|y| y.trim().parse().ok()).collect();
+    if set.is_empty() {
+        None
+    } else {
+        Some(set)
+    }
 }
 
 fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
