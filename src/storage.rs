@@ -326,8 +326,8 @@ impl EventStorage {
         rows.collect()
     }
 
-    /// Retrieves all active (pending) events.
-    pub fn get_pending(&self) -> Result<Vec<EventInfo>> {
+    /// Retrieves all active events.
+    pub fn get_active(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
@@ -339,7 +339,7 @@ impl EventStorage {
     }
 
     /// Retrieves active events for a specific chat.
-    pub fn get_pending_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
+    pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
@@ -664,10 +664,10 @@ mod tests {
     }
 
     #[test]
-    fn test_get_pending() {
+    fn test_get_active() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_event("pending");
+        let mut event = make_event("active");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -676,9 +676,9 @@ mod tests {
 
         storage.mark_inactive(id1).unwrap();
 
-        let pending = storage.get_pending().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, id2);
+        let active = storage.get_active().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id2);
     }
 
     #[test]
@@ -924,10 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn test_inactive_excluded_from_pending() {
+    fn test_inactive_excluded_from_active() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
-        let mut event = make_event("pending test");
+        let mut event = make_event("active test");
         event.chat_id = 123;
         event.msg_id = ensure_message(&storage, 123);
 
@@ -936,9 +936,9 @@ mod tests {
 
         storage.mark_inactive(id1).unwrap();
 
-        let pending = storage.get_pending().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, id2);
+        let active = storage.get_active().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id2);
     }
 
     #[test]

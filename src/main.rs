@@ -16,15 +16,15 @@ async fn main() {
         EventStorage::open("perbot.db").expect("Failed to open database"),
     ));
 
-    // Load and reschedule pending events from storage
-    let pending_events = {
+    // Load and reschedule active events from storage
+    let active_events = {
         let storage_guard = storage.lock().unwrap();
-        storage_guard.get_pending()
+        storage_guard.get_active()
     };
 
-    match pending_events {
+    match active_events {
         Ok(events) => {
-            log::info!("Loading {} pending events from storage", events.len());
+            log::info!("Loading {} active events from storage", events.len());
             for event in events {
                 let event_id = event.id;
                 log::info!(
@@ -35,7 +35,7 @@ async fn main() {
                 schedule_event(bot.clone(), event_id, event, Arc::clone(&storage));
             }
         }
-        Err(e) => log::error!("Failed to load pending events: {}", e),
+        Err(e) => log::error!("Failed to load active events: {}", e),
     }
 
     let admin_id = ChatId(
