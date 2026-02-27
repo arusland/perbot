@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use perbot::storage::{ChatInfo, ChatType, EventStorage, MessageInfo};
 use perbot::{parser, scheduler};
 
 struct TableRow {
@@ -111,19 +112,49 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 /// EventInfo" that is updated by USER rows (parse) and SYSTEM rows
 /// (calc_next_at, then assert next_datetime or active==false for NONE).
 /// Collects all failures before panicking so every failing row is shown.
+/// Each table gets its own in-memory EventStorage so storage round-trips
+/// are exercised for every scenario.
 fn run_table(table_idx: usize, table: &Table) {
-    let mut current_event: Option<parser::EventInfo> = None;
+    const CHAT_ID: i64 = 1;
+    let storage = EventStorage::open_in_memory().unwrap();
+    storage
+        .upsert_chat(&ChatInfo {
+            id: CHAT_ID,
+            chat_type: ChatType::Private,
+            title: None,
+            username: None,
+            first_name: None,
+            last_name: None,
+            updated_at: None,
+            created_at: None,
+        })
+        .unwrap();
+
+    let mut current_id: Option<i64> = None;
     // (step, detail_message, actual_value_for_arrow)
     let mut failures: Vec<(usize, String, String)> = Vec::new();
 
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
             "USER" => {
-                current_event = parser::parse(&row.value);
+                current_id = parser::parse(&row.value).map(|mut event| {
+                    let msg_id = storage
+                        .insert_message(&MessageInfo {
+                            id: 0,
+                            user_id: None,
+                            chat_id: CHAT_ID,
+                            created_at: None,
+                            message: row.value.clone(),
+                        })
+                        .unwrap();
+                    event.chat_id = CHAT_ID;
+                    event.msg_id = msg_id;
+                    storage.insert_event(&event).unwrap()
+                });
             }
             "SYSTEM" => {
-                let event = match current_event.take() {
-                    Some(e) => e,
+                let id = match current_id {
+                    Some(id) => id,
                     None => {
                         // parse returned None; SYSTEM NONE is the expected outcome
                         if row.value == "NONE" {
@@ -137,7 +168,11 @@ fn run_table(table_idx: usize, table: &Table) {
                         continue;
                     }
                 };
+                let event = storage.get(id).unwrap().unwrap();
                 let result = scheduler::calc_next_at(event, row.ts);
+                storage
+                    .update_schedule(result.id, result.active, result.next_datetime)
+                    .unwrap();
                 if row.value == "NONE" {
                     if result.active {
                         failures.push((
@@ -182,7 +217,6 @@ fn run_table(table_idx: usize, table: &Table) {
                         }
                     }
                 }
-                current_event = Some(result);
             }
             other => {
                 failures.push((step, format!("unknown actor '{}'", other), String::new()));
