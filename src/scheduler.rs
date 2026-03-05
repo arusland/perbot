@@ -121,43 +121,60 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
         let time = event
             .time
             .unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        let today = now.date();
-        let mut year = today.year();
-        let mut month = today.month();
 
-        for _ in 0..13 {
-            let target_date = match pattern {
-                MonthlyPattern::LastDay => last_day_of_month_date(year, month),
-                MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                    let n = match ord {
-                        Ordinal::First => 1,
-                        Ordinal::Second => 2,
-                        Ordinal::Third => 3,
-                        Ordinal::Fourth => 4,
-                        Ordinal::Fifth => 5,
-                        Ordinal::Last => 0,
-                    };
-                    if n == 0 {
-                        last_weekday_of_month(year, month, *wd)
-                    } else {
-                        nth_weekday_of_month(year, month, *wd, n)
+        // Find the next monthly anchor strictly after now.
+        let next_anchor = {
+            let today = now.date();
+            let mut year = today.year();
+            let mut month = today.month();
+            let mut found = None;
+            for _ in 0..13 {
+                let target_date = match pattern {
+                    MonthlyPattern::LastDay => last_day_of_month_date(year, month),
+                    MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                        let n = match ord {
+                            Ordinal::First => 1,
+                            Ordinal::Second => 2,
+                            Ordinal::Third => 3,
+                            Ordinal::Fourth => 4,
+                            Ordinal::Fifth => 5,
+                            Ordinal::Last => 0,
+                        };
+                        if n == 0 {
+                            last_weekday_of_month(year, month, *wd)
+                        } else {
+                            nth_weekday_of_month(year, month, *wd, n)
+                        }
+                    }
+                };
+                if let Some(d) = target_date {
+                    let dt = d.and_time(time);
+                    if dt > now {
+                        found = Some(dt);
+                        break;
                     }
                 }
-            };
-
-            if let Some(d) = target_date {
-                let dt = d.and_time(time);
-                if dt > now {
-                    return Some(dt);
-                }
+                let (ny, nm) = next_month(year, month);
+                year = ny;
+                month = nm;
             }
+            found
+        };
 
-            let (ny, nm) = next_month(year, month);
-            year = ny;
-            month = nm;
+        // When a repetition is set and the event has fired before, advance by the
+        // interval and return the earlier of that candidate and the next monthly anchor.
+        if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
+            let mut candidate = base;
+            while candidate <= now {
+                candidate = advance_by(candidate, rep.interval, rep.unit)?;
+            }
+            return match next_anchor {
+                Some(anchor) => Some(candidate.min(anchor)),
+                None => Some(candidate),
+            };
         }
 
-        return None;
+        return next_anchor;
     }
 
     let dt = match (event.time, event.date) {
