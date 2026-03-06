@@ -262,11 +262,7 @@ fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Opti
         .rem_euclid(7) as u32;
     let day = 1 + offset + (n - 1) * 7;
     let d = NaiveDate::from_ymd_opt(year, month, day)?;
-    if d.month() == month {
-        Some(d)
-    } else {
-        None
-    }
+    if d.month() == month { Some(d) } else { None }
 }
 
 fn last_weekday_of_month(year: i32, month: u32, weekday: Weekday) -> Option<NaiveDate> {

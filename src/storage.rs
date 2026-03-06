@@ -1,10 +1,10 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
-use rusqlite::{params, Connection, Result};
+use rusqlite::{Connection, Result, params};
 use std::collections::HashSet;
 use std::path::Path;
 
 use crate::parser::{
-    parse_days, unit_from_str, EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
+    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, parse_days, unit_from_str,
 };
 
 /// User message information. Used both for inserting and for reading from the database.
@@ -105,11 +105,7 @@ fn serialize_years(years: &HashSet<i32>) -> String {
 
 fn deserialize_years(s: &str) -> Option<HashSet<i32>> {
     let set: HashSet<i32> = s.split(',').filter_map(|y| y.trim().parse().ok()).collect();
-    if set.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
+    if set.is_empty() { None } else { Some(set) }
 }
 
 fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {

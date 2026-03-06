@@ -169,11 +169,7 @@ pub fn parse_days(s: &str) -> Option<HashSet<Weekday>> {
             set.insert(day_from_str(token)?);
         }
     }
-    if set.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
+    if set.is_empty() { None } else { Some(set) }
 }
 
 pub fn unit_from_str(s: &str) -> Option<TimeUnit> {
