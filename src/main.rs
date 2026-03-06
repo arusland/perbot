@@ -19,7 +19,7 @@ async fn main() {
     // Load and reschedule active events from storage
     let active_events = {
         let storage_guard = storage.lock().unwrap();
-        storage_guard.get_active()
+        storage_guard.get_active_events()
     };
 
     match active_events {

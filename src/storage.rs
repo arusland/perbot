@@ -332,7 +332,7 @@ impl EventStorage {
     }
 
     /// Retrieves all active events.
-    pub fn get_active(&self) -> Result<Vec<EventInfo>> {
+    pub fn get_active_events(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_active() {
+    fn test_get_active_events() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 123);
         let mut event = make_event("active");
@@ -681,7 +681,7 @@ mod tests {
 
         storage.mark_inactive(id1).unwrap();
 
-        let active = storage.get_active().unwrap();
+        let active = storage.get_active_events().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, id2);
     }
@@ -941,7 +941,7 @@ mod tests {
 
         storage.mark_inactive(id1).unwrap();
 
-        let active = storage.get_active().unwrap();
+        let active = storage.get_active_events().unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, id2);
     }
