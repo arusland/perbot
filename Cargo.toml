@@ -9,7 +9,7 @@ license = "Apache-2.0"
 teloxide = { version = "0.17", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4.29"
-pretty_env_logger = "0.5"
+flexi_logger = "0.29"
 chrono = "0.4"
 regex = "1"
 rusqlite = { version = "0.35", features = ["bundled"] }

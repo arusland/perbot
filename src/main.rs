@@ -7,7 +7,7 @@ use teloxide::{prelude::*, types::ParseMode};
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    init_logger();
     log::info!("Starting bot...");
 
     let bot = Bot::from_env();
@@ -189,6 +189,7 @@ fn schedule_event(bot: Bot, event_id: i64, event: EventInfo, storage: Arc<Mutex<
         let next = scheduler::calc_next(event);
         {
             let Ok(storage_guard) = storage.lock() else {
+                log::error!("Failed to lock storage");
                 return;
             };
             let _ = storage_guard.update_schedule(event_id, next.active, next.next_datetime);
@@ -250,4 +251,19 @@ fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
         updated_at: None,
         created_at: None,
     }
+}
+
+fn init_logger() {
+    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+    flexi_logger::Logger::try_with_env_or_str("info")
+        .expect("Failed to initialize logger")
+        .log_to_file(flexi_logger::FileSpec::default().directory(&log_dir))
+        .rotate(
+            flexi_logger::Criterion::Age(flexi_logger::Age::Day),
+            flexi_logger::Naming::Timestamps,
+            flexi_logger::Cleanup::KeepLogFiles(365),
+        )
+        .duplicate_to_stdout(flexi_logger::Duplicate::All)
+        .start()
+        .expect("Failed to start logger");
 }
