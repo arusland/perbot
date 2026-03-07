@@ -5,6 +5,22 @@ use std::process;
 use std::sync::{Arc, Mutex};
 use teloxide::{prelude::*, types::ParseMode};
 
+struct TopEvents {
+    events: Vec<EventInfo>,
+    abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+impl TopEvents {
+    fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            abort_handle: None,
+        }
+    }
+}
+
+type TopEventsState = Arc<Mutex<TopEvents>>;
+
 #[tokio::main]
 async fn main() {
     init_logger();
@@ -16,27 +32,22 @@ async fn main() {
         EventStorage::open("perbot.db").expect("Failed to open database"),
     ));
 
-    // Load and reschedule active events from storage
-    let active_events = {
-        let storage_guard = storage.lock().unwrap();
-        storage_guard.get_active_events()
-    };
+    let top_state: TopEventsState = Arc::new(Mutex::new(TopEvents::new()));
 
-    match active_events {
-        Ok(events) => {
-            log::info!("Loading {} active events from storage", events.len());
-            for event in events {
-                let event_id = event.id;
-                log::info!(
-                    "Rescheduled event {} for {:?}",
-                    event_id,
-                    event.next_datetime
-                );
-                schedule_event(bot.clone(), event_id, event, Arc::clone(&storage));
+    // Load top events from storage on startup
+    {
+        let storage_guard = storage.lock().unwrap();
+        let now = chrono::Local::now().naive_local();
+        match storage_guard.get_top_events(now) {
+            Ok(events) => {
+                log::info!("Loaded {} top events from storage", events.len());
+                top_state.lock().unwrap().events = events;
             }
+            Err(e) => log::error!("Failed to load top events: {}", e),
         }
-        Err(e) => log::error!("Failed to load active events: {}", e),
     }
+
+    schedule_first_event(bot.clone(), Arc::clone(&storage), Arc::clone(&top_state));
 
     let admin_id = ChatId(
         std::env::var("TG_ADMIN_ID")
@@ -48,8 +59,10 @@ async fn main() {
     bot.send_message(admin_id, "Bot started").await.unwrap();
 
     let handler_storage = Arc::clone(&storage);
+    let handler_top_state = Arc::clone(&top_state);
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let storage = Arc::clone(&handler_storage);
+        let top_state = Arc::clone(&handler_top_state);
         async move {
             println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
 
@@ -87,12 +100,10 @@ async fn main() {
                     log::info!("Received exit command. Shutting down...");
                     let _ = bot.send_message(admin_id, "Shutting down...").await;
                     tokio::spawn(async {
-                        // TODO: Implement proper shutdown logic
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         process::exit(0);
                     });
 
-                    // Return Ok - this acknowledges the update to Telegram
                     return Ok(());
                 }
 
@@ -103,25 +114,27 @@ async fn main() {
                     let stored = scheduler::calc_next(event);
 
                     // Save event to storage
-                    let event_id = {
+                    {
                         let storage_guard = storage.lock().unwrap();
-                        storage_guard.insert_event(&stored)
-                    };
-
-                    let event_id = match event_id {
-                        Ok(id) => {
-                            log::info!("Saved event with id: {}", id);
-                            id
+                        match storage_guard.insert_event(&stored) {
+                            Ok(id) => log::info!("Saved event with id: {}", id),
+                            Err(e) => {
+                                log::error!("Failed to save event: {}", e);
+                                return Ok(());
+                            }
                         }
-                        Err(e) => {
-                            log::error!("Failed to save event: {}", e);
-                            return Ok(());
-                        }
-                    };
+                    }
 
                     if let Some(dt) = stored.next_datetime {
                         println!("next_datetime: {:?}", dt);
-                        schedule_event(bot.clone(), event_id, stored, Arc::clone(&storage));
+
+                        // Reload top events and reschedule
+                        reload_and_schedule(
+                            bot.clone(),
+                            Arc::clone(&storage),
+                            Arc::clone(&top_state),
+                        );
+
                         format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
                     } else {
                         format!("*{}*", escape_markdown(text))
@@ -169,37 +182,148 @@ async fn main() {
     .await;
 }
 
-/// Spawns a delayed task that sends the event message when due, then calls
-/// `calc_next` to compute the next occurrence and saves the result to the database.
-/// If the event is still active after `calc_next`, a new task is spawned recursively.
-fn schedule_event(bot: Bot, event_id: i64, event: EventInfo, storage: Arc<Mutex<EventStorage>>) {
+/// Reloads top events from DB and schedules the first one.
+fn reload_and_schedule(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: TopEventsState) {
+    {
+        let storage_guard = storage.lock().unwrap();
+        let now = chrono::Local::now().naive_local();
+        match storage_guard.get_top_events(now) {
+            Ok(events) => {
+                log::info!("Reloaded {} top events", events.len());
+                top_state.lock().unwrap().events = events;
+            }
+            Err(e) => log::error!("Failed to reload top events: {}", e),
+        }
+    }
+    schedule_first_event(bot, storage, top_state);
+}
+
+/// Schedules the first event from the top events list.
+/// Cancels any previously scheduled task, then spawns a new delayed task
+/// for the earliest event. After firing, recalculates next datetime,
+/// saves to DB, updates the in-memory list, and schedules the next first event.
+fn schedule_first_event(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: TopEventsState) {
+    let mut top = top_state.lock().unwrap();
+
+    // Cancel current scheduled task
+    if let Some(handle) = top.abort_handle.take() {
+        log::info!("Aborting previously scheduled task");
+        handle.abort();
+    }
+
+    let Some(event) = top.events.first().cloned() else {
+        log::info!("No top events to schedule");
+        return;
+    };
+
     let Some(dt) = event.next_datetime else {
         return;
     };
-    let now = chrono::Local::now().naive_local();
-    let delay_secs = dt.signed_duration_since(now).num_seconds().max(0) as u64;
+
     let chat_id = ChatId(event.chat_id);
     let message = event.message.clone();
+    let top_clone = Arc::clone(&top_state);
+    let storage_clone = Arc::clone(&storage);
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
+        let now = chrono::Local::now().naive_local();
+        let delay_secs = dt.signed_duration_since(now).num_seconds().max(0) as u64;
+        let event_id = event.id;
+
+        log::info!(
+            "Scheduling event {} for {:?} (in {})",
+            event_id,
+            dt,
+            format_duration(delay_secs)
+        );
+
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-        let _ = bot.send_message(chat_id, &message).await;
+        let now = chrono::Local::now().naive_local();
+        // TODO: make separate thread for sending messages
+        if let Err(e) = bot.send_message(chat_id, &message).await {
+            log::error!("Failed to send message for event {}: {}", event_id, e);
+        }
 
-        // Compute next occurrence and persist it
-        let next = scheduler::calc_next(event);
+        // Recalc next datetime and save to DB
+        let next = scheduler::calc_next_at(event, now);
         {
-            let Ok(storage_guard) = storage.lock() else {
-                log::error!("Failed to lock storage");
+            let Ok(storage_guard) = storage_clone.lock() else {
+                log::error!("Failed to lock storage after event fired");
                 return;
             };
-            let _ = storage_guard.update_schedule(event_id, next.active, next.next_datetime);
+            if let Err(e) = storage_guard.update_schedule(event_id, next.active, next.next_datetime)
+            {
+                log::error!("Failed to update schedule for event {}: {}", event_id, e);
+            }
         }
 
-        // Schedule the next occurrence if still active
-        if next.active {
-            schedule_event(bot, event_id, next, storage);
+        // Update in-memory top events list
+        {
+            let mut top = top_clone.lock().unwrap();
+            top.abort_handle = None;
+            // Remove fired event
+            top.events.retain(|e| e.id != event_id);
+            // If still active, insert back sorted by next_datetime
+            if next.active {
+                let pos = top
+                    .events
+                    .iter()
+                    .position(|e| e.next_datetime > next.next_datetime)
+                    .unwrap_or(top.events.len());
+                top.events.insert(pos, next);
+            }
         }
+
+        // If list is empty, reload from DB
+        let is_empty = top_clone.lock().unwrap().events.is_empty();
+        if is_empty {
+            let events = {
+                let Ok(storage_guard) = storage_clone.lock() else {
+                    log::error!("Failed to lock storage for reload");
+                    return;
+                };
+                storage_guard.get_top_events(now)
+            };
+            match events {
+                Ok(events) => {
+                    log::info!("Reloaded {} top events after list emptied", events.len());
+                    top_clone.lock().unwrap().events = events;
+                }
+                Err(e) => log::error!("Failed to reload top events: {}", e),
+            }
+        }
+
+        // Schedule the next first event
+        schedule_first_event(bot, storage_clone, top_clone);
     });
+
+    top.abort_handle = Some(join_handle.abort_handle());
+}
+
+fn format_duration(total_secs: u64) -> String {
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{} day{}", days, if days == 1 { "" } else { "s" }));
+    }
+    if hours > 0 {
+        parts.push(format!(
+            "{} hour{}",
+            hours,
+            if hours == 1 { "" } else { "s" }
+        ));
+    }
+    if minutes > 0 {
+        parts.push(format!("{} min", minutes));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{} sec", seconds));
+    }
+    parts.join(" ")
 }
 
 fn escape_markdown(text: &str) -> String {

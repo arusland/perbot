@@ -384,6 +384,21 @@ impl EventStorage {
         Ok(rows_affected > 0)
     }
 
+    /// Returns the 10 nearest active events from `now`, sorted by `next_datetime` ASC.
+    /// TODO: support missed events
+    pub fn get_top_events(&self, now: NaiveDateTime) -> Result<Vec<EventInfo>> {
+        let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+             FROM events WHERE active = 1 AND next_datetime >= ?1
+             ORDER BY next_datetime ASC LIMIT 10",
+        )?;
+
+        let rows = stmt.query_map(params![now_str], Self::row_to_event)?;
+        rows.collect()
+    }
+
     /// Deletes all inactive events.
     pub fn delete_inactive(&self) -> Result<usize> {
         let rows_affected = self
