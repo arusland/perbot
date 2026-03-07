@@ -1,53 +1,16 @@
-use perbot::parser::EventInfo;
-use perbot::storage::{ChatInfo, ChatType, EventStorage, MessageInfo};
-use perbot::{parser, scheduler};
+use perbot::state::EventProvider;
+use perbot::parser;
+use perbot::storage::{ChatInfo, ChatType, EventStorage};
 use std::process;
 use std::sync::{Arc, Mutex};
 use teloxide::{prelude::*, types::ParseMode};
 
-struct TopEvents {
-    events: Vec<EventInfo>,
-    abort_handle: Option<tokio::task::AbortHandle>,
-}
-
-impl TopEvents {
-    fn new() -> Self {
-        Self {
-            events: Vec::new(),
-            abort_handle: None,
-        }
-    }
-}
-
-type TopEventsState = Arc<Mutex<TopEvents>>;
+type EventProviderState = Arc<Mutex<EventProvider>>;
 
 #[tokio::main]
 async fn main() {
     init_logger();
     log::info!("Starting bot...");
-
-    let bot = Bot::from_env();
-
-    let storage = Arc::new(Mutex::new(
-        EventStorage::open("perbot.db").expect("Failed to open database"),
-    ));
-
-    let top_state: TopEventsState = Arc::new(Mutex::new(TopEvents::new()));
-
-    // Load top events from storage on startup
-    {
-        let storage_guard = storage.lock().unwrap();
-        let now = chrono::Local::now().naive_local();
-        match storage_guard.get_top_events(now) {
-            Ok(events) => {
-                log::info!("Loaded {} top events from storage", events.len());
-                top_state.lock().unwrap().events = events;
-            }
-            Err(e) => log::error!("Failed to load top events: {}", e),
-        }
-    }
-
-    schedule_first_event(bot.clone(), Arc::clone(&storage), Arc::clone(&top_state));
 
     let admin_id = ChatId(
         std::env::var("TG_ADMIN_ID")
@@ -56,21 +19,28 @@ async fn main() {
             .expect("TG_ADMIN_ID must be a valid i64"),
     );
 
+    let bot = Bot::from_env();
     bot.send_message(admin_id, "Bot started").await.unwrap();
 
-    let handler_storage = Arc::clone(&storage);
-    let handler_top_state = Arc::clone(&top_state);
+    let storage = EventStorage::open("perbot.db").expect("Failed to open database");
+    let provider = Arc::new(Mutex::new(EventProvider::new(storage)));
+
+    // Load top events from storage on startup
+    provider.lock().unwrap().reload();
+
+    schedule_first_event(bot.clone(), Arc::clone(&provider));
+
+    let handler_provider = Arc::clone(&provider);
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let storage = Arc::clone(&handler_storage);
-        let top_state = Arc::clone(&handler_top_state);
+        let provider = Arc::clone(&handler_provider);
         async move {
             println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
 
             // Save/update chat info
             {
                 let chat_info = extract_chat_info(&msg.chat);
-                let storage_guard = storage.lock().unwrap();
-                if let Err(e) = storage_guard.upsert_chat(&chat_info) {
+                let prov = provider.lock().unwrap();
+                if let Err(e) = prov.upsert_chat(&chat_info) {
                     log::error!("Failed to save chat info: {}", e);
                 }
             }
@@ -79,15 +49,8 @@ async fn main() {
                 // Store every incoming user message
                 let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
                 let msg_id = {
-                    let storage_guard = storage.lock().unwrap();
-                    let msg_info = MessageInfo {
-                        id: 0,
-                        user_id,
-                        chat_id: msg.chat.id.0,
-                        created_at: None,
-                        message: text.to_string(),
-                    };
-                    match storage_guard.insert_message(&msg_info) {
+                    let prov = provider.lock().unwrap();
+                    match prov.insert_message(user_id, msg.chat.id.0, text) {
                         Ok(id) => id,
                         Err(e) => {
                             log::error!("Failed to save message: {}", e);
@@ -107,33 +70,20 @@ async fn main() {
                     return Ok(());
                 }
 
-                if let Some(parsed) = parser::parse(text) {
-                    let mut event = parsed;
+                if let Some(mut event) = parser::parse(text) {
                     event.chat_id = msg.chat.id.0;
                     event.msg_id = msg_id;
-                    let stored = scheduler::calc_next(event);
 
-                    // Save event to storage
-                    {
-                        let storage_guard = storage.lock().unwrap();
-                        match storage_guard.insert_event(&stored) {
-                            Ok(id) => log::info!("Saved event with id: {}", id),
-                            Err(e) => {
-                                log::error!("Failed to save event: {}", e);
-                                return Ok(());
-                            }
-                        }
-                    }
+                    let (stored, _) = {
+                        let mut prov = provider.lock().unwrap();
+                        prov.insert(event)
+                    };
 
                     if let Some(dt) = stored.next_datetime {
                         println!("next_datetime: {:?}", dt);
 
-                        // Reload top events and reschedule
-                        reload_and_schedule(
-                            bot.clone(),
-                            Arc::clone(&storage),
-                            Arc::clone(&top_state),
-                        );
+                        // Reschedule with updated top events
+                        schedule_first_event(bot.clone(), Arc::clone(&provider));
 
                         format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
                     } else {
@@ -182,36 +132,17 @@ async fn main() {
     .await;
 }
 
-/// Reloads top events from DB and schedules the first one.
-fn reload_and_schedule(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: TopEventsState) {
-    {
-        let storage_guard = storage.lock().unwrap();
-        let now = chrono::Local::now().naive_local();
-        match storage_guard.get_top_events(now) {
-            Ok(events) => {
-                log::info!("Reloaded {} top events", events.len());
-                top_state.lock().unwrap().events = events;
-            }
-            Err(e) => log::error!("Failed to reload top events: {}", e),
-        }
-    }
-    schedule_first_event(bot, storage, top_state);
-}
-
 /// Schedules the first event from the top events list.
 /// Cancels any previously scheduled task, then spawns a new delayed task
 /// for the earliest event. After firing, recalculates next datetime,
 /// saves to DB, updates the in-memory list, and schedules the next first event.
-fn schedule_first_event(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: TopEventsState) {
-    let mut top = top_state.lock().unwrap();
+fn schedule_first_event(bot: Bot, provider: EventProviderState) {
+    let mut prov = provider.lock().unwrap();
 
     // Cancel current scheduled task
-    if let Some(handle) = top.abort_handle.take() {
-        log::info!("Aborting previously scheduled task");
-        handle.abort();
-    }
+    prov.abort_current();
 
-    let Some(event) = top.events.first().cloned() else {
+    let Some(event) = prov.get_next() else {
         log::info!("No top events to schedule");
         return;
     };
@@ -222,8 +153,7 @@ fn schedule_first_event(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: 
 
     let chat_id = ChatId(event.chat_id);
     let message = event.message.clone();
-    let top_clone = Arc::clone(&top_state);
-    let storage_clone = Arc::clone(&storage);
+    let provider_clone = Arc::clone(&provider);
 
     let join_handle = tokio::spawn(async move {
         let now = chrono::Local::now().naive_local();
@@ -238,66 +168,21 @@ fn schedule_first_event(bot: Bot, storage: Arc<Mutex<EventStorage>>, top_state: 
         );
 
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-        let now = chrono::Local::now().naive_local();
         // TODO: make separate thread for sending messages
         if let Err(e) = bot.send_message(chat_id, &message).await {
             log::error!("Failed to send message for event {}: {}", event_id, e);
         }
 
-        // Recalc next datetime and save to DB
-        let next = scheduler::calc_next_at(event, now);
         {
-            let Ok(storage_guard) = storage_clone.lock() else {
-                log::error!("Failed to lock storage after event fired");
-                return;
-            };
-            if let Err(e) = storage_guard.update_schedule(event_id, next.active, next.next_datetime)
-            {
-                log::error!("Failed to update schedule for event {}: {}", event_id, e);
-            }
-        }
-
-        // Update in-memory top events list
-        {
-            let mut top = top_clone.lock().unwrap();
-            top.abort_handle = None;
-            // Remove fired event
-            top.events.retain(|e| e.id != event_id);
-            // If still active, insert back sorted by next_datetime
-            if next.active {
-                let pos = top
-                    .events
-                    .iter()
-                    .position(|e| e.next_datetime > next.next_datetime)
-                    .unwrap_or(top.events.len());
-                top.events.insert(pos, next);
-            }
-        }
-
-        // If list is empty, reload from DB
-        let is_empty = top_clone.lock().unwrap().events.is_empty();
-        if is_empty {
-            let events = {
-                let Ok(storage_guard) = storage_clone.lock() else {
-                    log::error!("Failed to lock storage for reload");
-                    return;
-                };
-                storage_guard.get_top_events(now)
-            };
-            match events {
-                Ok(events) => {
-                    log::info!("Reloaded {} top events after list emptied", events.len());
-                    top_clone.lock().unwrap().events = events;
-                }
-                Err(e) => log::error!("Failed to reload top events: {}", e),
-            }
+            let mut prov = provider_clone.lock().unwrap();
+            prov.update_and_get_next(event);
         }
 
         // Schedule the next first event
-        schedule_first_event(bot, storage_clone, top_clone);
+        schedule_first_event(bot, provider_clone);
     });
 
-    top.abort_handle = Some(join_handle.abort_handle());
+    prov.set_abort_handle(join_handle.abort_handle());
 }
 
 fn format_duration(total_secs: u64) -> String {
