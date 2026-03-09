@@ -149,6 +149,8 @@ fn run_table(table_idx: usize, table: &Table) {
                         .unwrap();
                     event.chat_id = CHAT_ID;
                     event.msg_id = msg_id;
+                    // Mirror real app: EventProvider::insert calls calc_next before persisting
+                    let event = scheduler::calc_next_at(event, row.ts);
                     storage.insert_event(&event).unwrap()
                 });
             }
@@ -169,10 +171,19 @@ fn run_table(table_idx: usize, table: &Table) {
                     }
                 };
                 let event = storage.get(id).unwrap().unwrap();
-                let result = scheduler::calc_next_at(event, row.ts);
-                storage
-                    .update_schedule(result.id, result.active, result.next_datetime)
-                    .unwrap();
+                // Only recalculate when the event has fired (now >= next_datetime).
+                // Before that, just verify the stored schedule.
+                let result = if event.active
+                    && event.next_datetime.map_or(false, |nd| row.ts < nd)
+                {
+                    event
+                } else {
+                    let r = scheduler::calc_next_at(event, row.ts);
+                    storage
+                        .update_schedule(r.id, r.active, r.next_datetime)
+                        .unwrap();
+                    r
+                };
                 if row.value == "NONE" {
                     if result.active {
                         failures.push((
