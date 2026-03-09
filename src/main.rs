@@ -91,15 +91,13 @@ async fn main() {
                     event.chat_id = msg.chat.id.0;
                     event.msg_id = msg_id;
 
-                    let (stored, _) = {
+                    let stored = {
                         let mut prov = provider.lock().unwrap();
-                        prov.insert(event)
+                        prov.insert_and_get(event)
                     };
 
                     if let Some(dt) = stored.next_datetime {
-                        println!("next_datetime: {:?}", dt);
-
-                        // Reschedule with updated top events
+                        // Reschedule with updated top event
                         schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
 
                         format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))

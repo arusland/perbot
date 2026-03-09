@@ -74,20 +74,35 @@ impl EventProvider {
     }
 
     /// Inserts a new event: calculates next datetime, persists to DB,
-    /// reloads the next event, and returns the stored event plus the next schedulable event.
-    pub fn insert(&mut self, event: EventInfo) -> (EventInfo, Option<EventInfo>) {
-        let stored = scheduler::calc_next(event);
+    /// reloads the next event, and returns the event as stored in DB.
+    pub fn insert_and_get(&mut self, event: EventInfo) -> EventInfo {
+        let calculated = scheduler::calc_next(event);
 
-        match self.storage.insert_event(&stored) {
-            Ok(id) => log::info!("Saved event with id: {}", id),
+        let id = match self.storage.insert_event(&calculated) {
+            Ok(id) => {
+                log::info!("Saved event with id: {}", id);
+                id
+            }
             Err(e) => {
                 log::error!("Failed to save event: {}", e);
-                return (stored, self.get_next());
+                return calculated;
+            }
+        };
+
+        // Reload to update the next event cache
+        self.reload();
+
+        match self.storage.get_event(id) {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                log::error!("Event {} not found after insert", id);
+                calculated
+            }
+            Err(e) => {
+                log::error!("Failed to get event {}: {}", id, e);
+                calculated
             }
         }
-
-        self.reload();
-        (stored, self.get_next())
     }
 
     /// Recalculates the event's next occurrence and saves to DB.

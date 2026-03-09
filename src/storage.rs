@@ -384,6 +384,21 @@ impl EventStorage {
         Ok(rows_affected > 0)
     }
 
+    /// Returns an event by its ID.
+    pub fn get_event(&self, id: i64) -> Result<Option<EventInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+             FROM events WHERE id = ?1",
+        )?;
+
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_event(row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Returns the single nearest active event from `now`.
     pub fn get_next_event(&self, now: NaiveDateTime) -> Result<Option<EventInfo>> {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
