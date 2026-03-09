@@ -7,7 +7,7 @@ use teloxide::{prelude::*, types::ParseMode};
 use tokio::sync::mpsc;
 
 type EventProviderState = Arc<Mutex<EventProvider>>;
-type MessageSender = mpsc::UnboundedSender<(ChatId, String)>;
+type MessageSender = mpsc::UnboundedSender<Vec<(ChatId, String)>>;
 
 #[tokio::main]
 async fn main() {
@@ -31,12 +31,14 @@ async fn main() {
     provider.lock().unwrap().reload();
 
     // Channel for sending scheduled messages to Telegram
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<(ChatId, String)>();
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<(ChatId, String)>>();
     let sender_bot = bot.clone();
     tokio::spawn(async move {
-        while let Some((chat_id, message)) = msg_rx.recv().await {
-            if let Err(e) = sender_bot.send_message(chat_id, &message).await {
-                log::error!("Failed to send message to {}: {}", chat_id, e);
+        while let Some(messages) = msg_rx.recv().await {
+            for (chat_id, message) in messages {
+                if let Err(e) = sender_bot.send_message(chat_id, &message).await {
+                    log::error!("Failed to send message to {}: {}", chat_id, e);
+                }
             }
         }
     });
@@ -166,31 +168,39 @@ fn schedule_first_event(bot: Bot, provider: EventProviderState, msg_tx: MessageS
         return;
     };
 
-    let chat_id = ChatId(event.chat_id);
-    let message = event.message.clone();
     let provider_clone = Arc::clone(&provider);
 
     let join_handle = tokio::spawn(async move {
+        // Get all events at this timestamp
+        let events = {
+            let prov = provider_clone.lock().unwrap();
+            prov.get_events_at(dt)
+        };
+
         let now = chrono::Local::now().naive_local();
         let delay_secs = dt.signed_duration_since(now).num_seconds().max(0) as u64;
-        let event_id = event.id;
 
         log::info!(
             "Scheduling event {} for {:?} (in {})",
-            event_id,
+            event.id,
             dt,
             format_duration(delay_secs)
         );
 
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
 
-        if let Err(e) = msg_tx.send((chat_id, message)) {
-            log::error!("Failed to queue message for event {}: {}", event_id, e);
+        let messages: Vec<(ChatId, String)> = events
+            .iter()
+            .map(|e| (ChatId(e.chat_id), e.message.clone()))
+            .collect();
+
+        if let Err(e) = msg_tx.send(messages) {
+            log::error!("Failed to queue messages: {}", e);
         }
 
         {
             let mut prov = provider_clone.lock().unwrap();
-            prov.update(event);
+            prov.update_and_reload(events);
         }
 
         // Schedule the next first event

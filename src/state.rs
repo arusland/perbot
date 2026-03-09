@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 
 use crate::parser::EventInfo;
 use crate::scheduler;
@@ -6,7 +6,7 @@ use crate::storage::{ChatInfo, EventStorage, MessageInfo};
 
 pub struct EventProvider {
     storage: EventStorage,
-    events: Vec<EventInfo>,
+    next_event: Option<EventInfo>,
     abort_handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -14,7 +14,7 @@ impl EventProvider {
     pub fn new(storage: EventStorage) -> Self {
         Self {
             storage,
-            events: Vec::new(),
+            next_event: None,
             abort_handle: None,
         }
     }
@@ -39,25 +39,42 @@ impl EventProvider {
         self.storage.insert_message(&msg)
     }
 
-    /// Loads the top nearest active events from DB into the in-memory list.
+    /// Loads the nearest active event from DB into memory.
     pub fn reload(&mut self) {
         let now = Local::now().naive_local();
-        match self.storage.get_top_events(now) {
-            Ok(events) => {
-                log::info!("Loaded {} top events from storage", events.len());
-                self.events = events;
+        match self.storage.get_next_event(now) {
+            Ok(event) => {
+                log::info!(
+                    "Loaded next event from storage: {}",
+                    event
+                        .as_ref()
+                        .map(|e| format!("id={}", e.id))
+                        .unwrap_or_else(|| "none".to_string())
+                );
+                self.next_event = event;
             }
-            Err(e) => log::error!("Failed to load top events: {}", e),
+            Err(e) => log::error!("Failed to load next event: {}", e),
         }
     }
 
-    /// Returns the first (nearest) active event, if any.
+    /// Returns the nearest active event, if any.
     pub fn get_next(&self) -> Option<EventInfo> {
-        self.events.first().cloned()
+        self.next_event.clone()
+    }
+
+    /// Returns all active events scheduled at the given datetime.
+    pub fn get_events_at(&self, dt: NaiveDateTime) -> Vec<EventInfo> {
+        match self.storage.get_events_at(dt) {
+            Ok(events) => events,
+            Err(e) => {
+                log::error!("Failed to get events at {:?}: {}", dt, e);
+                Vec::new()
+            }
+        }
     }
 
     /// Inserts a new event: calculates next datetime, persists to DB,
-    /// reloads the in-memory list, and returns the first active event.
+    /// reloads the next event, and returns the stored event plus the next schedulable event.
     pub fn insert(&mut self, event: EventInfo) -> (EventInfo, Option<EventInfo>) {
         let stored = scheduler::calc_next(event);
 
@@ -73,8 +90,7 @@ impl EventProvider {
         (stored, self.get_next())
     }
 
-    /// Recalculates the event's next occurrence, saves to DB,
-    /// updates the in-memory list, and returns the first active event.
+    /// Recalculates the event's next occurrence and saves to DB.
     pub fn update(&mut self, event: EventInfo) {
         let now = Local::now().naive_local();
         let event_id = event.id;
@@ -86,24 +102,14 @@ impl EventProvider {
         {
             log::error!("Failed to update schedule for event {}: {}", event_id, e);
         }
+    }
 
-        // Remove the old entry
-        self.events.retain(|e| e.id != event_id);
-
-        // If still active, insert back in sorted position
-        if next.active {
-            let pos = self
-                .events
-                .iter()
-                .position(|e| e.next_datetime > next.next_datetime)
-                .unwrap_or(self.events.len());
-            self.events.insert(pos, next);
+    /// Recalculates all given events and reloads the next event from DB.
+    pub fn update_and_reload(&mut self, events: Vec<EventInfo>) {
+        for event in events {
+            self.update(event);
         }
-
-        // If list is empty, reload from DB
-        if self.events.is_empty() {
-            self.reload();
-        }
+        self.reload();
     }
 
     /// Stores the abort handle for the currently scheduled task.
