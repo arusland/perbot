@@ -4,8 +4,10 @@ use perbot::storage::{ChatInfo, ChatType, EventStorage};
 use std::process;
 use std::sync::{Arc, Mutex};
 use teloxide::{prelude::*, types::ParseMode};
+use tokio::sync::mpsc;
 
 type EventProviderState = Arc<Mutex<EventProvider>>;
+type MessageSender = mpsc::UnboundedSender<(ChatId, String)>;
 
 #[tokio::main]
 async fn main() {
@@ -28,11 +30,24 @@ async fn main() {
     // Load top events from storage on startup
     provider.lock().unwrap().reload();
 
-    schedule_first_event(bot.clone(), Arc::clone(&provider));
+    // Channel for sending scheduled messages to Telegram
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<(ChatId, String)>();
+    let sender_bot = bot.clone();
+    tokio::spawn(async move {
+        while let Some((chat_id, message)) = msg_rx.recv().await {
+            if let Err(e) = sender_bot.send_message(chat_id, &message).await {
+                log::error!("Failed to send message to {}: {}", chat_id, e);
+            }
+        }
+    });
+
+    schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
 
     let handler_provider = Arc::clone(&provider);
+    let handler_msg_tx = msg_tx;
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let provider = Arc::clone(&handler_provider);
+        let msg_tx = handler_msg_tx.clone();
         async move {
             println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
 
@@ -83,7 +98,7 @@ async fn main() {
                         println!("next_datetime: {:?}", dt);
 
                         // Reschedule with updated top events
-                        schedule_first_event(bot.clone(), Arc::clone(&provider));
+                        schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
 
                         format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
                     } else {
@@ -136,7 +151,7 @@ async fn main() {
 /// Cancels any previously scheduled task, then spawns a new delayed task
 /// for the earliest event. After firing, recalculates next datetime,
 /// saves to DB, updates the in-memory list, and schedules the next first event.
-fn schedule_first_event(bot: Bot, provider: EventProviderState) {
+fn schedule_first_event(bot: Bot, provider: EventProviderState, msg_tx: MessageSender) {
     let mut prov = provider.lock().unwrap();
 
     // Cancel current scheduled task
@@ -168,9 +183,9 @@ fn schedule_first_event(bot: Bot, provider: EventProviderState) {
         );
 
         tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-        // TODO: make separate thread for sending messages
-        if let Err(e) = bot.send_message(chat_id, &message).await {
-            log::error!("Failed to send message for event {}: {}", event_id, e);
+
+        if let Err(e) = msg_tx.send((chat_id, message)) {
+            log::error!("Failed to queue message for event {}: {}", event_id, e);
         }
 
         {
@@ -179,7 +194,7 @@ fn schedule_first_event(bot: Bot, provider: EventProviderState) {
         }
 
         // Schedule the next first event
-        schedule_first_event(bot, provider_clone);
+        schedule_first_event(bot, provider_clone, msg_tx);
     });
 
     prov.set_abort_handle(join_handle.abort_handle());
