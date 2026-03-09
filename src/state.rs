@@ -75,7 +75,7 @@ impl EventProvider {
 
     /// Recalculates the event's next occurrence, saves to DB,
     /// updates the in-memory list, and returns the first active event.
-    pub fn update_and_get_next(&mut self, event: EventInfo) {
+    pub fn update(&mut self, event: EventInfo) {
         let now = Local::now().naive_local();
         let event_id = event.id;
         let next = scheduler::calc_next_at(event, now);

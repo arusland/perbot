@@ -190,7 +190,7 @@ fn schedule_first_event(bot: Bot, provider: EventProviderState, msg_tx: MessageS
 
         {
             let mut prov = provider_clone.lock().unwrap();
-            prov.update_and_get_next(event);
+            prov.update(event);
         }
 
         // Schedule the next first event
