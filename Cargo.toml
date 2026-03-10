@@ -3,6 +3,7 @@ name = "perbot"
 description = "Telegram event scheduler bot"
 version = "0.1.0"
 edition = "2024"
+default-run = "perbot"
 license = "Apache-2.0"
 
 [dependencies]
