@@ -43,6 +43,38 @@ async fn main() {
         }
     });
 
+    // Send missed events as a single message per chat and recalculate them
+    {
+        let mut prov = provider.lock().unwrap();
+        let missed = prov.get_missed_events().to_vec();
+        if !missed.is_empty() {
+            log::info!("Sending {} missed event(s)", missed.len());
+
+            // Group missed events by chat_id
+            let mut by_chat: std::collections::HashMap<i64, Vec<&str>> =
+                std::collections::HashMap::new();
+            for event in &missed {
+                by_chat
+                    .entry(event.chat_id)
+                    .or_default()
+                    .push(&event.message);
+            }
+
+            let messages: Vec<(ChatId, String)> = by_chat
+                .into_iter()
+                .map(|(chat_id, msgs)| {
+                    let combined = msgs.join("\n");
+                    (ChatId(chat_id), format!("Missed:\n{}", combined))
+                })
+                .collect();
+
+            if let Err(e) = msg_tx.send(messages) {
+                log::error!("Failed to queue missed messages: {}", e);
+            }
+            prov.update_and_reload(missed);
+        }
+    }
+
     schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
 
     let handler_provider = Arc::clone(&provider);

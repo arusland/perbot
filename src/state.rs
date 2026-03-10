@@ -7,6 +7,7 @@ use crate::storage::{ChatInfo, EventStorage, MessageInfo};
 pub struct EventProvider {
     storage: EventStorage,
     next_event: Option<EventInfo>,
+    missed_events: Vec<EventInfo>,
     abort_handle: Option<tokio::task::AbortHandle>,
 }
 
@@ -15,6 +16,7 @@ impl EventProvider {
         Self {
             storage,
             next_event: None,
+            missed_events: Vec::new(),
             abort_handle: None,
         }
     }
@@ -39,7 +41,7 @@ impl EventProvider {
         self.storage.insert_message(&msg)
     }
 
-    /// Loads the nearest active event from DB into memory.
+    /// Loads the nearest active event and any missed events from DB into memory.
     pub fn reload(&mut self) {
         let now = Local::now().naive_local();
         match self.storage.get_next_event(now) {
@@ -55,6 +57,18 @@ impl EventProvider {
             }
             Err(e) => log::error!("Failed to load next event: {}", e),
         }
+        match self.storage.get_missed_events(now) {
+            Ok(events) => {
+                log::info!("Loaded {} missed event(s) from storage", events.len());
+                self.missed_events = events;
+            }
+            Err(e) => log::error!("Failed to load missed events: {}", e),
+        }
+    }
+
+    /// Returns missed events (active events whose datetime is in the past).
+    pub fn get_missed_events(&self) -> &[EventInfo] {
+        &self.missed_events
     }
 
     /// Returns the nearest active event, if any.
