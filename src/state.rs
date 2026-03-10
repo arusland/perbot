@@ -62,6 +62,17 @@ impl EventProvider {
         self.next_event.clone()
     }
 
+    /// Returns an event by ID.
+    pub fn get_event(&self, id: i64) -> Option<EventInfo> {
+        match self.storage.get_event(id) {
+            Ok(event) => event,
+            Err(e) => {
+                log::error!("Failed to get event {}: {}", id, e);
+                None
+            }
+        }
+    }
+
     /// Returns all active events scheduled at the given datetime.
     pub fn get_events_at(&self, dt: NaiveDateTime) -> Vec<EventInfo> {
         match self.storage.get_events_at(dt) {
@@ -76,8 +87,13 @@ impl EventProvider {
     /// Inserts a new event: calculates next datetime, persists to DB,
     /// reloads the next event, and returns the event as stored in DB.
     pub fn insert_and_get(&mut self, event: EventInfo) -> EventInfo {
-        let calculated = scheduler::calc_next(event);
+        self.insert_and_get_at(event, Local::now().naive_local())
+    }
 
+    /// Inserts a new event: calculates next datetime at the given time,
+    /// persists to DB, reloads the next event, and returns the event as stored in DB.
+    pub fn insert_and_get_at(&mut self, event: EventInfo, now: NaiveDateTime) -> EventInfo {
+        let calculated = scheduler::calc_next_at(event, now);
         let id = match self.storage.insert_event(&calculated) {
             Ok(id) => {
                 log::info!("Saved event with id: {}", id);
@@ -108,6 +124,11 @@ impl EventProvider {
     /// Recalculates the event's next occurrence and saves to DB.
     pub fn update(&mut self, event: EventInfo) {
         let now = Local::now().naive_local();
+        self.update_at(event, now);
+    }
+
+    /// Recalculates the event's next occurrence at the given datetime and saves to DB.
+    pub fn update_at(&mut self, event: EventInfo, now: NaiveDateTime) {
         let event_id = event.id;
         let next = scheduler::calc_next_at(event, now);
 

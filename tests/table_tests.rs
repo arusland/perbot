@@ -1,6 +1,7 @@
 use chrono::NaiveDateTime;
-use perbot::storage::{ChatInfo, ChatType, EventStorage, MessageInfo};
-use perbot::{parser, scheduler};
+use perbot::parser;
+use perbot::state::EventProvider;
+use perbot::storage::{ChatInfo, ChatType, EventStorage};
 
 struct TableRow {
     ts: NaiveDateTime,
@@ -117,7 +118,8 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 fn run_table(table_idx: usize, table: &Table) {
     const CHAT_ID: i64 = 1;
     let storage = EventStorage::open_in_memory().unwrap();
-    storage
+    let mut provider = EventProvider::new(storage);
+    provider
         .upsert_chat(&ChatInfo {
             id: CHAT_ID,
             chat_type: ChatType::Private,
@@ -138,20 +140,11 @@ fn run_table(table_idx: usize, table: &Table) {
         match row.actor.as_str() {
             "USER" => {
                 current_id = parser::parse(&row.value).map(|mut event| {
-                    let msg_id = storage
-                        .insert_message(&MessageInfo {
-                            id: 0,
-                            user_id: None,
-                            chat_id: CHAT_ID,
-                            created_at: None,
-                            message: row.value.clone(),
-                        })
-                        .unwrap();
+                    let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
                     event.chat_id = CHAT_ID;
                     event.msg_id = msg_id;
-                    // Mirror real app: EventProvider::insert calls calc_next before persisting
-                    let event = scheduler::calc_next_at(event, row.ts);
-                    storage.insert_event(&event).unwrap()
+                    let event = provider.insert_and_get_at(event, row.ts);
+                    event.id
                 });
             }
             "SYSTEM" => {
@@ -170,19 +163,29 @@ fn run_table(table_idx: usize, table: &Table) {
                         continue;
                     }
                 };
-                let event = storage.get(id).unwrap().unwrap();
+                let events = provider.get_event(id);
+                let event = match events {
+                    Some(event) => event,
+                    None => {
+                        failures.push((
+                            step,
+                            format!("event {} not found in storage", id),
+                            String::new(),
+                        ));
+                        continue;
+                    }
+                };
                 // Only recalculate when the event has fired (now >= next_datetime).
                 // Before that, just verify the stored schedule.
-                let result = if event.active
-                    && event.next_datetime.map_or(false, |nd| row.ts < nd)
+                if !(event.active && event.next_datetime.map_or(false, |nd| row.ts < nd)) {
+                    provider.update_at(event.clone(), row.ts);
+                }
+                // Re-read the event after potential update
+                let result = if event.active && event.next_datetime.map_or(false, |nd| row.ts < nd)
                 {
                     event
                 } else {
-                    let r = scheduler::calc_next_at(event, row.ts);
-                    storage
-                        .update_schedule(r.id, r.active, r.next_datetime)
-                        .unwrap();
-                    r
+                    provider.get_event(id).unwrap_or(event)
                 };
                 if row.value == "NONE" {
                     if result.active {
