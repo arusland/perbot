@@ -1,28 +1,40 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use chrono::{Local, NaiveDateTime};
+use tokio::sync::mpsc;
 
 use crate::parser::EventInfo;
 use crate::scheduler;
 use crate::storage::{ChatInfo, EventStorage, MessageInfo};
 
-pub struct EventProvider {
+pub type MessageSender = mpsc::UnboundedSender<Vec<(i64, String)>>;
+
+struct EventProviderState {
     storage: EventStorage,
     next_event: Option<EventInfo>,
     missed_events: Vec<EventInfo>,
-    abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+#[derive(Clone)]
+pub struct EventProvider {
+    inner: Arc<Mutex<EventProviderState>>,
 }
 
 impl EventProvider {
     pub fn new(storage: EventStorage) -> Self {
         Self {
-            storage,
-            next_event: None,
-            missed_events: Vec::new(),
-            abort_handle: None,
+            inner: Arc::new(Mutex::new(EventProviderState {
+                storage,
+                next_event: None,
+                missed_events: Vec::new(),
+            })),
         }
     }
 
     pub fn upsert_chat(&self, chat: &ChatInfo) -> rusqlite::Result<()> {
-        self.storage.upsert_chat(chat)
+        let inner = self.inner.lock().unwrap();
+        inner.storage.upsert_chat(chat)
     }
 
     pub fn insert_message(
@@ -31,6 +43,7 @@ impl EventProvider {
         chat_id: i64,
         message: &str,
     ) -> rusqlite::Result<i64> {
+        let inner = self.inner.lock().unwrap();
         let msg = MessageInfo {
             id: 0,
             user_id,
@@ -38,13 +51,14 @@ impl EventProvider {
             created_at: None,
             message: message.to_string(),
         };
-        self.storage.insert_message(&msg)
+        inner.storage.insert_message(&msg)
     }
 
     /// Loads the nearest active event and any missed events from DB into memory.
-    pub fn reload(&mut self) {
+    pub fn reload(&self) {
+        let mut inner = self.inner.lock().unwrap();
         let now = Local::now().naive_local();
-        match self.storage.get_next_event(now) {
+        match inner.storage.get_next_event(now) {
             Ok(event) => {
                 log::info!(
                     "Loaded next event from storage: {}",
@@ -53,32 +67,35 @@ impl EventProvider {
                         .map(|e| format!("id={}", e.id))
                         .unwrap_or_else(|| "none".to_string())
                 );
-                self.next_event = event;
+                inner.next_event = event;
             }
             Err(e) => log::error!("Failed to load next event: {}", e),
         }
-        match self.storage.get_missed_events(now) {
+        match inner.storage.get_missed_events(now) {
             Ok(events) => {
                 log::info!("Loaded {} missed event(s) from storage", events.len());
-                self.missed_events = events;
+                inner.missed_events = events;
             }
             Err(e) => log::error!("Failed to load missed events: {}", e),
         }
     }
 
     /// Returns missed events (active events whose datetime is in the past).
-    pub fn get_missed_events(&self) -> &[EventInfo] {
-        &self.missed_events
+    pub fn get_missed_events(&self) -> Vec<EventInfo> {
+        let inner = self.inner.lock().unwrap();
+        inner.missed_events.clone()
     }
 
     /// Returns the nearest active event, if any.
     pub fn get_next(&self) -> Option<EventInfo> {
-        self.next_event.clone()
+        let inner = self.inner.lock().unwrap();
+        inner.next_event.clone()
     }
 
     /// Returns an event by ID.
     pub fn get_event(&self, id: i64) -> Option<EventInfo> {
-        match self.storage.get_event(id) {
+        let inner = self.inner.lock().unwrap();
+        match inner.storage.get_event(id) {
             Ok(event) => event,
             Err(e) => {
                 log::error!("Failed to get event {}: {}", id, e);
@@ -89,7 +106,8 @@ impl EventProvider {
 
     /// Returns all active events scheduled at the given datetime.
     pub fn get_events_at(&self, dt: NaiveDateTime) -> Vec<EventInfo> {
-        match self.storage.get_events_at(dt) {
+        let inner = self.inner.lock().unwrap();
+        match inner.storage.get_events_at(dt) {
             Ok(events) => events,
             Err(e) => {
                 log::error!("Failed to get events at {:?}: {}", dt, e);
@@ -100,15 +118,16 @@ impl EventProvider {
 
     /// Inserts a new event: calculates next datetime, persists to DB,
     /// reloads the next event, and returns the event as stored in DB.
-    pub fn insert_and_get(&mut self, event: EventInfo) -> EventInfo {
+    pub fn insert_and_get(&self, event: EventInfo) -> EventInfo {
         self.insert_and_get_at(event, Local::now().naive_local())
     }
 
     /// Inserts a new event: calculates next datetime at the given time,
     /// persists to DB, reloads the next event, and returns the event as stored in DB.
-    pub fn insert_and_get_at(&mut self, event: EventInfo, now: NaiveDateTime) -> EventInfo {
+    pub fn insert_and_get_at(&self, event: EventInfo, now: NaiveDateTime) -> EventInfo {
+        let mut inner = self.inner.lock().unwrap();
         let calculated = scheduler::calc_next_at(event, now);
-        let id = match self.storage.insert_event(&calculated) {
+        let id = match inner.storage.insert_event(&calculated) {
             Ok(id) => {
                 log::info!("Saved event with id: {}", id);
                 id
@@ -120,9 +139,9 @@ impl EventProvider {
         };
 
         // Reload to update the next event cache
-        self.reload();
+        Self::reload_inner(&mut inner);
 
-        match self.storage.get_event(id) {
+        match inner.storage.get_event(id) {
             Ok(Some(event)) => event,
             Ok(None) => {
                 log::error!("Event {} not found after insert", id);
@@ -136,17 +155,18 @@ impl EventProvider {
     }
 
     /// Recalculates the event's next occurrence and saves to DB.
-    pub fn update(&mut self, event: EventInfo) {
+    pub fn update(&self, event: EventInfo) {
         let now = Local::now().naive_local();
         self.update_at(event, now);
     }
 
     /// Recalculates the event's next occurrence at the given datetime and saves to DB.
-    pub fn update_at(&mut self, event: EventInfo, now: NaiveDateTime) {
+    pub fn update_at(&self, event: EventInfo, now: NaiveDateTime) {
+        let inner = self.inner.lock().unwrap();
         let event_id = event.id;
         let next = scheduler::calc_next_at(event, now);
 
-        if let Err(e) = self
+        if let Err(e) = inner
             .storage
             .update_schedule(event_id, next.active, next.next_datetime)
         {
@@ -155,23 +175,114 @@ impl EventProvider {
     }
 
     /// Recalculates all given events and reloads the next event from DB.
-    pub fn update_and_reload(&mut self, events: Vec<EventInfo>) {
+    pub fn update_and_reload(&self, events: Vec<EventInfo>) {
+        let mut inner = self.inner.lock().unwrap();
+        let now = Local::now().naive_local();
         for event in events {
-            self.update(event);
+            let event_id = event.id;
+            let next = scheduler::calc_next_at(event, now);
+            if let Err(e) = inner
+                .storage
+                .update_schedule(event_id, next.active, next.next_datetime)
+            {
+                log::error!("Failed to update schedule for event {}: {}", event_id, e);
+            }
         }
-        self.reload();
+        Self::reload_inner(&mut inner);
     }
 
-    /// Stores the abort handle for the currently scheduled task.
-    pub fn set_abort_handle(&mut self, handle: tokio::task::AbortHandle) {
-        self.abort_handle = Some(handle);
+    /// Starts the background polling thread. Reloads events from DB, sends missed events,
+    /// then loops every second checking if the nearest event is due.
+    pub fn start(&self, msg_tx: MessageSender) {
+        // Initial reload and send missed events
+        {
+            self.reload();
+
+            let missed = self.get_missed_events();
+            if !missed.is_empty() {
+                log::info!("Sending {} missed event(s)", missed.len());
+
+                let mut by_chat: HashMap<i64, Vec<&str>> = HashMap::new();
+                for event in &missed {
+                    by_chat
+                        .entry(event.chat_id)
+                        .or_default()
+                        .push(&event.message);
+                }
+
+                let messages: Vec<(i64, String)> = by_chat
+                    .into_iter()
+                    .map(|(chat_id, msgs)| {
+                        let combined = msgs.join("\n");
+                        (chat_id, format!("Missed:\n{}", combined))
+                    })
+                    .collect();
+
+                if let Err(e) = msg_tx.send(messages) {
+                    log::error!("Failed to queue missed messages: {}", e);
+                }
+                self.update_and_reload(missed);
+            }
+        }
+
+        // Polling loop
+        let provider = self.clone();
+        std::thread::spawn(move || {
+            let mut next_date: Option<NaiveDateTime> = None;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+
+                let Some(event) = provider.get_next() else {
+                    continue;
+                };
+                let Some(dt) = event.next_datetime else {
+                    continue;
+                };
+
+                let now = Local::now().naive_local();
+                if now >= dt {
+                    let events = provider.get_events_at(dt);
+                    let messages: Vec<(i64, String)> = events
+                        .iter()
+                        .map(|e| (e.chat_id, e.message.clone()))
+                        .collect();
+
+                    if let Err(e) = msg_tx.send(messages) {
+                        log::error!("Failed to queue messages: {}", e);
+                    }
+                    provider.update_and_reload(events);
+                } else if next_date.is_none() || next_date.unwrap() != dt {
+                    next_date = Some(dt);
+                    log::info!("Next event: {}", dt);
+                }
+            }
+        });
     }
 
-    /// Aborts the currently scheduled task, if any.
-    pub fn abort_current(&mut self) {
-        if let Some(handle) = self.abort_handle.take() {
-            log::info!("Aborting previously scheduled task");
-            handle.abort();
+    /// Internal reload that operates on an already-locked inner.
+    fn reload_inner(inner: &mut EventProviderState) {
+        let now = Local::now().naive_local();
+        match inner.storage.get_next_event(now) {
+            Ok(event) => {
+                log::info!(
+                    "Loaded next event from storage: {}",
+                    event
+                        .as_ref()
+                        .map(|e| format!("id={}", e.id))
+                        .unwrap_or_else(|| "none".to_string())
+                );
+                inner.next_event = event;
+            }
+            Err(e) => log::error!("Failed to load next event: {}", e),
+        }
+        match inner.storage.get_missed_events(now) {
+            Ok(events) => {
+                if !events.is_empty() {
+                    log::info!("Loaded {} missed event(s) from storage", events.len());
+                }
+                inner.missed_events = events;
+            }
+            Err(e) => log::error!("Failed to load missed events: {}", e),
         }
     }
 }

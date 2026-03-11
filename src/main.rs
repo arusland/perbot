@@ -2,12 +2,8 @@ use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::{ChatInfo, ChatType, EventStorage};
 use std::process;
-use std::sync::{Arc, Mutex};
 use teloxide::{prelude::*, types::ParseMode};
 use tokio::sync::mpsc;
-
-type EventProviderState = Arc<Mutex<EventProvider>>;
-type MessageSender = mpsc::UnboundedSender<Vec<(ChatId, String)>>;
 
 #[tokio::main]
 async fn main() {
@@ -25,86 +21,44 @@ async fn main() {
     bot.send_message(admin_id, "Bot started").await.unwrap();
 
     let storage = EventStorage::open("perbot.db").expect("Failed to open database");
-    let provider = Arc::new(Mutex::new(EventProvider::new(storage)));
-
-    // Load top events from storage on startup
-    provider.lock().unwrap().reload();
+    let provider = EventProvider::new(storage);
 
     // Channel for sending scheduled messages to Telegram
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<(ChatId, String)>>();
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<(i64, String)>>();
     let sender_bot = bot.clone();
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for (chat_id, message) in messages {
-                if let Err(e) = sender_bot.send_message(chat_id, &message).await {
+                if let Err(e) = sender_bot.send_message(ChatId(chat_id), &message).await {
                     log::error!("Failed to send message to {}: {}", chat_id, e);
                 }
             }
         }
     });
 
-    // Send missed events as a single message per chat and recalculate them
-    {
-        let mut prov = provider.lock().unwrap();
-        let missed = prov.get_missed_events().to_vec();
-        if !missed.is_empty() {
-            log::info!("Sending {} missed event(s)", missed.len());
+    // Start background polling thread: reloads events, sends missed, polls every second
+    provider.start(msg_tx);
 
-            // Group missed events by chat_id
-            let mut by_chat: std::collections::HashMap<i64, Vec<&str>> =
-                std::collections::HashMap::new();
-            for event in &missed {
-                by_chat
-                    .entry(event.chat_id)
-                    .or_default()
-                    .push(&event.message);
-            }
-
-            let messages: Vec<(ChatId, String)> = by_chat
-                .into_iter()
-                .map(|(chat_id, msgs)| {
-                    let combined = msgs.join("\n");
-                    (ChatId(chat_id), format!("Missed:\n{}", combined))
-                })
-                .collect();
-
-            if let Err(e) = msg_tx.send(messages) {
-                log::error!("Failed to queue missed messages: {}", e);
-            }
-            prov.update_and_reload(missed);
-        }
-    }
-
-    schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
-
-    let handler_provider = Arc::clone(&provider);
-    let handler_msg_tx = msg_tx;
+    let handler_provider = provider.clone();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let provider = Arc::clone(&handler_provider);
-        let msg_tx = handler_msg_tx.clone();
+        let provider = handler_provider.clone();
         async move {
             println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
 
             // Save/update chat info
-            {
-                let chat_info = extract_chat_info(&msg.chat);
-                let prov = provider.lock().unwrap();
-                if let Err(e) = prov.upsert_chat(&chat_info) {
-                    log::error!("Failed to save chat info: {}", e);
-                }
+            let chat_info = extract_chat_info(&msg.chat);
+            if let Err(e) = provider.upsert_chat(&chat_info) {
+                log::error!("Failed to save chat info: {}", e);
             }
 
             let reply_text = if let Some(text) = msg.text() {
                 // Store every incoming user message
                 let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
-                let msg_id = {
-                    let prov = provider.lock().unwrap();
-                    match prov.insert_message(user_id, msg.chat.id.0, text) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            log::error!("Failed to save message: {}", e);
-                            return Ok(());
-                        }
+                let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::error!("Failed to save message: {}", e);
+                        return Ok(());
                     }
                 };
 
@@ -123,15 +77,9 @@ async fn main() {
                     event.chat_id = msg.chat.id.0;
                     event.msg_id = msg_id;
 
-                    let stored = {
-                        let mut prov = provider.lock().unwrap();
-                        prov.insert_and_get(event)
-                    };
+                    let stored = provider.insert_and_get(event);
 
                     if let Some(dt) = stored.next_datetime {
-                        // Reschedule with updated top event
-                        schedule_first_event(bot.clone(), Arc::clone(&provider), msg_tx.clone());
-
                         format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
                     } else {
                         format!("*{}*", escape_markdown(text))
@@ -177,93 +125,6 @@ async fn main() {
         }
     })
     .await;
-}
-
-/// Schedules the first event from the top events list.
-/// Cancels any previously scheduled task, then spawns a new delayed task
-/// for the earliest event. After firing, recalculates next datetime,
-/// saves to DB, updates the in-memory list, and schedules the next first event.
-fn schedule_first_event(bot: Bot, provider: EventProviderState, msg_tx: MessageSender) {
-    let mut prov = provider.lock().unwrap();
-
-    // Cancel current scheduled task
-    prov.abort_current();
-
-    let Some(event) = prov.get_next() else {
-        log::info!("No top events to schedule");
-        return;
-    };
-
-    let Some(dt) = event.next_datetime else {
-        return;
-    };
-
-    let provider_clone = Arc::clone(&provider);
-
-    let join_handle = tokio::spawn(async move {
-        // Get all events at this timestamp
-        let events = {
-            let prov = provider_clone.lock().unwrap();
-            prov.get_events_at(dt)
-        };
-
-        let now = chrono::Local::now().naive_local();
-        let delay_secs = dt.signed_duration_since(now).num_seconds().max(0) as u64;
-
-        log::info!(
-            "Scheduling event {} for {:?} (in {})",
-            event.id,
-            dt,
-            format_duration(delay_secs)
-        );
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
-
-        let messages: Vec<(ChatId, String)> = events
-            .iter()
-            .map(|e| (ChatId(e.chat_id), e.message.clone()))
-            .collect();
-
-        if let Err(e) = msg_tx.send(messages) {
-            log::error!("Failed to queue messages: {}", e);
-        }
-
-        {
-            let mut prov = provider_clone.lock().unwrap();
-            prov.update_and_reload(events);
-        }
-
-        // Schedule the next first event
-        schedule_first_event(bot, provider_clone, msg_tx);
-    });
-
-    prov.set_abort_handle(join_handle.abort_handle());
-}
-
-fn format_duration(total_secs: u64) -> String {
-    let days = total_secs / 86400;
-    let hours = (total_secs % 86400) / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    let seconds = total_secs % 60;
-
-    let mut parts = Vec::new();
-    if days > 0 {
-        parts.push(format!("{} day{}", days, if days == 1 { "" } else { "s" }));
-    }
-    if hours > 0 {
-        parts.push(format!(
-            "{} hour{}",
-            hours,
-            if hours == 1 { "" } else { "s" }
-        ));
-    }
-    if minutes > 0 {
-        parts.push(format!("{} min", minutes));
-    }
-    if seconds > 0 || parts.is_empty() {
-        parts.push(format!("{} sec", seconds));
-    }
-    parts.join(" ")
 }
 
 fn escape_markdown(text: &str) -> String {

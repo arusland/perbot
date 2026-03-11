@@ -118,7 +118,7 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 fn run_table(table_idx: usize, table: &Table) {
     const CHAT_ID: i64 = 1;
     let storage = EventStorage::open_in_memory().unwrap();
-    let mut provider = EventProvider::new(storage);
+    let provider = EventProvider::new(storage);
     provider
         .upsert_chat(&ChatInfo {
             id: CHAT_ID,
