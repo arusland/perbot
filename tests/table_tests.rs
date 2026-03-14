@@ -1,7 +1,8 @@
 use chrono::NaiveDateTime;
 use perbot::parser;
 use perbot::state::EventProvider;
-use perbot::storage::{ChatInfo, ChatType, EventStorage};
+use perbot::storage::EventStorage;
+use perbot::types::{ChatInfo, ChatType};
 
 struct TableRow {
     ts: NaiveDateTime,

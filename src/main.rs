@@ -1,6 +1,7 @@
 use perbot::parser;
 use perbot::state::EventProvider;
-use perbot::storage::{ChatInfo, ChatType, EventStorage};
+use perbot::storage::EventStorage;
+use perbot::types::{ChatInfo, ChatType, TgMessage};
 use std::process;
 use teloxide::{prelude::*, types::ParseMode};
 use tokio::sync::mpsc;
@@ -18,19 +19,25 @@ async fn main() {
     );
 
     let bot = Bot::from_env();
-    bot.send_message(admin_id, "Bot started").await.unwrap();
+    bot.send_message(admin_id, "*Bot started*")
+        .parse_mode(ParseMode::MarkdownV2)
+        .await
+        .unwrap();
 
     let storage = EventStorage::open("perbot.db").expect("Failed to open database");
     let provider = EventProvider::new(storage);
 
     // Channel for sending scheduled messages to Telegram
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<(i64, String)>>();
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<TgMessage>>();
     let sender_bot = bot.clone();
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
-            for (chat_id, message) in messages {
-                if let Err(e) = sender_bot.send_message(ChatId(chat_id), &message).await {
-                    log::error!("Failed to send message to {}: {}", chat_id, e);
+            for msg in messages {
+                if let Err(e) = sender_bot
+                    .send_message(ChatId(msg.chat_id), &msg.text)
+                    .await
+                {
+                    log::error!("Failed to send message to {}: {}", msg.chat_id, e);
                 }
             }
         }
@@ -43,8 +50,6 @@ async fn main() {
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let provider = handler_provider.clone();
         async move {
-            println!("msg: {:?}\nkind: {:?}", msg.chat, msg.chat.kind);
-
             // Save/update chat info
             let chat_info = extract_chat_info(&msg.chat);
             if let Err(e) = provider.upsert_chat(&chat_info) {
@@ -80,7 +85,10 @@ async fn main() {
                     let stored = provider.insert_and_get(event);
 
                     if let Some(dt) = stored.next_datetime {
-                        format!("Scheduled message for {}", dt.format("%H:%M %d\\.%m\\.%Y"))
+                        format!(
+                            "Scheduled message for *{}*",
+                            dt.format("%H:%M %d\\.%m\\.%Y")
+                        )
                     } else {
                         format!("*{}*", escape_markdown(text))
                     }

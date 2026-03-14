@@ -3,66 +3,10 @@ use rusqlite::{Connection, Result, params};
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::parser::{
-    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, parse_days, unit_from_str,
+use crate::types::{
+    ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
+    parse_days, unit_from_str,
 };
-
-/// User message information. Used both for inserting and for reading from the database.
-/// `id` and `created_at` are `None` when constructing a value to insert
-/// and `Some` when reading back from the database.
-#[derive(Debug, Clone)]
-pub struct MessageInfo {
-    pub id: i64,
-    pub user_id: Option<i64>,
-    pub chat_id: i64,
-    pub created_at: Option<NaiveDateTime>,
-    pub message: String,
-}
-
-/// Chat type enumeration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatType {
-    Private,
-    Group,
-    Supergroup,
-    Channel,
-}
-
-impl ChatType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ChatType::Private => "private",
-            ChatType::Group => "group",
-            ChatType::Supergroup => "supergroup",
-            ChatType::Channel => "channel",
-        }
-    }
-
-    fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "private" => Some(ChatType::Private),
-            "group" => Some(ChatType::Group),
-            "supergroup" => Some(ChatType::Supergroup),
-            "channel" => Some(ChatType::Channel),
-            _ => None,
-        }
-    }
-}
-
-/// Chat information. Used both for upserting and for reading from the database.
-/// `updated_at` and `created_at` are `None` when constructing a value to upsert
-/// and `Some` when reading back from the database.
-#[derive(Debug, Clone)]
-pub struct ChatInfo {
-    pub id: i64,
-    pub chat_type: ChatType,
-    pub title: Option<String>,
-    pub username: Option<String>,
-    pub first_name: Option<String>,
-    pub last_name: Option<String>,
-    pub updated_at: Option<NaiveDateTime>,
-    pub created_at: Option<NaiveDateTime>,
-}
 
 // --- Private serialization helpers ---
 
@@ -602,7 +546,9 @@ impl EventStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit};
+    use crate::types::{
+        ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
+    };
 
     fn ensure_chat(storage: &EventStorage, chat_id: i64) {
         storage

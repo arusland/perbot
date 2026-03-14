@@ -2,8 +2,8 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use perbot::parser::EventInfo;
-use perbot::storage::{ChatInfo, ChatType, EventStorage, MessageInfo};
+use perbot::storage::EventStorage;
+use perbot::types::{ChatInfo, ChatType, EventInfo, MessageInfo};
 
 fn make_event(i: u32, msg_id: i64) -> EventInfo {
     EventInfo {

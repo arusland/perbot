@@ -2,13 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{Local, NaiveDateTime};
-use tokio::sync::mpsc;
 
-use crate::parser::EventInfo;
 use crate::scheduler;
-use crate::storage::{ChatInfo, EventStorage, MessageInfo};
-
-pub type MessageSender = mpsc::UnboundedSender<Vec<(i64, String)>>;
+use crate::storage::EventStorage;
+use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, TgMessage};
 
 struct EventProviderState {
     storage: EventStorage,
@@ -210,11 +207,14 @@ impl EventProvider {
                         .push(&event.message);
                 }
 
-                let messages: Vec<(i64, String)> = by_chat
+                let messages: Vec<TgMessage> = by_chat
                     .into_iter()
                     .map(|(chat_id, msgs)| {
                         let combined = msgs.join("\n");
-                        (chat_id, format!("Missed:\n{}", combined))
+                        TgMessage {
+                            chat_id,
+                            text: format!("Missed:\n{}", combined),
+                        }
                     })
                     .collect();
 
@@ -242,9 +242,12 @@ impl EventProvider {
                 let now = Local::now().naive_local();
                 if now >= dt {
                     let events = provider.get_events_at(dt);
-                    let messages: Vec<(i64, String)> = events
+                    let messages: Vec<TgMessage> = events
                         .iter()
-                        .map(|e| (e.chat_id, e.message.clone()))
+                        .map(|e| TgMessage {
+                            chat_id: e.chat_id,
+                            text: e.message.clone(),
+                        })
                         .collect();
 
                     if let Err(e) = msg_tx.send(messages) {

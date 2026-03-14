@@ -1,69 +1,11 @@
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Datelike, Local, NaiveDate, NaiveTime, Weekday};
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeUnit {
-    Minutes,
-    Hours,
-    Days,
-    Weeks,
-    Months,
-    Years,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Repetition {
-    pub interval: u32,
-    pub unit: TimeUnit,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ordinal {
-    First,
-    Second,
-    Third,
-    Fourth,
-    Fifth,
-    Last,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MonthlyPattern {
-    OrdinalWeekday(Ordinal, Weekday),
-    LastDay,
-}
-
-#[derive(Debug, Clone)]
-pub struct EventInfo {
-    /// "26.11", "31.12.2027"
-    pub date: Option<NaiveDate>,
-    /// "13:23", "5:24 PM"
-    pub time: Option<NaiveTime>,
-    /// "31.12.2027" — true when year is given explicitly
-    pub year_explicit: bool,
-    /// "13:45 mon-fri", "13:25 thu-fri,sun"
-    pub days: Option<HashSet<Weekday>>,
-    /// "13:25 2027 fri,sun", "11:13 2027,2028"
-    pub years: Option<HashSet<i32>>,
-    /// "every 2 weeks", "every hour"
-    pub repetition: Option<Repetition>,
-    /// "8 min call her", "2 hours reminder"
-    pub in_offset: Option<(u32, TimeUnit)>,
-    /// "8 call Alex" → 8, "0 call Sacha" → 0, "24 call Poly" → 24
-    pub bare_hour: Option<u32>,
-    /// "first sunday", "last monday", "last day of the month"
-    pub monthly_pattern: Option<MonthlyPattern>,
-    /// remainder after extracting all time/date components
-    pub message: String,
-    pub id: i64,
-    pub chat_id: i64,
-    pub active: bool,
-    pub next_datetime: Option<NaiveDateTime>,
-    pub created_at: NaiveDateTime,
-    pub msg_id: i64,
-}
+use crate::types::{
+    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, parse_days, unit_from_str,
+};
 
 static RE_TIME_12H: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\d{1,2}):(\d{2})\s*(AM|PM)").unwrap());
@@ -119,67 +61,6 @@ fn day_from_str(s: &str) -> Option<Weekday> {
         "fri" | "friday" => Some(Weekday::Fri),
         "sat" | "saturday" => Some(Weekday::Sat),
         "sun" | "sunday" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
-
-fn day_index(d: Weekday) -> u8 {
-    match d {
-        Weekday::Mon => 0,
-        Weekday::Tue => 1,
-        Weekday::Wed => 2,
-        Weekday::Thu => 3,
-        Weekday::Fri => 4,
-        Weekday::Sat => 5,
-        Weekday::Sun => 6,
-    }
-}
-
-fn day_from_index(i: u8) -> Weekday {
-    match i % 7 {
-        0 => Weekday::Mon,
-        1 => Weekday::Tue,
-        2 => Weekday::Wed,
-        3 => Weekday::Thu,
-        4 => Weekday::Fri,
-        5 => Weekday::Sat,
-        _ => Weekday::Sun,
-    }
-}
-
-pub fn parse_days(s: &str) -> Option<HashSet<Weekday>> {
-    let mut set = HashSet::new();
-    for token in s.split(',') {
-        let token = token.trim();
-        if let Some(dash_pos) = token.find('-') {
-            let left = token[..dash_pos].trim();
-            let right = token[dash_pos + 1..].trim();
-            let start = day_from_str(left)?;
-            let end = day_from_str(right)?;
-            let mut i = day_index(start);
-            let end_i = day_index(end);
-            loop {
-                set.insert(day_from_index(i));
-                if i == end_i {
-                    break;
-                }
-                i = (i + 1) % 7;
-            }
-        } else {
-            set.insert(day_from_str(token)?);
-        }
-    }
-    if set.is_empty() { None } else { Some(set) }
-}
-
-pub fn unit_from_str(s: &str) -> Option<TimeUnit> {
-    match s.to_ascii_lowercase().as_str() {
-        "min" | "mins" | "minute" | "minutes" => Some(TimeUnit::Minutes),
-        "hour" | "hours" => Some(TimeUnit::Hours),
-        "day" | "days" => Some(TimeUnit::Days),
-        "week" | "weeks" => Some(TimeUnit::Weeks),
-        "month" | "months" => Some(TimeUnit::Months),
-        "year" | "years" => Some(TimeUnit::Years),
         _ => None,
     }
 }

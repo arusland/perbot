@@ -1,6 +1,6 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 
-use crate::parser::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
+use crate::types::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
 
 /// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
@@ -313,7 +313,7 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: TimeUnit) -> Option<NaiveD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
+    use crate::types::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
     use std::collections::HashSet;
 
     fn make_play_event() -> EventInfo {
