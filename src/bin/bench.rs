@@ -9,9 +9,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
     EventInfo {
         id: 0,
         chat_id: 1,
-        date: Some(
-            NaiveDate::from_ymd_opt(2027, (i % 12 + 1) as u32, (i % 28 + 1) as u32).unwrap(),
-        ),
+        date: Some(NaiveDate::from_ymd_opt(2027, i % 12 + 1, i % 28 + 1).unwrap()),
         time: Some(NaiveTime::from_hms_opt(i % 24, i % 60, 0).unwrap()),
         year_explicit: false,
         days: None,
@@ -19,7 +17,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
         message: format!("reminder #{i}"),
         active: true,
         next_datetime: Some(NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(2027, (i % 12 + 1) as u32, (i % 28 + 1) as u32).unwrap(),
+            NaiveDate::from_ymd_opt(2027, i % 12 + 1, i % 28 + 1).unwrap(),
             NaiveTime::from_hms_opt(i % 24, i % 60, 0).unwrap(),
         )),
         created_at: NaiveDateTime::new(

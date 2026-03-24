@@ -199,7 +199,7 @@ impl EventStorage {
         let next_str = event
             .next_datetime
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-        let days_str = event.days.as_ref().map(|d| serialize_days(d));
+        let days_str = event.days.as_ref().map(serialize_days);
         let (repeat_interval, repeat_unit) = match &event.repetition {
             Some(rep) => (
                 Some(rep.interval),
@@ -215,7 +215,7 @@ impl EventStorage {
             .monthly_pattern
             .as_ref()
             .map(serialize_monthly_pattern);
-        let years_str = event.years.as_ref().map(|y| serialize_years(y));
+        let years_str = event.years.as_ref().map(serialize_years);
 
         self.conn.execute(
             "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years)

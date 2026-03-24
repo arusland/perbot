@@ -105,10 +105,7 @@ impl EventProvider {
         let mut inner = self.inner.lock().unwrap();
         let calculated = scheduler::calc_next_at(event, now);
         let id = match inner.storage.insert_event(&calculated) {
-            Ok(id) => {
-                log::info!("Saved event with id: {}", id);
-                id
-            }
+            Ok(id) => id,
             Err(e) => {
                 log::error!("Failed to save event: {}", e);
                 return calculated;

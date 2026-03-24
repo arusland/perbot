@@ -106,7 +106,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 let day_ok = event
                     .days
                     .as_ref()
-                    .map_or(true, |days| days.contains(&candidate.weekday()));
+                    .is_none_or(|days| days.contains(&candidate.weekday()));
                 if day_ok && candidate_dt > now {
                     return Some(candidate_dt);
                 }

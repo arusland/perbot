@@ -77,13 +77,12 @@ pub fn parse(input: &str) -> Option<EventInfo> {
     let mut monthly_pattern: Option<MonthlyPattern> = None;
 
     // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
-    if let Some(caps) = RE_IN_OFFSET.captures(&remaining) {
-        if let Ok(n) = caps[1].parse::<u32>() {
-            if let Some(unit) = unit_from_str(&caps[2]) {
-                in_offset = Some((n, unit));
-                remaining = remaining[caps.get(0).unwrap().end()..].to_string();
-            }
-        }
+    if let Some(caps) = RE_IN_OFFSET.captures(&remaining)
+        && let Ok(n) = caps[1].parse::<u32>()
+        && let Some(unit) = unit_from_str(&caps[2])
+    {
+        in_offset = Some((n, unit));
+        remaining = remaining[caps.get(0).unwrap().end()..].to_string();
     }
 
     if in_offset.is_none() {
@@ -104,9 +103,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             }
 
             time = NaiveTime::from_hms_opt(hour, minute, 0);
-            if time.is_none() {
-                return None;
-            }
+            time?;
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         } else if let Some(caps) = RE_TIME_24H.captures(&remaining) {
@@ -114,23 +111,19 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             let minute: u32 = caps[2].parse().ok()?;
 
             time = NaiveTime::from_hms_opt(hour, minute, 0);
-            if time.is_none() {
-                return None;
-            }
+            time?;
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         }
 
         // Bare hour: "8 call Alex" -> bare_hour=8, "0 call Sacha" -> bare_hour=0
-        if time.is_none() {
-            if let Some(caps) = RE_BARE_HOUR.captures(&remaining) {
-                if let Ok(n) = caps[1].parse::<u32>() {
-                    if n <= 24 {
-                        bare_hour = Some(n);
-                        remaining = remaining[caps.get(0).unwrap().end()..].to_string();
-                    }
-                }
-            }
+        if time.is_none()
+            && let Some(caps) = RE_BARE_HOUR.captures(&remaining)
+            && let Ok(n) = caps[1].parse::<u32>()
+            && n <= 24
+        {
+            bare_hour = Some(n);
+            remaining = remaining[caps.get(0).unwrap().end()..].to_string();
         }
 
         // Full date (must be checked before short date)
@@ -140,9 +133,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             let year: i32 = caps[3].parse().ok()?;
 
             date = NaiveDate::from_ymd_opt(year, month, day);
-            if date.is_none() {
-                return None;
-            }
+            date?;
             year_explicit = true;
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
@@ -152,60 +143,57 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             let year = Local::now().year();
 
             date = NaiveDate::from_ymd_opt(year, month, day);
-            if date.is_none() {
-                return None;
-            }
+            date?;
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         }
 
         // Years: "2027", "2027,2028" — only when no full date was already parsed
-        if date.is_none() {
-            if let Some(m) = RE_YEARS.find(&remaining) {
-                let year_set: HashSet<i32> = m
-                    .as_str()
-                    .split(',')
-                    .filter_map(|s| s.trim().parse::<i32>().ok())
-                    .filter(|&y| (2000..=2100).contains(&y))
-                    .collect();
-                if !year_set.is_empty() {
-                    years = Some(year_set);
-                    remaining = remaining[..m.start()].to_string() + &remaining[m.end()..];
-                }
+        if date.is_none()
+            && let Some(m) = RE_YEARS.find(&remaining)
+        {
+            let year_set: HashSet<i32> = m
+                .as_str()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .filter(|&y| (2000..=2100).contains(&y))
+                .collect();
+            if !year_set.is_empty() {
+                years = Some(year_set);
+                remaining = remaining[..m.start()].to_string() + &remaining[m.end()..];
             }
         }
 
         // Monthly pattern: "first sunday", "last monday", "last day of the month"
-        if let Some(caps) = RE_MONTHLY.captures(&remaining) {
-            if let Some(ord) = ordinal_from_str(&caps[1]) {
-                let target = caps[2].to_ascii_lowercase();
-                let pattern = if target == "day" {
-                    if ord == Ordinal::Last {
-                        Some(MonthlyPattern::LastDay)
-                    } else {
-                        None
-                    }
+        if let Some(caps) = RE_MONTHLY.captures(&remaining)
+            && let Some(ord) = ordinal_from_str(&caps[1])
+        {
+            let target = caps[2].to_ascii_lowercase();
+            let pattern = if target == "day" {
+                if ord == Ordinal::Last {
+                    Some(MonthlyPattern::LastDay)
                 } else {
-                    day_from_str(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
-                };
-
-                if pattern.is_some() {
-                    monthly_pattern = pattern;
-                    remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                        + &remaining[caps.get(0).unwrap().end()..];
+                    None
                 }
+            } else {
+                day_from_str(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
+            };
+
+            if pattern.is_some() {
+                monthly_pattern = pattern;
+                remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                    + &remaining[caps.get(0).unwrap().end()..];
             }
         }
 
         // Days of week (skip if monthly pattern already matched)
-        if monthly_pattern.is_none() {
-            if let Some(caps) = RE_DAYS.captures(&remaining) {
-                if let Some(parsed) = parse_days(&caps[1]) {
-                    days = Some(parsed);
-                    remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                        + &remaining[caps.get(0).unwrap().end()..];
-                }
-            }
+        if monthly_pattern.is_none()
+            && let Some(caps) = RE_DAYS.captures(&remaining)
+            && let Some(parsed) = parse_days(&caps[1])
+        {
+            days = Some(parsed);
+            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
+                + &remaining[caps.get(0).unwrap().end()..];
         }
     }
 
