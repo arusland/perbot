@@ -54,27 +54,7 @@ impl EventProvider {
     /// Loads the nearest active event and any missed events from DB into memory.
     pub fn reload(&self) {
         let mut inner = self.inner.lock().unwrap();
-        let now = Local::now().naive_local();
-        match inner.storage.get_next_event(now) {
-            Ok(event) => {
-                log::info!(
-                    "Loaded next event from storage: {}",
-                    event
-                        .as_ref()
-                        .map(|e| format!("id={}", e.id))
-                        .unwrap_or_else(|| "none".to_string())
-                );
-                inner.next_event = event;
-            }
-            Err(e) => log::error!("Failed to load next event: {}", e),
-        }
-        match inner.storage.get_missed_events(now) {
-            Ok(events) => {
-                log::info!("Loaded {} missed event(s) from storage", events.len());
-                inner.missed_events = events;
-            }
-            Err(e) => log::error!("Failed to load missed events: {}", e),
-        }
+        Self::reload_inner(&mut inner, Local::now().naive_local());
     }
 
     /// Returns missed events (active events whose datetime is in the past).
@@ -136,7 +116,7 @@ impl EventProvider {
         };
 
         // Reload to update the next event cache
-        Self::reload_inner(&mut inner);
+        Self::reload_inner(&mut inner, now);
 
         match inner.storage.get_event(id) {
             Ok(Some(event)) => event,
@@ -172,7 +152,7 @@ impl EventProvider {
     }
 
     /// Recalculates all given events and reloads the next event from DB.
-    pub fn update_and_reload(&self, events: Vec<EventInfo>) {
+    fn update_and_reload(&self, events: Vec<EventInfo>) {
         let mut inner = self.inner.lock().unwrap();
         let now = Local::now().naive_local();
         for event in events {
@@ -185,7 +165,7 @@ impl EventProvider {
                 log::error!("Failed to update schedule for event {}: {}", event_id, e);
             }
         }
-        Self::reload_inner(&mut inner);
+        Self::reload_inner(&mut inner, now);
     }
 
     /// Starts the background polling thread. Reloads events from DB, sends missed events,
@@ -263,8 +243,7 @@ impl EventProvider {
     }
 
     /// Internal reload that operates on an already-locked inner.
-    fn reload_inner(inner: &mut EventProviderState) {
-        let now = Local::now().naive_local();
+    fn reload_inner(inner: &mut EventProviderState, now: NaiveDateTime) {
         match inner.storage.get_next_event(now) {
             Ok(event) => {
                 log::info!(
