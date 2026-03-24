@@ -19,7 +19,8 @@ async fn main() {
             .expect("TG_ADMIN_ID must be a valid i64"),
     );
 
-    let bot = Bot::from_env();
+    let token = std::env::var("TG_BOT_TOKEN").expect("TG_BOT_TOKEN environment variable not set");
+    let bot = Bot::new(token);
     bot.send_message(admin_id, "*Bot started*")
         .parse_mode(ParseMode::MarkdownV2)
         .await

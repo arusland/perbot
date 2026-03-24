@@ -20,7 +20,7 @@ cargo test <test_name>         # Run a single test by name
 
 ## Environment Variables
 
-- `TELOXIDE_TOKEN` — Telegram bot API token (required)
+- `TG_BOT_TOKEN` — Telegram bot API token (required)
 - `TG_ADMIN_ID` — Admin chat ID for startup notification (required, i64)
 - `RUST_LOG` — Log level for `pretty_env_logger` (e.g., `info`, `debug`)
 
