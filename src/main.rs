@@ -84,7 +84,7 @@ async fn main() {
                     event.chat_id = msg.chat.id.0;
                     event.msg_id = msg_id;
 
-                    let stored = provider.insert_and_get(event);
+                    let stored = provider.insert_event_and_get(event);
 
                     if let Some(dt) = stored.next_datetime {
                         format!(

@@ -93,13 +93,9 @@ fn main() {
     let active_elapsed = start.elapsed();
 
     // Benchmark get_next_event
-    let now = NaiveDateTime::new(
-        NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
-        NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-    );
     let start = Instant::now();
     for _ in 0..count {
-        storage.get_next_event(now).unwrap();
+        storage.get_next_event().unwrap();
     }
     let next_elapsed = start.elapsed();
     let next_rps = count as f64 / next_elapsed.as_secs_f64();

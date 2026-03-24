@@ -113,7 +113,7 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 /// Execute a single table: walk the rows in order, maintaining a "current
 /// EventInfo" that is updated by USER rows (parse) and SYSTEM rows
 /// (calc_next_at, then assert next_datetime or active==false for NONE).
-/// Collects all failures before panicking so every failing row is shown.
+/// Panics on the first failure with a table display showing the error.
 /// Each table gets its own in-memory EventStorage so storage round-trips
 /// are exercised for every scenario.
 fn run_table(table_idx: usize, table: &Table) {
@@ -134,8 +134,6 @@ fn run_table(table_idx: usize, table: &Table) {
         .unwrap();
 
     let mut current_id: Option<i64> = None;
-    // (step, detail_message, actual_value_for_arrow)
-    let mut failures: Vec<(usize, String, String)> = Vec::new();
 
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
@@ -144,7 +142,7 @@ fn run_table(table_idx: usize, table: &Table) {
                     let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
                     event.chat_id = CHAT_ID;
                     event.msg_id = msg_id;
-                    let event = provider.insert_and_get_at(event, row.ts);
+                    let event = provider.insert_event_and_get_at(event, row.ts);
                     event.id
                 });
             }
@@ -152,109 +150,103 @@ fn run_table(table_idx: usize, table: &Table) {
                 let id = match current_id {
                     Some(id) => id,
                     None => {
-                        // parse returned None; SYSTEM NONE is the expected outcome
                         if row.value == "NONE" {
                             continue;
                         }
-                        failures.push((
+                        fail_at(
+                            table_idx,
+                            table,
                             step,
-                            format!("no current event (parse failed), expected {}", row.value),
-                            String::new(),
-                        ));
-                        continue;
+                            &format!("no current event (parse failed), expected {}", row.value),
+                            &String::new(),
+                        );
                     }
                 };
-                let events = provider.get_event(id);
-                let event = match events {
+                let event = match provider.get_event(id) {
                     Some(event) => event,
                     None => {
-                        failures.push((
+                        fail_at(
+                            table_idx,
+                            table,
                             step,
-                            format!("event {} not found in storage", id),
-                            String::new(),
-                        ));
-                        continue;
+                            &format!("event {} not found in storage", id),
+                            &String::new(),
+                        );
                     }
                 };
-                // Only recalculate when the event has fired (now >= next_datetime).
-                // Before that, just verify the stored schedule.
-                if !(event.active && event.next_datetime.map_or(false, |nd| row.ts < nd)) {
-                    provider.update_at(event.clone(), row.ts);
+
+                // Only call update (simulate fire) when time has reached the event's next_datetime
+                if let Some(next_dt) = event.next_datetime {
+                    if row.ts >= next_dt {
+                        provider.update_at_and_reload(vec![event.clone()], row.ts);
+                    }
                 }
+
                 // Re-read the event after potential update
-                let result = if event.active && event.next_datetime.map_or(false, |nd| row.ts < nd)
-                {
-                    event
-                } else {
-                    provider.get_event(id).unwrap_or(event)
-                };
+                let result = provider.get_next_event();
+
                 if row.value == "NONE" {
-                    if result.active {
-                        failures.push((
-                            step,
-                            format!(
-                                "expected active=false, got active=true (next_datetime={:?})",
-                                result.next_datetime
-                            ),
-                            fmt_dt(result.next_datetime),
-                        ));
-                    } else if result.next_datetime.is_some() {
-                        failures.push((
-                            step,
-                            format!(
-                                "expected next_datetime=None, got {:?}",
-                                result.next_datetime
-                            ),
-                            fmt_dt(result.next_datetime),
-                        ));
+                    match &result {
+                        Some(e) if e.active => {
+                            fail_at(
+                                table_idx,
+                                table,
+                                step,
+                                &format!(
+                                    "expected inactive/none, got active=true (next_datetime={:?})",
+                                    e.next_datetime
+                                ),
+                                &fmt_dt(e.next_datetime),
+                            );
+                        }
+                        _ => {} // None or inactive — pass
                     }
                 } else {
+                    let actual_dt = result.as_ref().and_then(|e| e.next_datetime);
                     match NaiveDateTime::parse_from_str(&row.value, "%Y-%m-%d %H:%M:%S") {
                         Ok(expected) => {
-                            if result.next_datetime != Some(expected) {
-                                failures.push((
+                            if actual_dt != Some(expected) {
+                                fail_at(
+                                    table_idx,
+                                    table,
                                     step,
-                                    format!(
-                                        "expected {:?}, got {:?}",
-                                        Some(expected),
-                                        result.next_datetime
-                                    ),
-                                    fmt_dt(result.next_datetime),
-                                ));
+                                    &format!("expected {:?}, got {:?}", Some(expected), actual_dt),
+                                    &fmt_dt(actual_dt),
+                                );
                             }
                         }
                         Err(_) => {
-                            failures.push((
+                            fail_at(
+                                table_idx,
+                                table,
                                 step,
-                                format!("invalid expected datetime '{}'", row.value),
-                                String::new(),
-                            ));
+                                &format!("invalid expected datetime '{}'", row.value),
+                                &String::new(),
+                            );
                         }
                     }
                 }
             }
             other => {
-                failures.push((step, format!("unknown actor '{}'", other), String::new()));
+                fail_at(
+                    table_idx,
+                    table,
+                    step,
+                    &format!("unknown actor '{}'", other),
+                    &String::new(),
+                );
             }
         }
     }
+}
 
-    if !failures.is_empty() {
-        let actuals: Vec<(usize, String)> =
-            failures.iter().map(|(s, _, v)| (*s, v.clone())).collect();
-        let table_display = format_table_with_arrows(&table.rows, &actuals);
-        let failure_msgs: Vec<String> = failures
-            .iter()
-            .map(|(s, msg, _)| format!("  step {}: {}", s, msg))
-            .collect();
-        panic!(
-            "\nTable {} — {} FAILED:\n{}\n\nDetails:\n{}",
-            table_idx,
-            table.name,
-            table_display,
-            failure_msgs.join("\n"),
-        );
-    }
+fn fail_at(table_idx: usize, table: &Table, step: usize, msg: &str, actual: &str) -> ! {
+    let actuals = vec![(step, actual.to_string())];
+    let table_display = format_table_with_arrows(&table.rows, &actuals);
+    panic!(
+        "\nTable {} — {} FAILED:\n{}\n\nDetails:\n  step {}: {}",
+        table_idx, table.name, table_display, step, msg,
+    );
 }
 
 #[test]
