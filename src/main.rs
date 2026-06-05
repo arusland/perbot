@@ -14,7 +14,7 @@ async fn main() {
 
     let admin_id = ChatId(
         std::env::var("TG_ADMIN_ID")
-            .expect("ADMIN_ID environment variable not set")
+            .expect("TG_ADMIN_ID environment variable not set")
             .parse::<i64>()
             .expect("TG_ADMIN_ID must be a valid i64"),
     );
@@ -95,7 +95,7 @@ async fn main() {
                         format!("*{}*", escape_markdown(text))
                     }
                 } else {
-                    format!("*{}*", escape_markdown(text))
+                    format!("Unparsable message: *{}*", escape_markdown(text))
                 }
             } else if msg.photo().is_some() {
                 "Received a photo\\!".to_string()
