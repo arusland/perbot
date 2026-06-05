@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow Rules
+
+- When you complete work, print a short commit message for the changes.
+
 ## Project Overview
 
 Perbot is a Telegram reminder bot written in Rust (edition 2024). Users send messages containing natural language time/date expressions (e.g., "13:30 call the office"), the bot parses the datetime, schedules an async task, persists the event to SQLite, and sends the reminder when the time arrives. On restart, active events are reloaded and rescheduled.
