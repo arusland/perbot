@@ -18,6 +18,49 @@ enum Command {
     Help,
     #[command(description = "list upcoming scheduled events")]
     Events,
+    #[command(description = "shut the bot down (admin only)", hide)]
+    Exit,
+}
+
+/// Replies with the list of commands. Admins additionally see admin-only commands.
+async fn handle_help(bot: &Bot, chat_id: ChatId, is_admin: bool) -> ResponseResult<()> {
+    let mut help = Command::descriptions().to_string();
+    if is_admin {
+        help.push_str("\n\nAdmin commands:\n/exit — shut the bot down");
+    }
+    bot.send_message(chat_id, help).await?;
+    Ok(())
+}
+
+/// Replies with the chat's active upcoming events.
+async fn handle_events(bot: &Bot, chat_id: ChatId, provider: &EventProvider) -> ResponseResult<()> {
+    let events = provider.get_active_by_chat(chat_id.0);
+    bot.send_message(chat_id, format_events_list(&events))
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+    Ok(())
+}
+
+/// Shuts the bot down. Admin-only; non-admins get a rejection reply.
+async fn handle_exit(
+    bot: &Bot,
+    chat_id: ChatId,
+    admin_id: ChatId,
+    is_admin: bool,
+) -> ResponseResult<()> {
+    if !is_admin {
+        bot.send_message(chat_id, "Not authorized\\.")
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        return Ok(());
+    }
+    log::info!("Received /exit command. Shutting down...");
+    let _ = bot.send_message(admin_id, "Shutting down...").await;
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        process::exit(0);
+    });
+    Ok(())
 }
 
 #[tokio::main]
@@ -102,29 +145,12 @@ async fn main() {
                     }
                 };
 
-                if text == "exit" && user_id == Some(admin_id.0) {
-                    log::info!("Received exit command. Shutting down...");
-                    let _ = bot.send_message(admin_id, "Shutting down...").await;
-                    tokio::spawn(async {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        process::exit(0);
-                    });
-
-                    return Ok(());
-                }
-
+                let is_admin = user_id == Some(admin_id.0);
                 if let Ok(cmd) = Command::parse(text, &bot_username) {
                     match cmd {
-                        Command::Help => {
-                            bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                                .await?;
-                        }
-                        Command::Events => {
-                            let events = provider.get_active_by_chat(msg.chat.id.0);
-                            bot.send_message(msg.chat.id, format_events_list(&events))
-                                .parse_mode(ParseMode::MarkdownV2)
-                                .await?;
-                        }
+                        Command::Help => handle_help(&bot, msg.chat.id, is_admin).await?,
+                        Command::Events => handle_events(&bot, msg.chat.id, &provider).await?,
+                        Command::Exit => handle_exit(&bot, msg.chat.id, admin_id, is_admin).await?,
                     }
                     return Ok(());
                 }
