@@ -2,6 +2,12 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 
+/// A parsed reminder event plus the fields used to track it in the database.
+///
+/// The first group of fields is populated by [`crate::parser::parse`]; the
+/// trailing group (`id`, `chat_id`, `active`, `next_datetime`, `created_at`,
+/// `msg_id`) is filled in by storage/scheduling and defaults to zero/false/None
+/// on a freshly parsed value.
 #[derive(Debug, Clone)]
 pub struct EventInfo {
     /// "26.11", "31.12.2027"
@@ -62,14 +68,18 @@ impl ChatType {
             ChatType::Channel => "channel",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ChatType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "private" => Some(ChatType::Private),
-            "group" => Some(ChatType::Group),
-            "supergroup" => Some(ChatType::Supergroup),
-            "channel" => Some(ChatType::Channel),
-            _ => None,
+            "private" => Ok(ChatType::Private),
+            "group" => Ok(ChatType::Group),
+            "supergroup" => Ok(ChatType::Supergroup),
+            "channel" => Ok(ChatType::Channel),
+            _ => Err(()),
         }
     }
 }
@@ -121,11 +131,15 @@ pub struct ChatInfo {
     pub created_at: Option<NaiveDateTime>,
 }
 
+/// An outbound Telegram message: the destination chat and its (already
+/// formatted) text body.
 pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
 }
 
+/// Channel sender used by the scheduler to hand batches of due/missed messages
+/// to the Telegram-sending task.
 pub type MessageSender = mpsc::UnboundedSender<Vec<TgMessage>>;
 
 fn day_index(d: Weekday) -> u8 {
@@ -189,7 +203,8 @@ pub fn unit_from_str(s: &str) -> Option<TimeUnit> {
     }
 }
 
-fn day_from_str(s: &str) -> Option<Weekday> {
+/// Parses a weekday name (`"mon"`/`"monday"`, case-insensitive) into a [`Weekday`].
+pub fn day_from_str(s: &str) -> Option<Weekday> {
     match s.to_ascii_lowercase().as_str() {
         "mon" | "monday" => Some(Weekday::Mon),
         "tue" | "tuesday" => Some(Weekday::Tue),
@@ -199,5 +214,18 @@ fn day_from_str(s: &str) -> Option<Weekday> {
         "sat" | "saturday" => Some(Weekday::Sat),
         "sun" | "sunday" => Some(Weekday::Sun),
         _ => None,
+    }
+}
+
+/// The canonical three-letter abbreviation used to persist a [`Weekday`].
+pub fn day_to_str(d: Weekday) -> &'static str {
+    match d {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
     }
 }

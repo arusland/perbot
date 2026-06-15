@@ -4,9 +4,15 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use crate::types::{
-    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, parse_days, unit_from_str,
+    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, day_from_str, parse_days,
+    unit_from_str,
 };
 
+// NOTE: the time regexes are intentionally *not* anchored to the start of the
+// message. A clock time is matched wherever it appears (e.g. "call office at
+// 5:30" extracts 5:30), unlike the relative offset, bare hour, and short date
+// which must lead the message. 12h is tried before 24h so "5:24 PM" is not
+// partially consumed as "5:24".
 static RE_TIME_12H: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\d{1,2}):(\d{2})\s*(AM|PM)").unwrap());
 
@@ -37,6 +43,9 @@ static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
 });
 
+// Matches any standalone 4-digit token (or comma list) anywhere in the message;
+// only values in 2000..=2100 are kept (see `parse`). This is greedy by design —
+// "buy 2025 tickets" is treated as a year restriction.
 static RE_YEARS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap());
 
@@ -52,19 +61,12 @@ fn ordinal_from_str(s: &str) -> Option<Ordinal> {
     }
 }
 
-fn day_from_str(s: &str) -> Option<Weekday> {
-    match s.to_ascii_lowercase().as_str() {
-        "mon" | "monday" => Some(Weekday::Mon),
-        "tue" | "tuesday" => Some(Weekday::Tue),
-        "wed" | "wednesday" => Some(Weekday::Wed),
-        "thu" | "thursday" => Some(Weekday::Thu),
-        "fri" | "friday" => Some(Weekday::Fri),
-        "sat" | "saturday" => Some(Weekday::Sat),
-        "sun" | "sunday" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
-
+/// Parses a natural-language reminder from `input`.
+///
+/// Extracts the time/date components (see module regexes) and returns an
+/// [`EventInfo`] whose `message` is the leftover text. Returns `None` when no
+/// time component is found or nothing is left for the message body. The
+/// DB-tracking fields are left at their defaults (zero/false/None).
 pub fn parse(input: &str) -> Option<EventInfo> {
     let mut remaining = input.to_string();
     let mut time: Option<NaiveTime> = None;
@@ -102,16 +104,14 @@ pub fn parse(input: &str) -> Option<EventInfo> {
                 hour = 0;
             }
 
-            time = NaiveTime::from_hms_opt(hour, minute, 0);
-            time?;
+            time = Some(NaiveTime::from_hms_opt(hour, minute, 0)?);
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         } else if let Some(caps) = RE_TIME_24H.captures(&remaining) {
             let hour: u32 = caps[1].parse().ok()?;
             let minute: u32 = caps[2].parse().ok()?;
 
-            time = NaiveTime::from_hms_opt(hour, minute, 0);
-            time?;
+            time = Some(NaiveTime::from_hms_opt(hour, minute, 0)?);
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         }
@@ -132,8 +132,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             let month: u32 = caps[2].parse().ok()?;
             let year: i32 = caps[3].parse().ok()?;
 
-            date = NaiveDate::from_ymd_opt(year, month, day);
-            date?;
+            date = Some(NaiveDate::from_ymd_opt(year, month, day)?);
             year_explicit = true;
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
@@ -142,8 +141,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             let month: u32 = caps[2].parse().ok()?;
             let year = Local::now().year();
 
-            date = NaiveDate::from_ymd_opt(year, month, day);
-            date?;
+            date = Some(NaiveDate::from_ymd_opt(year, month, day)?);
             remaining = remaining[..caps.get(0).unwrap().start()].to_string()
                 + &remaining[caps.get(0).unwrap().end()..];
         }

@@ -32,7 +32,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let db_path = PathBuf::from("target").join("bench_storage.db");
     // Remove leftovers from previous run
     let _ = std::fs::remove_file(&db_path);
@@ -40,31 +40,27 @@ fn main() {
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 
-    let storage = EventStorage::open(&db_path).unwrap();
+    let storage = EventStorage::open(&db_path)?;
 
     // Create a chat and a message for foreign key constraints
-    storage
-        .upsert_chat(&ChatInfo {
-            id: 1,
-            chat_type: ChatType::Private,
-            title: None,
-            username: Some("bench_user".into()),
-            first_name: Some("Bench".into()),
-            last_name: None,
-            updated_at: None,
-            created_at: None,
-        })
-        .unwrap();
+    storage.upsert_chat(&ChatInfo {
+        id: 1,
+        chat_type: ChatType::Private,
+        title: None,
+        username: Some("bench_user".into()),
+        first_name: Some("Bench".into()),
+        last_name: None,
+        updated_at: None,
+        created_at: None,
+    })?;
 
-    let msg_id = storage
-        .insert_message(&MessageInfo {
-            id: 0,
-            user_id: Some(1),
-            chat_id: 1,
-            created_at: None,
-            message: "bench message".into(),
-        })
-        .unwrap();
+    let msg_id = storage.insert_message(&MessageInfo {
+        id: 0,
+        user_id: Some(1),
+        chat_id: 1,
+        created_at: None,
+        message: "bench message".into(),
+    })?;
 
     let count = 1000u32;
 
@@ -72,7 +68,7 @@ fn main() {
     let start = Instant::now();
     for i in 0..count {
         let event = make_event(i, msg_id);
-        storage.insert_event(&event).unwrap();
+        storage.insert_event(&event)?;
     }
     let insert_elapsed = start.elapsed();
     let insert_rps = count as f64 / insert_elapsed.as_secs_f64();
@@ -80,26 +76,26 @@ fn main() {
     // Benchmark reads (get by id)
     let start = Instant::now();
     for id in 1..=count as i64 {
-        storage.get(id).unwrap();
+        storage.get_event(id)?;
     }
     let read_elapsed = start.elapsed();
     let read_rps = count as f64 / read_elapsed.as_secs_f64();
 
     // Benchmark get_active_events (full table scan of active)
     let start = Instant::now();
-    let active = storage.get_active_events().unwrap();
+    let active = storage.get_active_events()?;
     let active_elapsed = start.elapsed();
 
     // Benchmark get_next_event
     let start = Instant::now();
     for _ in 0..count {
-        storage.get_next_event().unwrap();
+        storage.get_next_event()?;
     }
     let next_elapsed = start.elapsed();
     let next_rps = count as f64 / next_elapsed.as_secs_f64();
 
     // File size
-    let file_size = std::fs::metadata(&db_path).unwrap().len();
+    let file_size = std::fs::metadata(&db_path)?.len();
 
     let insert_ms_each = insert_elapsed.as_secs_f64() * 1000.0 / count as f64;
     let read_ms_each = read_elapsed.as_secs_f64() * 1000.0 / count as f64;
@@ -135,4 +131,6 @@ fn main() {
         file_size
     );
     println!("==========================================");
+
+    Ok(())
 }

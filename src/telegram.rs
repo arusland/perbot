@@ -1,5 +1,6 @@
 use crate::types::{ChatInfo, ChatType, EventInfo};
 use chrono::{Local, NaiveDateTime};
+use std::fmt::Write as _;
 
 pub fn escape_markdown(text: &str) -> String {
     let special_chars = [
@@ -59,7 +60,7 @@ pub fn format_events_list_at(events: &[EventInfo], now: NaiveDateTime) -> String
             ),
             None => "—".to_string(),
         };
-        out.push_str(&format!("• {} — {}\n", when, escape_markdown(&e.message)));
+        let _ = writeln!(out, "• {} — {}", when, escape_markdown(&e.message));
     }
     out
 }
@@ -104,10 +105,59 @@ pub fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use crate::types::EventInfo;
+    use chrono::{Duration, NaiveDate, NaiveTime};
 
     fn at(now: NaiveDateTime, d: Duration) -> String {
         format_relative(now, now + d)
+    }
+
+    fn sample_event(message: &str, next: Option<NaiveDateTime>) -> EventInfo {
+        EventInfo {
+            id: 0,
+            chat_id: 0,
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            years: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: None,
+            message: message.to_string(),
+            active: next.is_some(),
+            next_datetime: next,
+            created_at: NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+            ),
+            msg_id: 0,
+        }
+    }
+
+    #[test]
+    fn format_events_list_empty() {
+        assert_eq!(
+            format_events_list_at(&[], Local::now().naive_local()),
+            "No upcoming events\\."
+        );
+    }
+
+    #[test]
+    fn format_events_list_rows() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let events = vec![
+            sample_event("call mom", Some(now + Duration::hours(2))),
+            // Markdown special chars in the message must be escaped.
+            sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
+        ];
+        let out = format_events_list_at(&events, now);
+        assert!(out.starts_with("*Upcoming events:*\n"));
+        assert!(out.contains("14:00 15\\.06\\.2026 \\(2h\\)"));
+        assert!(out.contains("pay rent \\(urgent\\)"));
+        assert!(out.contains("\\(3d\\)"));
     }
 
     #[test]

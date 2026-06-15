@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Local, NaiveDateTime};
 
+use crate::error::Result;
 use crate::scheduler;
 use crate::storage::EventStorage;
 use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, TgMessage};
@@ -13,6 +14,12 @@ struct EventProviderState {
     next_event: Option<EventInfo>,
 }
 
+/// Cloneable handle around shared storage plus the cached nearest event.
+///
+/// All methods take `&self` and lock the inner mutex internally, so the handle
+/// can be cloned freely across the async message handler and the background
+/// polling thread. The lock is only ever held for the duration of a synchronous
+/// storage call — never across an `.await`.
 #[derive(Clone)]
 pub struct EventProvider {
     inner: Arc<Mutex<EventProviderState>>,
@@ -28,17 +35,12 @@ impl EventProvider {
         }
     }
 
-    pub fn upsert_chat(&self, chat: &ChatInfo) -> rusqlite::Result<()> {
+    pub fn upsert_chat(&self, chat: &ChatInfo) -> Result<()> {
         let inner = self.inner.lock().unwrap();
         inner.storage.upsert_chat(chat)
     }
 
-    pub fn insert_message(
-        &self,
-        user_id: Option<i64>,
-        chat_id: i64,
-        message: &str,
-    ) -> rusqlite::Result<i64> {
+    pub fn insert_message(&self, user_id: Option<i64>, chat_id: i64, message: &str) -> Result<i64> {
         let inner = self.inner.lock().unwrap();
         let msg = MessageInfo {
             id: 0,
@@ -148,17 +150,14 @@ impl EventProvider {
     /// Recalculates all given events and reloads the next event from DB.
     pub fn update_at_and_reload(&self, events: Vec<EventInfo>, now: NaiveDateTime) {
         let mut inner = self.inner.lock().unwrap();
-        if !events.is_empty() {
-            for event in events {
-                let event_id = event.id;
-                let next = scheduler::calc_next_at(event, now);
-                if let Err(e) =
-                    inner
-                        .storage
-                        .update_schedule(event_id, next.active, next.next_datetime)
-                {
-                    log::error!("Failed to update schedule for event {}: {}", event_id, e);
-                }
+        for event in events {
+            let event_id = event.id;
+            let next = scheduler::calc_next_at(event, now);
+            if let Err(e) = inner
+                .storage
+                .update_schedule(event_id, next.active, next.next_datetime)
+            {
+                log::error!("Failed to update schedule for event {}: {}", event_id, e);
             }
         }
         Self::load_next_event(&mut inner);

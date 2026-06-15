@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
@@ -64,25 +65,31 @@ async fn handle_exit(
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     perbot::logger::init();
     log::info!("Starting bot...");
 
     let admin_id = ChatId(
         std::env::var("TG_ADMIN_ID")
-            .expect("TG_ADMIN_ID environment variable not set")
+            .context("TG_ADMIN_ID environment variable not set")?
             .parse::<i64>()
-            .expect("TG_ADMIN_ID must be a valid i64"),
+            .context("TG_ADMIN_ID must be a valid i64")?,
     );
 
-    let token = std::env::var("TG_BOT_TOKEN").expect("TG_BOT_TOKEN environment variable not set");
+    let token =
+        std::env::var("TG_BOT_TOKEN").context("TG_BOT_TOKEN environment variable not set")?;
     let bot = Bot::new(token);
-    bot.send_message(admin_id, "*Bot started*")
+    if let Err(e) = bot
+        .send_message(admin_id, "*Bot started*")
         .parse_mode(ParseMode::MarkdownV2)
         .await
-        .unwrap();
+    {
+        log::warn!("Failed to send startup message: {}", e);
+    }
 
-    let me = bot.get_me().await.expect("Failed to fetch bot info");
+    // The bot username is required to parse commands addressed as `/cmd@bot`, so
+    // failing to fetch it is fatal.
+    let me = bot.get_me().await.context("Failed to fetch bot info")?;
     let bot_username = me.username().to_string();
 
     // Clear any commands left over from a previous bot on this token. These can
@@ -101,7 +108,7 @@ async fn main() {
         log::error!("Failed to register bot commands: {}", e);
     }
 
-    let storage = EventStorage::open("perbot.db").expect("Failed to open database");
+    let storage = EventStorage::open("perbot.db").context("Failed to open database")?;
     let provider = EventProvider::new(storage);
 
     // Channel for sending scheduled messages to Telegram
@@ -210,4 +217,6 @@ async fn main() {
         }
     })
     .await;
+
+    Ok(())
 }

@@ -29,13 +29,15 @@ cargo run --bin bench      # storage benchmark (1000 events)
 
 `lib.rs` re-exports all modules. Shared types live in `types.rs`; everything imports from there.
 
-- **types.rs** — Shared types: `EventInfo` (rich parsed fields + DB-tracking fields), `MessageInfo`, `ChatInfo`/`ChatType`, `TgMessage`, `MessageSender`, plus the time enums (`TimeUnit`, `Repetition`, `Ordinal`, `MonthlyPattern`) and helpers `parse_days`, `unit_from_str`.
+- **types.rs** — Shared types: `EventInfo` (rich parsed fields + DB-tracking fields), `MessageInfo`, `ChatInfo`/`ChatType`, `TgMessage`, `MessageSender`, plus the time enums (`TimeUnit`, `Repetition`, `Ordinal`, `MonthlyPattern`) and helpers `parse_days`, `unit_from_str`, `day_from_str`, `day_to_str`. `ChatType` implements `FromStr`. Weekday↔string mapping lives only here (`day_from_str`/`day_to_str`); other modules reuse it.
 
-- **parser.rs** — `parse(text) -> Option<EventInfo>`. Stateless; regex-extracts the time from the start of the message, rest becomes the message text. DB fields default to zero/false/None.
+- **parser.rs** — `parse(text) -> Option<EventInfo>`. Stateless; regex-extracts the time/date components, rest becomes the message text. The clock time is matched *anywhere* in the message; the relative offset, bare hour, and short date are anchored to the start. A standalone 4-digit token in 2000..=2100 anywhere is treated as a year restriction. DB fields default to zero/false/None.
 
 - **scheduler.rs** — Pure datetime math. `calc_next(EventInfo)` / `calc_next_at(EventInfo, now)` compute the next occurrence and set `active` + `next_datetime`.
 
-- **storage.rs** — `EventStorage` over rusqlite. Tables: `chats`, `messages`, `events` (`events.msg_id` is a NOT NULL FK to `messages`). `open(path)` / `open_in_memory()`. Events: `insert_event`, `get_event`/`get`, `get_by_chat`, `get_active_events`, `get_active_by_chat`, `get_next_event`, `get_missed_events(now)`, `get_events_at(dt)`, `update_schedule`, `mark_inactive`, `delete`, `delete_inactive`. Chats: `upsert_chat`, `get_chat`, `get_all_chats`. Messages: `insert_message`.
+- **error.rs** — Crate error type (`thiserror`) and `Result<T>` alias. Library methods (`storage`, `state`) return this instead of leaking `rusqlite::Error`; binaries (`main.rs`, `bin/bench.rs`) use `anyhow` on top.
+
+- **storage.rs** — `EventStorage` over rusqlite; public methods return `crate::error::Result`. Tables: `chats`, `messages`, `events` (`events.msg_id` is a NOT NULL FK to `messages`). `open(path)` / `open_in_memory()`. Events: `insert_event`, `get_event`, `get_by_chat`, `get_active_events`, `get_active_by_chat`, `get_next_event`, `get_missed_events(now)`, `get_events_at(dt)`, `update_schedule`, `mark_inactive`, `delete`, `delete_inactive`. Chats: `upsert_chat`, `get_chat`, `get_all_chats`. Messages: `insert_message`.
 
 - **state.rs** — `EventProvider`: a `Clone` handle wrapping `Arc<Mutex<EventProviderState>>` (storage + cached nearest `next_event`); all methods take `&self` and lock internally. `start(msg_tx)` sends missed events then spawns a 1s polling thread that fires due events and reschedules. Other methods wrap storage: `upsert_chat`, `insert_message`, `get_next_event`, `get_missed_events`, `get_event`, `get_active_by_chat`, `insert_event_and_get[_at]`, `update_at_and_reload`.
 
@@ -52,7 +54,7 @@ cargo run --bin bench      # storage benchmark (1000 events)
 `test-cases.md` holds markdown tables that drive `tests/table_tests.rs`. Rows alternate `USER` (parse + insert via `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, then assert `next_datetime`, or `NONE` for inactive). Add scenarios by appending `###` sections — no code changes needed.
 
 ## Datetime formats supported
-- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — always at the start of the message.
+- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time matched anywhere; bare hour / relative offset / short date must lead the message.
 - `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year.
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then repeat interval.
 - `8 call Alex` → next 08:00; `24 call Poly` → next 00:00; `25 ...` → invalid bare hour (not parsed).

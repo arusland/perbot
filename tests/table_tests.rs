@@ -158,7 +158,7 @@ fn run_table(table_idx: usize, table: &Table) {
                             table,
                             step,
                             &format!("no current event (parse failed), expected {}", row.value),
-                            &String::new(),
+                            "",
                         );
                     }
                 };
@@ -170,16 +170,16 @@ fn run_table(table_idx: usize, table: &Table) {
                             table,
                             step,
                             &format!("event {} not found in storage", id),
-                            &String::new(),
+                            "",
                         );
                     }
                 };
 
                 // Only call update (simulate fire) when time has reached the event's next_datetime
-                if let Some(next_dt) = event.next_datetime {
-                    if row.ts >= next_dt {
-                        provider.update_at_and_reload(vec![event.clone()], row.ts);
-                    }
+                if let Some(next_dt) = event.next_datetime
+                    && row.ts >= next_dt
+                {
+                    provider.update_at_and_reload(vec![event.clone()], row.ts);
                 }
 
                 // Re-read the event after potential update
@@ -221,7 +221,7 @@ fn run_table(table_idx: usize, table: &Table) {
                                 table,
                                 step,
                                 &format!("invalid expected datetime '{}'", row.value),
-                                &String::new(),
+                                "",
                             );
                         }
                     }
@@ -233,7 +233,7 @@ fn run_table(table_idx: usize, table: &Table) {
                     table,
                     step,
                     &format!("unknown actor '{}'", other),
-                    &String::new(),
+                    "",
                 );
             }
         }

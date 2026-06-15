@@ -10,6 +10,7 @@ pub fn calc_next(event: EventInfo) -> EventInfo {
     calc_next_at(event, Local::now().naive_local())
 }
 
+/// Like [`calc_next`] but with an explicit `now`, for deterministic testing.
 pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
     let next_datetime = calculate_next_datetime(&event, now);
     EventInfo {
@@ -71,9 +72,8 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 Some(new_date.and_time(now.time()))
             }
             TimeUnit::Years => {
-                let new_date = now
-                    .date()
-                    .checked_add_months(chrono::Months::new(value * 12))?;
+                let months = value.checked_mul(12)?;
+                let new_date = now.date().checked_add_months(chrono::Months::new(months))?;
                 Some(new_date.and_time(now.time()))
             }
         };
@@ -302,9 +302,8 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: TimeUnit) -> Option<NaiveD
             Some(new_date.and_time(dt.time()))
         }
         TimeUnit::Years => {
-            let new_date = dt
-                .date()
-                .checked_add_months(chrono::Months::new(interval * 12))?;
+            let months = interval.checked_mul(12)?;
+            let new_date = dt.date().checked_add_months(chrono::Months::new(months))?;
             Some(new_date.and_time(dt.time()))
         }
     }
@@ -402,7 +401,7 @@ mod tests {
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         let diff = dt.signed_duration_since(now).num_minutes();
-        assert!(diff >= 9 && diff <= 11);
+        assert!((9..=11).contains(&diff));
     }
 
     #[test]
@@ -414,7 +413,7 @@ mod tests {
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         let diff = dt.signed_duration_since(now).num_hours();
-        assert!(diff >= 1 && diff <= 3);
+        assert!((1..=3).contains(&diff));
     }
 
     #[test]
@@ -474,6 +473,67 @@ mod tests {
         assert!(dt > now);
         assert_eq!(dt.time(), NaiveTime::from_hms_opt(0, 0, 0).unwrap());
         assert_eq!(dt.date().weekday(), Weekday::Wed);
+    }
+
+    #[test]
+    fn play_years_picks_first_future_in_year() {
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(11, 13, 0).unwrap());
+        event.years = Some(HashSet::from([2027, 2028]));
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        let result = calc_next_at(event, now);
+        assert!(result.active);
+        assert_eq!(
+            result.next_datetime,
+            Some(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+                NaiveTime::from_hms_opt(11, 13, 0).unwrap(),
+            ))
+        );
+    }
+
+    #[test]
+    fn play_years_all_past_returns_inactive() {
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(11, 13, 0).unwrap());
+        event.years = Some(HashSet::from([2020]));
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        let result = calc_next_at(event, now);
+        assert!(!result.active);
+        assert!(result.next_datetime.is_none());
+    }
+
+    #[test]
+    fn play_years_respects_weekday_filter() {
+        // 2027-01-01 is a Friday; restrict to Sundays only.
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        event.years = Some(HashSet::from([2027]));
+        event.days = Some(HashSet::from([Weekday::Sun]));
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        let result = calc_next_at(event, now);
+        let dt = result.next_datetime.unwrap();
+        assert_eq!(dt.date().weekday(), Weekday::Sun);
+        assert_eq!(dt.date().year(), 2027);
+    }
+
+    #[test]
+    fn advance_by_years_overflow_is_none() {
+        let base = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        // interval * 12 overflows u32 -> None rather than panicking.
+        assert_eq!(advance_by(base, u32::MAX, TimeUnit::Years), None);
     }
 
     // --- Helper function unit tests ---
