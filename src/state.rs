@@ -81,6 +81,18 @@ impl EventProvider {
         }
     }
 
+    /// Returns active events for a chat, ordered by next datetime.
+    pub fn get_active_by_chat(&self, chat_id: i64) -> Vec<EventInfo> {
+        let inner = self.inner.lock().unwrap();
+        match inner.storage.get_active_by_chat(chat_id) {
+            Ok(events) => events,
+            Err(e) => {
+                log::error!("Failed to get active events for chat {}: {}", chat_id, e);
+                Vec::new()
+            }
+        }
+    }
+
     /// Returns all active events scheduled at the given datetime.
     fn get_events_at(&self, dt: NaiveDateTime) -> Vec<EventInfo> {
         let inner = self.inner.lock().unwrap();

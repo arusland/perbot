@@ -1,11 +1,24 @@
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{escape_markdown, extract_chat_info};
+use perbot::telegram::{escape_markdown, extract_chat_info, format_events_list};
 use perbot::types::TgMessage;
 use std::process;
-use teloxide::{prelude::*, types::ParseMode};
+use teloxide::{
+    prelude::*,
+    types::{BotCommandScope, ParseMode},
+    utils::command::BotCommands,
+};
 use tokio::sync::mpsc;
+
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase", description = "Available commands:")]
+enum Command {
+    #[command(description = "show this help message")]
+    Help,
+    #[command(description = "list upcoming scheduled events")]
+    Events,
+}
 
 #[tokio::main]
 async fn main() {
@@ -25,6 +38,25 @@ async fn main() {
         .parse_mode(ParseMode::MarkdownV2)
         .await
         .unwrap();
+
+    let me = bot.get_me().await.expect("Failed to fetch bot info");
+    let bot_username = me.username().to_string();
+
+    // Clear any commands left over from a previous bot on this token. These can
+    // live in more specific scopes that take precedence over the default scope,
+    // so we delete them before registering ours.
+    for scope in [
+        BotCommandScope::AllPrivateChats,
+        BotCommandScope::AllGroupChats,
+        BotCommandScope::AllChatAdministrators,
+    ] {
+        if let Err(e) = bot.delete_my_commands().scope(scope).await {
+            log::warn!("Failed to clear old commands scope: {}", e);
+        }
+    }
+    if let Err(e) = bot.set_my_commands(Command::bot_commands()).await {
+        log::error!("Failed to register bot commands: {}", e);
+    }
 
     let storage = EventStorage::open("perbot.db").expect("Failed to open database");
     let provider = EventProvider::new(storage);
@@ -51,6 +83,7 @@ async fn main() {
     let handler_provider = provider.clone();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let provider = handler_provider.clone();
+        let bot_username = bot_username.clone();
         async move {
             // Save/update chat info
             let chat_info = extract_chat_info(&msg.chat);
@@ -77,6 +110,22 @@ async fn main() {
                         process::exit(0);
                     });
 
+                    return Ok(());
+                }
+
+                if let Ok(cmd) = Command::parse(text, &bot_username) {
+                    match cmd {
+                        Command::Help => {
+                            bot.send_message(msg.chat.id, Command::descriptions().to_string())
+                                .await?;
+                        }
+                        Command::Events => {
+                            let events = provider.get_active_by_chat(msg.chat.id.0);
+                            bot.send_message(msg.chat.id, format_events_list(&events))
+                                .parse_mode(ParseMode::MarkdownV2)
+                                .await?;
+                        }
+                    }
                     return Ok(());
                 }
 

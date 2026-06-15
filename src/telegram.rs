@@ -1,4 +1,4 @@
-use crate::types::{ChatInfo, ChatType};
+use crate::types::{ChatInfo, ChatType, EventInfo};
 
 pub fn escape_markdown(text: &str) -> String {
     let special_chars = [
@@ -12,6 +12,22 @@ pub fn escape_markdown(text: &str) -> String {
         result.push(c);
     }
     result
+}
+
+/// Builds a MarkdownV2 reply listing upcoming events ordered by next datetime.
+pub fn format_events_list(events: &[EventInfo]) -> String {
+    if events.is_empty() {
+        return "No upcoming events\\.".to_string();
+    }
+    let mut out = String::from("*Upcoming events:*\n");
+    for e in events {
+        let when = match e.next_datetime {
+            Some(dt) => dt.format("%H:%M %d\\.%m\\.%Y").to_string(),
+            None => "—".to_string(),
+        };
+        out.push_str(&format!("• {} — {}\n", when, escape_markdown(&e.message)));
+    }
+    out
 }
 
 pub fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
