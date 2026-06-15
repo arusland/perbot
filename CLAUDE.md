@@ -1,78 +1,61 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Workflow Rules
 
 - When you complete work, print a short commit message for the changes.
-- After each big change (new feature, new module, command, or behavior change), update this CLAUDE.md to keep the architecture descriptions accurate.
+- After a feature, module, command, or behavior change, update this file to keep it accurate.
 
 ## Project Overview
 
-Perbot is a Telegram reminder bot written in Rust (edition 2024). Users send messages containing natural language time/date expressions (e.g., "13:30 call the office"), the bot parses the datetime, schedules an async task, persists the event to SQLite, and sends the reminder when the time arrives. On restart, active events are reloaded and rescheduled.
+Perbot is a Telegram reminder bot in Rust (edition 2024). Users send a message starting with a natural-language time expression (e.g. `13:30 call the office`); the bot parses it, persists the event to SQLite, schedules it, and sends the reminder when due. Active events are reloaded and rescheduled on restart.
 
-## Build & Test Commands
+## Build & Test
 
 ```bash
-cargo build                    # Debug build
-cargo build --release          # Release build
-cargo test                     # Run all tests (across parser, storage, and scheduler)
-cargo test parser::tests       # Run only parser tests
-cargo test storage::tests      # Run only storage tests
-cargo test scheduler::tests    # Run only scheduler tests
-cargo test <test_name>         # Run a single test by name
-cargo run --bin bench          # Run storage benchmark (1000 events)
+cargo build [--release]
+cargo test                 # all (parser/storage/scheduler/table tests)
+cargo test <name>          # single test or module, e.g. parser::tests
+cargo run --bin bench      # storage benchmark (1000 events)
 ```
 
 ## Environment Variables
 
-- `TG_BOT_TOKEN` — Telegram bot API token (required)
-- `TG_ADMIN_ID` — Admin chat ID for startup notification (required, i64)
-- `RUST_LOG` — Log level filter for `flexi_logger` (e.g., `info`, `debug`)
-- `LOG_DIR` — Directory for log files (defaults to `logs`)
+- `TG_BOT_TOKEN` — bot API token (required)
+- `TG_ADMIN_ID` — admin chat ID, i64 (required)
+- `RUST_LOG` — `flexi_logger` level (e.g. `info`)
+- `LOG_DIR` — log directory (default `logs`)
 
 ## Architecture
 
-Nine source files in `src/` plus a benchmark binary:
+`lib.rs` re-exports all modules. Shared types live in `types.rs`; everything imports from there.
 
-- **lib.rs** — Crate root. Re-exports all modules: `logger`, `parser`, `scheduler`, `state`, `storage`, `telegram`, `types`.
+- **types.rs** — Shared types: `EventInfo` (rich parsed fields + DB-tracking fields), `MessageInfo`, `ChatInfo`/`ChatType`, `TgMessage`, `MessageSender`, plus the time enums (`TimeUnit`, `Repetition`, `Ordinal`, `MonthlyPattern`) and helpers `parse_days`, `unit_from_str`.
 
-- **types.rs** — All shared data types used across modules. Contains: `TimeUnit`, `Repetition`, `Ordinal`, `MonthlyPattern`, `EventInfo` (parsed datetime fields plus DB-tracking fields), `MessageInfo`, `ChatType`, `ChatInfo`, `TgMessage`, `MessageSender` type alias, and shared helper functions `parse_days` (weekday string parsing) and `unit_from_str` (time unit string parsing).
+- **parser.rs** — `parse(text) -> Option<EventInfo>`. Stateless; regex-extracts the time from the start of the message, rest becomes the message text. DB fields default to zero/false/None.
 
-- **telegram.rs** — Telegram-specific utility functions. `escape_markdown(text)` escapes MarkdownV2 special characters for safe use in Telegram messages. `format_events_list(events)` builds a MarkdownV2 reply listing upcoming events (datetime + escaped message), or "No upcoming events." when the slice is empty. `extract_chat_info(chat)` converts a teloxide `Chat` into the internal `ChatInfo` type, mapping private/group/supergroup/channel variants.
+- **scheduler.rs** — Pure datetime math. `calc_next(EventInfo)` / `calc_next_at(EventInfo, now)` compute the next occurrence and set `active` + `next_datetime`.
 
-- **logger.rs** — Logging setup using `flexi_logger`. `init()` configures daily log rotation to `LOG_DIR` (defaults to `logs`), keeps 365 log files, and duplicates output to stdout. Custom format: `[timestamp] LEVEL [module:line] message`.
+- **storage.rs** — `EventStorage` over rusqlite. Tables: `chats`, `messages`, `events` (`events.msg_id` is a NOT NULL FK to `messages`). `open(path)` / `open_in_memory()`. Events: `insert_event`, `get_event`/`get`, `get_by_chat`, `get_active_events`, `get_active_by_chat`, `get_next_event`, `get_missed_events(now)`, `get_events_at(dt)`, `update_schedule`, `mark_inactive`, `delete`, `delete_inactive`. Chats: `upsert_chat`, `get_chat`, `get_all_chats`. Messages: `insert_message`.
 
-- **main.rs** — Bot entry point. Initializes logging via `logger::init()`, then teloxide REPL. Defines the `Command` enum (`#[derive(BotCommands)]`, `macros` feature): `/help` (auto-generated descriptions via `Command::descriptions()`) and `/events` (lists the chat's active upcoming events via `provider.get_active_by_chat` + `telegram::format_events_list`). On startup, after fetching the bot username via `get_me()`, it deletes any stale commands from the `AllPrivateChats`, `AllGroupChats`, and `AllChatAdministrators` scopes (these take precedence over the default scope and may linger from a previous bot on the same token), then registers the current commands via `set_my_commands(Command::bot_commands())`. All event and storage access goes through `EventProvider`, which is `Clone` and internally thread-safe (no external `Arc<Mutex<>>` needed). On startup calls `provider.start(msg_tx)` which reloads events, sends missed events, and spawns a background polling thread. Handles incoming messages: for every message (any type), chat info is saved/updated via `provider.upsert_chat`. For text messages, the message is stored via `provider.insert_message` to obtain a `msg_id`. The admin `exit` shutdown check runs first, then `Command::parse(text, bot_username)` dispatches `/help` and `/events`; otherwise the text is parsed with `parser::parse`, which sets `chat_id` and `msg_id` on the `EventInfo`, and calls `provider.insert_event_and_get(event)` which calculates datetime, persists to DB, reloads the next event, and returns the event as read back from DB. The Telegram message-sending channel accepts `Vec<TgMessage>` to support batching multiple simultaneous events. Most responses use MarkdownV2 parse mode (escaped via `telegram::escape_markdown`); `/help` is sent as plain text since the generated descriptions contain MarkdownV2-special characters.
+- **state.rs** — `EventProvider`: a `Clone` handle wrapping `Arc<Mutex<EventProviderState>>` (storage + cached nearest `next_event`); all methods take `&self` and lock internally. `start(msg_tx)` sends missed events then spawns a 1s polling thread that fires due events and reschedules. Other methods wrap storage: `upsert_chat`, `insert_message`, `get_next_event`, `get_missed_events`, `get_event`, `get_active_by_chat`, `insert_event_and_get[_at]`, `update_at_and_reload`.
 
-- **state.rs** — `EventProvider` is a `Clone` handle wrapping `Arc<Mutex<EventProviderState>>`, encapsulating all synchronization internally. `EventProviderState` holds `EventStorage` and a single `Option<EventInfo>` for the nearest active event. All public methods take `&self` and lock the mutex internally — callers never deal with `Arc` or `Mutex` directly. Key methods: `start(&self, msg_tx: MessageSender)` — reloads events from DB, sends missed events via the channel, then spawns a single background `std::thread` (using `self.clone()`) that polls every second: checks the nearest event's `next_datetime`, and when the current time reaches it, queries all events at that datetime, sends their messages, and calls `update_and_reload`; `upsert_chat(&ChatInfo)` delegates chat persistence to storage; `insert_message(user_id, chat_id, text)` constructs a `MessageInfo` and delegates to storage, returning the message ID; `get_next_event()` returns the nearest active event; `get_missed_events()` queries storage directly for missed events (no in-memory cache); `get_event(id)` returns an event by ID; `get_active_by_chat(chat_id)` returns the chat's active events ordered by `next_datetime` (used by the `/events` command); `get_events_at(dt)` (private) queries storage for all active events at a specific datetime; `update_and_reload(events)` (private) recalculates all given events using current time and reloads the next event from DB; `update_at_and_reload(events, now)` (public) same but with a custom datetime; `insert_event_and_get(event)` calculates datetime via `scheduler::calc_next`, persists via `insert_event`, reloads the next event, and returns the event as read back from DB via `get_event` (single lock acquisition); `insert_event_and_get_at(event, now)` same but uses `calc_next_at` with a custom datetime. Private helper `load_next_event(&mut EventProviderState)` is used by methods that already hold the lock to avoid deadlocks — it queries storage for the first active event (ordered by `next_datetime`) without filtering by current time.
+- **main.rs** — Entry point + teloxide REPL. Defines the `Command` enum (`BotCommands`): `/help`, `/events`, and admin-only `/exit` (`#[command(hide)]`). At startup it clears stale commands from non-default scopes (`AllPrivateChats`/`AllGroupChats`/`AllChatAdministrators`) then `set_my_commands`. Per text message: upserts chat, stores the message, computes `is_admin`, and `Command::parse` dispatches to `handle_help`/`handle_events`/`handle_exit`; non-command text goes through `parser::parse` → `provider.insert_event_and_get`. Replies use MarkdownV2 (escaped via `telegram::escape_markdown`) except `/help`, which is plain text.
 
-- **parser.rs** — Stateless datetime extraction. `parse(text) -> Option<EventInfo>` uses regex to extract time from the beginning of a message; remainder becomes the event message. All types (`EventInfo`, `Repetition`, etc.) are imported from `types.rs`. Returns `EventInfo` with DB-tracking fields (`id`, `chat_id`, `active`, `next_datetime`, `created_at`, `msg_id`) defaulted to zero/false/None.
+- **telegram.rs** — `escape_markdown`, `format_events_list(events)` (MarkdownV2 event list), `extract_chat_info(chat)` → `ChatInfo`.
 
-- **scheduler.rs** — Pure datetime computation. `calc_next(EventInfo) -> EventInfo` and `calc_next_at(EventInfo, NaiveDateTime) -> EventInfo` calculate the next occurrence directly from `EventInfo`'s rich-typed fields and return the event with `active` and `next_datetime` set. Contains all related helpers: `calculate_next_datetime`, weekday utilities, monthly pattern logic, and `advance_by`.
+- **logger.rs** — `init()` sets up `flexi_logger` with daily rotation to `LOG_DIR` + stdout.
 
-- **storage.rs** — SQLite persistence via rusqlite. `EventStorage` manages three tables: `chats` (id, chat_type, title, username, first_name, last_name, updated_at, created_at), `messages` (id, user_id, chat_id, created_at, message), and `events` (id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years). `msg_id` in events is a NOT NULL foreign key referencing `messages(id)`. All types (`EventInfo`, `ChatInfo`, etc.) are imported from `types.rs`. Provides `open(path)` for file-backed DB and `open_in_memory()` for tests. Event methods: `insert_event(&EventInfo)` serializes rich types to DB strings internally and persists the event; `get(id)` and `get_event(id)` return an event by ID; `get_by_chat(chat_id)` returns all events for a chat; `get_active_events()` returns all active events; `get_active_by_chat(chat_id)` returns active events for a chat; `get_next_event()` returns the single nearest active event (first by `next_datetime`); `get_missed_events(now)` returns all active events whose `next_datetime` is before `now`; `get_events_at(dt)` returns all active events with the exact given `next_datetime`; `update_schedule(id, active, next_datetime)` updates the schedule after each fire; `mark_inactive(id)` deactivates an event; `delete(id)` removes an event; `delete_inactive()` removes all inactive events. Chat methods: `upsert_chat(&ChatInfo)` inserts or updates chat info; `get_chat(id)` returns a chat by ID; `get_all_chats()` returns all chats. Message methods: `insert_message(&MessageInfo)` stores a message and returns its ID.
-
-- **bin/bench.rs** — Storage benchmark binary. Creates a file-backed DB at `target/bench_storage.db`, inserts 1000 events, and measures insert, get-by-ID, get-active, and get-next-event throughput. Run with `cargo run --bin bench`.
+- **bin/bench.rs** — Storage throughput benchmark.
 
 ## Test Cases
 
-`test-cases.md` in the project root contains markdown tables that drive the integration test in `tests/table_tests.rs`. Each table is a scenario; rows alternate between `USER` actions (a raw chat message parsed and inserted via `EventProvider::insert_event_and_get_at`) and `SYSTEM` actions (update the current event via `EventProvider::update_at_and_reload` and assert that `next_datetime` equals the expected value, or that the event is inactive when the expected value is `NONE`). To add new scenarios, append new `###` sections with the same table format to `test-cases.md` — no code changes required.
+`test-cases.md` holds markdown tables that drive `tests/table_tests.rs`. Rows alternate `USER` (parse + insert via `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, then assert `next_datetime`, or `NONE` for inactive). Add scenarios by appending `###` sections — no code changes needed.
 
 ## Datetime formats supported
 - `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — always at the start of the message.
-- `13:45 mon-fri` — every Monday, Tuesday, Wednesday, Thursday, and Friday at 13:45.
-- `13:25 thu-fri,sun 2023` — every Thursday, Friday, and Sunday in 2023 at 13:25.
-- `14:55 20.05 every 2 weeks` - start at 14:55 every year on date 20.05 and then repeat every 2 weeks.
-- `15:30 every 3 days` — start at next 15:30 and then repeat every 3 days.
-- `8 call Alex` - fire event at next 08:00 (from current time)
-- `24 call Poly` - fire event at next 00:00
-- `25 call Alex` - do not parse invalid bare hour
-- `8 min call her` - fire event in 8 minutes
-- `8 min every hour` - fire event in 8 minutes and repeat every hour
-- `10:00 first sunday call mom` - fire event at 10:00 on the first Sunday of the month
-- `9:30 last monday team sync` - fire event at 9:30 on the last Monday of the month
-- `14:00 second thursday board meeting` - fire event at 14:00 on the second Thursday of the month
-- `17:00 3rd friday happy hour` - ordinal can also be `1st`, `2nd`, `3rd`, `4th`, `5th`
-- `18:00 last day of the month pay rent` - fire event at 18:00 on the last day of the month
-- `18:00 last day pay bills` - "of the month" is optional
+- `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year.
+- `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then repeat interval.
+- `8 call Alex` → next 08:00; `24 call Poly` → next 00:00; `25 ...` → invalid bare hour (not parsed).
+- `8 min call her`, `8 min every hour` — relative offset, optionally repeating.
+- `10:00 first sunday`, `9:30 last monday`, `14:00 second thursday`, `17:00 3rd friday` — ordinal weekday (`1st`–`5th`, `last`) of the month.
+- `18:00 last day of the month`, `18:00 last day` — last day of month ("of the month" optional).
