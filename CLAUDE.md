@@ -41,7 +41,7 @@ cargo run --bin bench      # storage benchmark (1000 events)
 
 - **main.rs** — Entry point + teloxide REPL. Defines the `Command` enum (`BotCommands`): `/help`, `/events`, and admin-only `/exit` (`#[command(hide)]`). At startup it clears stale commands from non-default scopes (`AllPrivateChats`/`AllGroupChats`/`AllChatAdministrators`) then `set_my_commands`. Per text message: upserts chat, stores the message, computes `is_admin`, and `Command::parse` dispatches to `handle_help`/`handle_events`/`handle_exit`; non-command text goes through `parser::parse` → `provider.insert_event_and_get`. Replies use MarkdownV2 (escaped via `telegram::escape_markdown`) except `/help`, which is plain text.
 
-- **telegram.rs** — `escape_markdown`, `format_events_list(events)` (MarkdownV2 event list), `extract_chat_info(chat)` → `ChatInfo`.
+- **telegram.rs** — `escape_markdown`, `format_events_list(events)` / `format_events_list_at(events, now)` (MarkdownV2 event list; each row shows the absolute datetime plus a short relative time like `13 mins`, `1h`, `2d`, `1w` via the private `format_relative`), `extract_chat_info(chat)` → `ChatInfo`.
 
 - **logger.rs** — `init()` sets up `flexi_logger` with daily rotation to `LOG_DIR` + stdout.
 

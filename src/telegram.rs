@@ -1,4 +1,5 @@
 use crate::types::{ChatInfo, ChatType, EventInfo};
+use chrono::{Local, NaiveDateTime};
 
 pub fn escape_markdown(text: &str) -> String {
     let special_chars = [
@@ -14,15 +15,48 @@ pub fn escape_markdown(text: &str) -> String {
     result
 }
 
+/// Short relative time until `dt` from `now`, e.g. `13 mins`, `1h`, `2d`, `1w`.
+fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
+    let secs = (dt - now).num_seconds();
+    if secs <= 0 {
+        return "now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 1 {
+        return "now".to_string();
+    }
+    if mins < 60 {
+        return format!("{} min{}", mins, if mins == 1 { "" } else { "s" });
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{}h", hours);
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{}d", days);
+    }
+    format!("{}w", days / 7)
+}
+
 /// Builds a MarkdownV2 reply listing upcoming events ordered by next datetime.
 pub fn format_events_list(events: &[EventInfo]) -> String {
+    format_events_list_at(events, Local::now().naive_local())
+}
+
+/// Like [`format_events_list`] but with an explicit `now` for relative-time tests.
+pub fn format_events_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
     if events.is_empty() {
         return "No upcoming events\\.".to_string();
     }
     let mut out = String::from("*Upcoming events:*\n");
     for e in events {
         let when = match e.next_datetime {
-            Some(dt) => dt.format("%H:%M %d\\.%m\\.%Y").to_string(),
+            Some(dt) => format!(
+                "{} \\({}\\)",
+                dt.format("%H:%M %d\\.%m\\.%Y"),
+                escape_markdown(&format_relative(now, dt))
+            ),
             None => "—".to_string(),
         };
         out.push_str(&format!("• {} — {}\n", when, escape_markdown(&e.message)));
@@ -64,5 +98,30 @@ pub fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
         last_name,
         updated_at: None,
         created_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn at(now: NaiveDateTime, d: Duration) -> String {
+        format_relative(now, now + d)
+    }
+
+    #[test]
+    fn relative_time_units() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        assert_eq!(at(now, Duration::seconds(30)), "now");
+        assert_eq!(at(now, Duration::seconds(-5)), "now");
+        assert_eq!(at(now, Duration::minutes(1)), "1 min");
+        assert_eq!(at(now, Duration::minutes(13)), "13 mins");
+        assert_eq!(at(now, Duration::hours(1)), "1h");
+        assert_eq!(at(now, Duration::hours(23)), "23h");
+        assert_eq!(at(now, Duration::days(2)), "2d");
+        assert_eq!(at(now, Duration::days(7)), "1w");
+        assert_eq!(at(now, Duration::days(21)), "3w");
     }
 }
