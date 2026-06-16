@@ -112,6 +112,32 @@ impl EventProvider {
         }
     }
 
+    /// Returns active events for a chat scheduled within `[start, end)`, ordered by next datetime.
+    pub fn get_active_by_chat_in_range(
+        &self,
+        chat_id: i64,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Vec<EventInfo> {
+        let inner = self.inner.lock().unwrap();
+        match inner
+            .storage
+            .get_active_by_chat_in_range(chat_id, start, end)
+        {
+            Ok(events) => events,
+            Err(e) => {
+                log::error!(
+                    "Failed to get events for chat {} in [{}, {}): {}",
+                    chat_id,
+                    start,
+                    end,
+                    e
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// Returns all active events scheduled at the given datetime.
     fn get_events_at(&self, dt: NaiveDateTime) -> Vec<EventInfo> {
         let inner = self.inner.lock().unwrap();

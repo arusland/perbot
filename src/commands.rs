@@ -1,6 +1,8 @@
 use crate::state::EventProvider;
-use crate::telegram::{format_events_list, format_today_list, format_tomorrow_list};
-use chrono::{Duration, Local};
+use crate::telegram::{
+    format_events_list, format_month_list, format_today_list, format_tomorrow_list,
+};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
 use teloxide::{prelude::*, types::ParseMode, utils::command::BotCommands};
 
@@ -15,6 +17,8 @@ pub enum Command {
     Today,
     #[command(description = "list tomorrow's events")]
     Tomorrow,
+    #[command(description = "list this month's events")]
+    Month,
     #[command(description = "shut the bot down (admin only)", hide)]
     Exit,
 }
@@ -36,6 +40,7 @@ impl Command {
             Command::Events => handle_events(&ctx).await,
             Command::Today => handle_today(&ctx).await,
             Command::Tomorrow => handle_tomorrow(&ctx).await,
+            Command::Month => handle_month(&ctx).await,
             Command::Exit => handle_exit(&ctx).await,
         }
     }
@@ -82,6 +87,26 @@ async fn handle_tomorrow(ctx: &CmdContext<'_>) -> ResponseResult<()> {
         .get_active_by_chat_on_date(ctx.chat_id.0, tomorrow);
     ctx.bot
         .send_message(ctx.chat_id, format_tomorrow_list(&events))
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+    Ok(())
+}
+
+/// Replies with the chat's active events scheduled for the current calendar month.
+async fn handle_month(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+    let today = Local::now().naive_local().date();
+    let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+    let (next_year, next_month) = if today.month() == 12 {
+        (today.year() + 1, 1)
+    } else {
+        (today.year(), today.month() + 1)
+    };
+    let end = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(start);
+    let events = ctx
+        .provider
+        .get_active_by_chat_in_range(ctx.chat_id.0, start, end);
+    ctx.bot
+        .send_message(ctx.chat_id, format_month_list(&events))
         .parse_mode(ParseMode::MarkdownV2)
         .await?;
     Ok(())
