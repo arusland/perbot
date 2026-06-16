@@ -47,10 +47,25 @@ pub fn format_events_list(events: &[EventInfo]) -> String {
 
 /// Like [`format_events_list`] but with an explicit `now` for relative-time tests.
 pub fn format_events_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
+    format_list(events, now, "*Upcoming events:*", "No upcoming events\\.")
+}
+
+/// Builds a MarkdownV2 reply listing today's events ordered by next datetime.
+pub fn format_today_list(events: &[EventInfo]) -> String {
+    format_today_list_at(events, Local::now().naive_local())
+}
+
+/// Like [`format_today_list`] but with an explicit `now` for relative-time tests.
+pub fn format_today_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
+    format_list(events, now, "*Today's events:*", "No events today\\.")
+}
+
+/// Renders an event list under `title`, or `empty` when there are no events.
+fn format_list(events: &[EventInfo], now: NaiveDateTime, title: &str, empty: &str) -> String {
     if events.is_empty() {
-        return "No upcoming events\\.".to_string();
+        return empty.to_string();
     }
-    let mut out = String::from("*Upcoming events:*\n");
+    let mut out = format!("{}\n", title);
     for e in events {
         let when = match e.next_datetime {
             Some(dt) => format!(
@@ -158,6 +173,25 @@ mod tests {
         assert!(out.contains("14:00 15\\.06\\.2026 \\(2h\\)"));
         assert!(out.contains("pay rent \\(urgent\\)"));
         assert!(out.contains("\\(3d\\)"));
+    }
+
+    #[test]
+    fn format_today_list_empty() {
+        assert_eq!(
+            format_today_list_at(&[], Local::now().naive_local()),
+            "No events today\\."
+        );
+    }
+
+    #[test]
+    fn format_today_list_rows() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
+        let out = format_today_list_at(&events, now);
+        assert!(out.starts_with("*Today's events:*\n"));
+        assert!(out.contains("10:00 16\\.06\\.2026 \\(1h\\)"));
+        assert!(out.contains("standup"));
     }
 
     #[test]

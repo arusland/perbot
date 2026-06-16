@@ -1,8 +1,9 @@
 use anyhow::Context as _;
+use chrono::Local;
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{escape_markdown, extract_chat_info, format_events_list};
+use perbot::telegram::{escape_markdown, extract_chat_info, format_events_list, format_today_list};
 use perbot::types::TgMessage;
 use std::process;
 use teloxide::{
@@ -19,6 +20,8 @@ enum Command {
     Help,
     #[command(description = "list upcoming scheduled events")]
     Events,
+    #[command(description = "list today's events")]
+    Today,
     #[command(description = "shut the bot down (admin only)", hide)]
     Exit,
 }
@@ -37,6 +40,16 @@ async fn handle_help(bot: &Bot, chat_id: ChatId, is_admin: bool) -> ResponseResu
 async fn handle_events(bot: &Bot, chat_id: ChatId, provider: &EventProvider) -> ResponseResult<()> {
     let events = provider.get_active_by_chat(chat_id.0);
     bot.send_message(chat_id, format_events_list(&events))
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+    Ok(())
+}
+
+/// Replies with the chat's active events scheduled for today.
+async fn handle_today(bot: &Bot, chat_id: ChatId, provider: &EventProvider) -> ResponseResult<()> {
+    let today = Local::now().naive_local().date();
+    let events = provider.get_active_by_chat_on_date(chat_id.0, today);
+    bot.send_message(chat_id, format_today_list(&events))
         .parse_mode(ParseMode::MarkdownV2)
         .await?;
     Ok(())
@@ -157,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
                     match cmd {
                         Command::Help => handle_help(&bot, msg.chat.id, is_admin).await?,
                         Command::Events => handle_events(&bot, msg.chat.id, &provider).await?,
+                        Command::Today => handle_today(&bot, msg.chat.id, &provider).await?,
                         Command::Exit => handle_exit(&bot, msg.chat.id, admin_id, is_admin).await?,
                     }
                     return Ok(());

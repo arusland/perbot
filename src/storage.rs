@@ -262,6 +262,35 @@ impl EventStorage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Retrieves active events for a chat scheduled on the given calendar date.
+    pub fn get_active_by_chat_on_date(
+        &self,
+        chat_id: i64,
+        date: NaiveDate,
+    ) -> Result<Vec<EventInfo>> {
+        let start = date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let next_day = date.succ_opt().unwrap_or(date);
+        let end = next_day
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+             FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
+             ORDER BY next_datetime ASC",
+        )?;
+
+        let rows = stmt.query_map(params![chat_id, start, end], Self::row_to_event)?;
+
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Updates `active` and `next_datetime` for an event after `calc_next` is called.
     pub fn update_schedule(
         &self,
@@ -1134,6 +1163,41 @@ mod tests {
 
         let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0)).unwrap();
         assert!(missed.is_empty());
+    }
+
+    #[test]
+    fn test_get_active_by_chat_on_date() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        ensure_chat(&storage, 2);
+        let msg1 = ensure_message(&storage, 1);
+        let msg2 = ensure_message(&storage, 2);
+
+        // Two events for chat 1 today, at the day's boundaries.
+        let morning = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 16, 0, 0)))
+            .unwrap();
+        let night = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 16, 23, 59)))
+            .unwrap();
+        // Next day for chat 1 must be excluded.
+        storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 17, 0, 0)))
+            .unwrap();
+        // Same day but a different chat must be excluded.
+        storage
+            .insert_event(&event_at(2, msg2, dt(2026, 6, 16, 12, 0)))
+            .unwrap();
+        // Inactive same-day event must be excluded.
+        let inactive = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 16, 8, 0)))
+            .unwrap();
+        storage.mark_inactive(inactive).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        let events = storage.get_active_by_chat_on_date(1, today).unwrap();
+        let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![morning, night]);
     }
 
     #[test]

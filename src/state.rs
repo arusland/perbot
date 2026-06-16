@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Local, NaiveDateTime};
+use chrono::{Local, NaiveDate, NaiveDateTime};
 
 use crate::error::Result;
 use crate::scheduler;
@@ -90,6 +90,23 @@ impl EventProvider {
             Ok(events) => events,
             Err(e) => {
                 log::error!("Failed to get active events for chat {}: {}", chat_id, e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Returns active events for a chat scheduled on the given date, ordered by next datetime.
+    pub fn get_active_by_chat_on_date(&self, chat_id: i64, date: NaiveDate) -> Vec<EventInfo> {
+        let inner = self.inner.lock().unwrap();
+        match inner.storage.get_active_by_chat_on_date(chat_id, date) {
+            Ok(events) => events,
+            Err(e) => {
+                log::error!(
+                    "Failed to get events for chat {} on {}: {}",
+                    chat_id,
+                    date,
+                    e
+                );
                 Vec::new()
             }
         }
