@@ -74,14 +74,46 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     Ok(())
 }
 
+/// Sends a MarkdownV2 list reply. If the send fails (e.g. the formatted list
+/// exceeds Telegram's 4096-char message limit and the API returns
+/// `MessageIsTooLong`), this logs the failure with context — which command, the
+/// chat, the event count and the rendered length — and warns the admin instead
+/// of letting the error bubble up to the REPL as a bare `Api(...)` line.
+async fn send_list_reply(
+    ctx: &CmdContext<'_>,
+    command: &str,
+    count: usize,
+    text: String,
+) -> ResponseResult<()> {
+    if let Err(e) = ctx
+        .bot
+        .send_message(ctx.chat_id, &text)
+        .parse_mode(ParseMode::MarkdownV2)
+        .await
+    {
+        log::error!(
+            "Failed to send /{command} reply to chat {}: {e} ({count} events, {} chars). \
+             Telegram caps messages at 4096 chars.",
+            ctx.chat_id.0,
+            text.chars().count(),
+        );
+        let warning = format!(
+            "Failed to send /{command} reply to chat {}: {e} ({count} events, {} chars). \
+             The list likely exceeds Telegram's 4096-char message limit.",
+            ctx.chat_id.0,
+            text.chars().count(),
+        );
+        if let Err(warn_err) = ctx.bot.send_message(ctx.admin_id, warning).await {
+            log::error!("Failed to warn admin about send failure: {warn_err}");
+        }
+    }
+    Ok(())
+}
+
 /// Replies with the chat's active upcoming events.
 async fn handle_events(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     let events = ctx.provider.get_active_by_chat(ctx.chat_id.0);
-    ctx.bot
-        .send_message(ctx.chat_id, format_events_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
+    send_list_reply(ctx, "events", events.len(), format_events_list(&events)).await
 }
 
 /// Replies with the chat's active events scheduled for today.
@@ -90,11 +122,7 @@ async fn handle_today(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     let events = ctx
         .provider
         .get_active_by_chat_on_date(ctx.chat_id.0, today);
-    ctx.bot
-        .send_message(ctx.chat_id, format_today_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
+    send_list_reply(ctx, "today", events.len(), format_today_list(&events)).await
 }
 
 /// Replies with the chat's active events scheduled for tomorrow.
@@ -103,11 +131,7 @@ async fn handle_tomorrow(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     let events = ctx
         .provider
         .get_active_by_chat_on_date(ctx.chat_id.0, tomorrow);
-    ctx.bot
-        .send_message(ctx.chat_id, format_tomorrow_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
+    send_list_reply(ctx, "tomorrow", events.len(), format_tomorrow_list(&events)).await
 }
 
 /// Replies with the chat's active events scheduled for the current week (Mon–Sun).
@@ -118,11 +142,7 @@ async fn handle_week(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     let events = ctx
         .provider
         .get_active_by_chat_in_range(ctx.chat_id.0, start, end);
-    ctx.bot
-        .send_message(ctx.chat_id, format_week_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
+    send_list_reply(ctx, "week", events.len(), format_week_list(&events)).await
 }
 
 /// Replies with the chat's active events scheduled for the current calendar month.
@@ -138,11 +158,7 @@ async fn handle_month(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     let events = ctx
         .provider
         .get_active_by_chat_in_range(ctx.chat_id.0, start, end);
-    ctx.bot
-        .send_message(ctx.chat_id, format_month_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
+    send_list_reply(ctx, "month", events.len(), format_month_list(&events)).await
 }
 
 /// Begins a legacy import for `user_id`. Admin-only; records the pending target
