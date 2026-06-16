@@ -60,6 +60,16 @@ pub fn format_today_list_at(events: &[EventInfo], now: NaiveDateTime) -> String 
     format_list(events, now, "*Today's events:*", "No events today\\.")
 }
 
+/// Builds a MarkdownV2 reply listing tomorrow's events ordered by next datetime.
+pub fn format_tomorrow_list(events: &[EventInfo]) -> String {
+    format_tomorrow_list_at(events, Local::now().naive_local())
+}
+
+/// Like [`format_tomorrow_list`] but with an explicit `now` for relative-time tests.
+pub fn format_tomorrow_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
+    format_list(events, now, "*Tomorrow's events:*", "No events tomorrow\\.")
+}
+
 /// Renders an event list under `title`, or `empty` when there are no events.
 fn format_list(events: &[EventInfo], now: NaiveDateTime, title: &str, empty: &str) -> String {
     if events.is_empty() {
@@ -192,6 +202,25 @@ mod tests {
         assert!(out.starts_with("*Today's events:*\n"));
         assert!(out.contains("10:00 16\\.06\\.2026 \\(1h\\)"));
         assert!(out.contains("standup"));
+    }
+
+    #[test]
+    fn format_tomorrow_list_empty() {
+        assert_eq!(
+            format_tomorrow_list_at(&[], Local::now().naive_local()),
+            "No events tomorrow\\."
+        );
+    }
+
+    #[test]
+    fn format_tomorrow_list_rows() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let events = vec![sample_event("dentist", Some(now + Duration::days(1)))];
+        let out = format_tomorrow_list_at(&events, now);
+        assert!(out.starts_with("*Tomorrow's events:*\n"));
+        assert!(out.contains("09:00 17\\.06\\.2026 \\(1d\\)"));
+        assert!(out.contains("dentist"));
     }
 
     #[test]
