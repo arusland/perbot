@@ -1,99 +1,16 @@
 use anyhow::Context as _;
-use chrono::{Duration, Local};
+use perbot::commands::{CmdContext, Command};
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{
-    escape_markdown, extract_chat_info, format_events_list, format_today_list, format_tomorrow_list,
-};
+use perbot::telegram::{escape_markdown, extract_chat_info};
 use perbot::types::TgMessage;
-use std::process;
 use teloxide::{
     prelude::*,
     types::{BotCommandScope, ParseMode},
     utils::command::BotCommands,
 };
 use tokio::sync::mpsc;
-
-#[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase", description = "Available commands:")]
-enum Command {
-    #[command(description = "show this help message")]
-    Help,
-    #[command(description = "list upcoming scheduled events")]
-    Events,
-    #[command(description = "list today's events")]
-    Today,
-    #[command(description = "list tomorrow's events")]
-    Tomorrow,
-    #[command(description = "shut the bot down (admin only)", hide)]
-    Exit,
-}
-
-/// Replies with the list of commands. Admins additionally see admin-only commands.
-async fn handle_help(bot: &Bot, chat_id: ChatId, is_admin: bool) -> ResponseResult<()> {
-    let mut help = Command::descriptions().to_string();
-    if is_admin {
-        help.push_str("\n\nAdmin commands:\n/exit — shut the bot down");
-    }
-    bot.send_message(chat_id, help).await?;
-    Ok(())
-}
-
-/// Replies with the chat's active upcoming events.
-async fn handle_events(bot: &Bot, chat_id: ChatId, provider: &EventProvider) -> ResponseResult<()> {
-    let events = provider.get_active_by_chat(chat_id.0);
-    bot.send_message(chat_id, format_events_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
-}
-
-/// Replies with the chat's active events scheduled for today.
-async fn handle_today(bot: &Bot, chat_id: ChatId, provider: &EventProvider) -> ResponseResult<()> {
-    let today = Local::now().naive_local().date();
-    let events = provider.get_active_by_chat_on_date(chat_id.0, today);
-    bot.send_message(chat_id, format_today_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
-}
-
-/// Replies with the chat's active events scheduled for tomorrow.
-async fn handle_tomorrow(
-    bot: &Bot,
-    chat_id: ChatId,
-    provider: &EventProvider,
-) -> ResponseResult<()> {
-    let tomorrow = Local::now().naive_local().date() + Duration::days(1);
-    let events = provider.get_active_by_chat_on_date(chat_id.0, tomorrow);
-    bot.send_message(chat_id, format_tomorrow_list(&events))
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
-    Ok(())
-}
-
-/// Shuts the bot down. Admin-only; non-admins get a rejection reply.
-async fn handle_exit(
-    bot: &Bot,
-    chat_id: ChatId,
-    admin_id: ChatId,
-    is_admin: bool,
-) -> ResponseResult<()> {
-    if !is_admin {
-        bot.send_message(chat_id, "Not authorized\\.")
-            .parse_mode(ParseMode::MarkdownV2)
-            .await?;
-        return Ok(());
-    }
-    log::info!("Received /exit command. Shutting down...");
-    let _ = bot.send_message(admin_id, "Shutting down...").await;
-    tokio::spawn(async {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        process::exit(0);
-    });
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -185,13 +102,14 @@ async fn main() -> anyhow::Result<()> {
 
                 let is_admin = user_id == Some(admin_id.0);
                 if let Ok(cmd) = Command::parse(text, &bot_username) {
-                    match cmd {
-                        Command::Help => handle_help(&bot, msg.chat.id, is_admin).await?,
-                        Command::Events => handle_events(&bot, msg.chat.id, &provider).await?,
-                        Command::Today => handle_today(&bot, msg.chat.id, &provider).await?,
-                        Command::Tomorrow => handle_tomorrow(&bot, msg.chat.id, &provider).await?,
-                        Command::Exit => handle_exit(&bot, msg.chat.id, admin_id, is_admin).await?,
-                    }
+                    let ctx = CmdContext {
+                        bot: &bot,
+                        chat_id: msg.chat.id,
+                        provider: &provider,
+                        admin_id,
+                        is_admin,
+                    };
+                    cmd.handle(ctx).await?;
                     return Ok(());
                 }
 
