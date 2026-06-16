@@ -2,3 +2,5 @@
 /*.db
 /*.db-journal
 /logs
+/alerts
+OLD-SPEC.md
