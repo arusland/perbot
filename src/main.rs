@@ -82,113 +82,138 @@ async fn main() -> anyhow::Result<()> {
     // Pending legacy import target (chat id) recorded by `/import <user_id>`.
     let pending_import: PendingImport = import::new_pending();
 
-    let handler_provider = provider.clone();
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let provider = handler_provider.clone();
-        let bot_username = bot_username.clone();
-        let pending_import = pending_import.clone();
-        async move {
-            // Save/update chat info
-            let chat_info = extract_chat_info(&msg.chat);
-            if let Err(e) = provider.upsert_chat(&chat_info) {
-                log::error!("Failed to save chat info: {}", e);
-            }
+    // Dispatcher with two branches: text/document messages and inline-button
+    // callbacks (used by paginated `/events`). Shared deps are injected via
+    // `dptree::deps!`.
+    let handler = dptree::entry()
+        .branch(Update::filter_message().endpoint(message_handler))
+        .branch(Update::filter_callback_query().endpoint(callback_handler));
 
-            let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
-            let is_admin = user_id == Some(admin_id.0);
+    Dispatcher::builder(bot, handler)
+        .dependencies(dptree::deps![
+            provider,
+            admin_id,
+            bot_username,
+            pending_import
+        ])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
 
-            // Legacy import: the admin sends the zip after `/import <user_id>`.
-            let pending_target = *pending_import.lock().unwrap();
-            if is_admin && let (Some(target), Some(doc)) = (pending_target, msg.document()) {
-                *pending_import.lock().unwrap() = None;
-                commands::handle_import_zip(
-                    &bot,
-                    &provider,
-                    msg.chat.id,
-                    target,
-                    doc.file.id.clone(),
-                )
-                .await?;
+    Ok(())
+}
+
+/// Handles an inline-button callback (list pagination for `/events`, `/today`,
+/// `/tomorrow`, `/week`, `/month`).
+async fn callback_handler(
+    bot: Bot,
+    q: CallbackQuery,
+    provider: EventProvider,
+) -> ResponseResult<()> {
+    commands::handle_list_callback(&bot, &provider, q).await
+}
+
+/// Handles a single incoming message: stores chat/message info, dispatches
+/// commands, parses event text, or acknowledges other media types.
+async fn message_handler(
+    bot: Bot,
+    msg: Message,
+    provider: EventProvider,
+    admin_id: ChatId,
+    bot_username: String,
+    pending_import: PendingImport,
+) -> ResponseResult<()> {
+    // Save/update chat info
+    let chat_info = extract_chat_info(&msg.chat);
+    if let Err(e) = provider.upsert_chat(&chat_info) {
+        log::error!("Failed to save chat info: {}", e);
+    }
+
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
+    let is_admin = user_id == Some(admin_id.0);
+
+    // Legacy import: the admin sends the zip after `/import <user_id>`.
+    let pending_target = *pending_import.lock().unwrap();
+    if is_admin && let (Some(target), Some(doc)) = (pending_target, msg.document()) {
+        *pending_import.lock().unwrap() = None;
+        commands::handle_import_zip(&bot, &provider, msg.chat.id, target, doc.file.id.clone())
+            .await?;
+        return Ok(());
+    }
+
+    let reply_text = if let Some(text) = msg.text() {
+        // Store every incoming user message
+        let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("Failed to save message: {}", e);
                 return Ok(());
             }
-
-            let reply_text = if let Some(text) = msg.text() {
-                // Store every incoming user message
-                let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        log::error!("Failed to save message: {}", e);
-                        return Ok(());
-                    }
-                };
-                if let Ok(cmd) = Command::parse(text, &bot_username) {
-                    let ctx = CmdContext {
-                        bot: &bot,
-                        chat_id: msg.chat.id,
-                        provider: &provider,
-                        admin_id,
-                        is_admin,
-                        pending_import: &pending_import,
-                    };
-                    cmd.handle(ctx).await?;
-                    return Ok(());
-                }
-
-                if let Some(mut event) = parser::parse(text) {
-                    event.chat_id = msg.chat.id.0;
-                    event.msg_id = msg_id;
-
-                    let stored = provider.insert_event_and_get(event);
-
-                    if let Some(dt) = stored.next_datetime {
-                        format!(
-                            "Scheduled message for *{}*",
-                            dt.format("%H:%M %d\\.%m\\.%Y")
-                        )
-                    } else {
-                        format!("*{}*", escape_markdown(text))
-                    }
-                } else {
-                    format!("Unparsable message: *{}*", escape_markdown(text))
-                }
-            } else if msg.photo().is_some() {
-                "Received a photo\\!".to_string()
-            } else if msg.video().is_some() {
-                "Received a video\\!".to_string()
-            } else if msg.audio().is_some() {
-                "Received an audio file\\!".to_string()
-            } else if msg.voice().is_some() {
-                "Received a voice message\\!".to_string()
-            } else if msg.document().is_some() {
-                "Received a document\\!".to_string()
-            } else if msg.sticker().is_some() {
-                "Received a sticker\\!".to_string()
-            } else if msg.animation().is_some() {
-                "Received an animation\\!".to_string()
-            } else if msg.video_note().is_some() {
-                "Received a video note\\!".to_string()
-            } else if msg.contact().is_some() {
-                "Received a contact\\!".to_string()
-            } else if msg.location().is_some() {
-                "Received a location\\!".to_string()
-            } else if msg.venue().is_some() {
-                "Received a venue\\!".to_string()
-            } else if msg.poll().is_some() {
-                "Received a poll\\!".to_string()
-            } else if msg.dice().is_some() {
-                "Received a dice\\!".to_string()
-            } else {
-                "Received an unknown message type\\!".to_string()
+        };
+        if let Ok(cmd) = Command::parse(text, &bot_username) {
+            let ctx = CmdContext {
+                bot: &bot,
+                chat_id: msg.chat.id,
+                provider: &provider,
+                admin_id,
+                is_admin,
+                pending_import: &pending_import,
             };
-
-            bot.send_message(msg.chat.id, reply_text)
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-
-            Ok(())
+            cmd.handle(ctx).await?;
+            return Ok(());
         }
-    })
-    .await;
+
+        if let Some(mut event) = parser::parse(text) {
+            event.chat_id = msg.chat.id.0;
+            event.msg_id = msg_id;
+
+            let stored = provider.insert_event_and_get(event);
+
+            if let Some(dt) = stored.next_datetime {
+                format!(
+                    "Scheduled message for *{}*",
+                    dt.format("%H:%M %d\\.%m\\.%Y")
+                )
+            } else {
+                format!("*{}*", escape_markdown(text))
+            }
+        } else {
+            format!("Unparsable message: *{}*", escape_markdown(text))
+        }
+    } else if msg.photo().is_some() {
+        "Received a photo\\!".to_string()
+    } else if msg.video().is_some() {
+        "Received a video\\!".to_string()
+    } else if msg.audio().is_some() {
+        "Received an audio file\\!".to_string()
+    } else if msg.voice().is_some() {
+        "Received a voice message\\!".to_string()
+    } else if msg.document().is_some() {
+        "Received a document\\!".to_string()
+    } else if msg.sticker().is_some() {
+        "Received a sticker\\!".to_string()
+    } else if msg.animation().is_some() {
+        "Received an animation\\!".to_string()
+    } else if msg.video_note().is_some() {
+        "Received a video note\\!".to_string()
+    } else if msg.contact().is_some() {
+        "Received a contact\\!".to_string()
+    } else if msg.location().is_some() {
+        "Received a location\\!".to_string()
+    } else if msg.venue().is_some() {
+        "Received a venue\\!".to_string()
+    } else if msg.poll().is_some() {
+        "Received a poll\\!".to_string()
+    } else if msg.dice().is_some() {
+        "Received a dice\\!".to_string()
+    } else {
+        "Received an unknown message type\\!".to_string()
+    };
+
+    bot.send_message(msg.chat.id, reply_text)
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
 
     Ok(())
 }

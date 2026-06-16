@@ -40,84 +40,78 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     format!("{}w", days / 7)
 }
 
-/// Builds a MarkdownV2 reply listing upcoming events ordered by next datetime.
-pub fn format_events_list(events: &[EventInfo]) -> String {
-    format_events_list_at(events, Local::now().naive_local())
+/// Appends a single MarkdownV2 event row (`• datetime (relative) — message`).
+fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+    let when = match e.next_datetime {
+        Some(dt) => format!(
+            "{} \\({}\\)",
+            dt.format("%H:%M %d\\.%m\\.%Y"),
+            escape_markdown(&format_relative(now, dt))
+        ),
+        None => "—".to_string(),
+    };
+    let _ = writeln!(out, "• {} — {}", when, escape_markdown(&e.message));
 }
 
-/// Like [`format_events_list`] but with an explicit `now` for relative-time tests.
-pub fn format_events_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
-    format_list(events, now, "*Upcoming events:*", "No upcoming events\\.")
+/// Number of events shown per page in a paginated list reply.
+pub const LIST_PAGE_SIZE: usize = 10;
+
+/// Total number of pages for `len` events at `per_page` events per page.
+/// Always at least 1 so an empty list still renders one (empty) page.
+pub fn total_pages(len: usize, per_page: usize) -> usize {
+    len.div_ceil(per_page).max(1)
 }
 
-/// Builds a MarkdownV2 reply listing today's events ordered by next datetime.
-pub fn format_today_list(events: &[EventInfo]) -> String {
-    format_today_list_at(events, Local::now().naive_local())
-}
-
-/// Like [`format_today_list`] but with an explicit `now` for relative-time tests.
-pub fn format_today_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
-    format_list(events, now, "*Today's events:*", "No events today\\.")
-}
-
-/// Builds a MarkdownV2 reply listing tomorrow's events ordered by next datetime.
-pub fn format_tomorrow_list(events: &[EventInfo]) -> String {
-    format_tomorrow_list_at(events, Local::now().naive_local())
-}
-
-/// Like [`format_tomorrow_list`] but with an explicit `now` for relative-time tests.
-pub fn format_tomorrow_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
-    format_list(events, now, "*Tomorrow's events:*", "No events tomorrow\\.")
-}
-
-/// Builds a MarkdownV2 reply listing this month's events ordered by next datetime.
-pub fn format_month_list(events: &[EventInfo]) -> String {
-    format_month_list_at(events, Local::now().naive_local())
-}
-
-/// Like [`format_month_list`] but with an explicit `now` for relative-time tests.
-pub fn format_month_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
-    format_list(
+/// Builds the MarkdownV2 reply for a single page of an event list.
+///
+/// `title` is the bare heading (e.g. `"Upcoming events"`); a `(page x/y)` suffix
+/// is appended only when there is more than one page. `empty` is the full message
+/// shown when there are no events. Returns the rendered text and the total number
+/// of pages, so the caller can decide whether to attach navigation buttons.
+/// `page` is clamped to the valid range.
+pub fn format_page(
+    events: &[EventInfo],
+    page: usize,
+    per_page: usize,
+    title: &str,
+    empty: &str,
+) -> (String, usize) {
+    format_page_at(
         events,
-        now,
-        "*This month's events:*",
-        "No events this month\\.",
+        Local::now().naive_local(),
+        page,
+        per_page,
+        title,
+        empty,
     )
 }
 
-/// Builds a MarkdownV2 reply listing this week's events ordered by next datetime.
-pub fn format_week_list(events: &[EventInfo]) -> String {
-    format_week_list_at(events, Local::now().naive_local())
-}
-
-/// Like [`format_week_list`] but with an explicit `now` for relative-time tests.
-pub fn format_week_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
-    format_list(
-        events,
-        now,
-        "*This week's events:*",
-        "No events this week\\.",
-    )
-}
-
-/// Renders an event list under `title`, or `empty` when there are no events.
-fn format_list(events: &[EventInfo], now: NaiveDateTime, title: &str, empty: &str) -> String {
+/// Like [`format_page`] but with an explicit `now` for relative-time tests.
+pub fn format_page_at(
+    events: &[EventInfo],
+    now: NaiveDateTime,
+    page: usize,
+    per_page: usize,
+    title: &str,
+    empty: &str,
+) -> (String, usize) {
+    let pages = total_pages(events.len(), per_page);
     if events.is_empty() {
-        return empty.to_string();
+        return (empty.to_string(), pages);
     }
-    let mut out = format!("{}\n", title);
-    for e in events {
-        let when = match e.next_datetime {
-            Some(dt) => format!(
-                "{} \\({}\\)",
-                dt.format("%H:%M %d\\.%m\\.%Y"),
-                escape_markdown(&format_relative(now, dt))
-            ),
-            None => "—".to_string(),
-        };
-        let _ = writeln!(out, "• {} — {}", when, escape_markdown(&e.message));
+    let page = page.min(pages - 1);
+    let start = page * per_page;
+    let slice = &events[start..(start + per_page).min(events.len())];
+
+    let mut out = if pages > 1 {
+        format!("*{} \\(page {}/{}\\):*\n", title, page + 1, pages)
+    } else {
+        format!("*{}:*\n", title)
+    };
+    for e in slice {
+        write_event_row(&mut out, e, now);
     }
-    out
+    (out, pages)
 }
 
 pub fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
@@ -193,15 +187,29 @@ mod tests {
     }
 
     #[test]
-    fn format_events_list_empty() {
-        assert_eq!(
-            format_events_list_at(&[], Local::now().naive_local()),
-            "No upcoming events\\."
-        );
+    fn total_pages_counts() {
+        assert_eq!(total_pages(0, 10), 1);
+        assert_eq!(total_pages(10, 10), 1);
+        assert_eq!(total_pages(11, 10), 2);
+        assert_eq!(total_pages(25, 10), 3);
     }
 
     #[test]
-    fn format_events_list_rows() {
+    fn format_page_empty() {
+        let (text, pages) = format_page_at(
+            &[],
+            Local::now().naive_local(),
+            0,
+            10,
+            "Upcoming events",
+            "No upcoming events\\.",
+        );
+        assert_eq!(text, "No upcoming events\\.");
+        assert_eq!(pages, 1);
+    }
+
+    #[test]
+    fn format_page_single_page_has_no_page_suffix() {
         let now =
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![
@@ -209,87 +217,47 @@ mod tests {
             // Markdown special chars in the message must be escaped.
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
-        let out = format_events_list_at(&events, now);
-        assert!(out.starts_with("*Upcoming events:*\n"));
-        assert!(out.contains("14:00 15\\.06\\.2026 \\(2h\\)"));
-        assert!(out.contains("pay rent \\(urgent\\)"));
-        assert!(out.contains("\\(3d\\)"));
+        let (text, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
+        assert_eq!(pages, 1);
+        assert!(text.starts_with("*Upcoming events:*\n"));
+        assert!(text.contains("14:00 15\\.06\\.2026 \\(2h\\)"));
+        assert!(text.contains("pay rent \\(urgent\\)"));
+        assert!(text.contains("\\(3d\\)"));
     }
 
     #[test]
-    fn format_today_list_empty() {
-        assert_eq!(
-            format_today_list_at(&[], Local::now().naive_local()),
-            "No events today\\."
-        );
-    }
-
-    #[test]
-    fn format_today_list_rows() {
+    fn format_page_uses_given_title() {
         let now =
             NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
-        let out = format_today_list_at(&events, now);
-        assert!(out.starts_with("*Today's events:*\n"));
-        assert!(out.contains("10:00 16\\.06\\.2026 \\(1h\\)"));
-        assert!(out.contains("standup"));
+        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none");
+        assert!(text.starts_with("*Today's events:*\n"));
+        assert!(text.contains("10:00 16\\.06\\.2026 \\(1h\\)"));
+        assert!(text.contains("standup"));
     }
 
     #[test]
-    fn format_tomorrow_list_empty() {
-        assert_eq!(
-            format_tomorrow_list_at(&[], Local::now().naive_local()),
-            "No events tomorrow\\."
-        );
-    }
-
-    #[test]
-    fn format_tomorrow_list_rows() {
+    fn format_page_slices_and_labels() {
         let now =
-            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        let events = vec![sample_event("dentist", Some(now + Duration::days(1)))];
-        let out = format_tomorrow_list_at(&events, now);
-        assert!(out.starts_with("*Tomorrow's events:*\n"));
-        assert!(out.contains("09:00 17\\.06\\.2026 \\(1d\\)"));
-        assert!(out.contains("dentist"));
-    }
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let events: Vec<EventInfo> = (0..25)
+            .map(|i| sample_event(&format!("event {i}"), Some(now + Duration::hours(i + 1))))
+            .collect();
 
-    #[test]
-    fn format_month_list_empty() {
-        assert_eq!(
-            format_month_list_at(&[], Local::now().naive_local()),
-            "No events this month\\."
-        );
-    }
+        // First page: 10 rows, labelled 1/3.
+        let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
+        assert_eq!(pages, 3);
+        assert!(p0.starts_with("*Upcoming events \\(page 1/3\\):*\n"));
+        assert!(p0.contains("event 0"));
+        assert!(p0.contains("event 9"));
+        assert!(!p0.contains("event 10"));
 
-    #[test]
-    fn format_month_list_rows() {
-        let now =
-            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        let events = vec![sample_event("pay rent", Some(now + Duration::days(5)))];
-        let out = format_month_list_at(&events, now);
-        assert!(out.starts_with("*This month's events:*\n"));
-        assert!(out.contains("09:00 21\\.06\\.2026"));
-        assert!(out.contains("pay rent"));
-    }
-
-    #[test]
-    fn format_week_list_empty() {
-        assert_eq!(
-            format_week_list_at(&[], Local::now().naive_local()),
-            "No events this week\\."
-        );
-    }
-
-    #[test]
-    fn format_week_list_rows() {
-        let now =
-            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        let events = vec![sample_event("gym", Some(now + Duration::days(2)))];
-        let out = format_week_list_at(&events, now);
-        assert!(out.starts_with("*This week's events:*\n"));
-        assert!(out.contains("09:00 18\\.06\\.2026 \\(2d\\)"));
-        assert!(out.contains("gym"));
+        // Last page: only 5 rows, labelled 3/3. Out-of-range page clamps to last.
+        let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none");
+        assert!(p_last.starts_with("*Upcoming events \\(page 3/3\\):*\n"));
+        assert!(p_last.contains("event 20"));
+        assert!(p_last.contains("event 24"));
+        assert_eq!(p_last.lines().count(), 1 + 5);
     }
 
     #[test]

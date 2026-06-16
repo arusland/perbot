@@ -1,17 +1,107 @@
 use crate::import::{self, PendingImport};
 use crate::state::EventProvider;
-use crate::telegram::{
-    format_events_list, format_month_list, format_today_list, format_tomorrow_list,
-    format_week_list,
-};
+use crate::telegram::{LIST_PAGE_SIZE, format_page_at};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
 use teloxide::{
     net::Download,
     prelude::*,
-    types::{FileId, InputFile, ParseMode},
+    types::{FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode},
     utils::command::BotCommands,
 };
+
+/// The paginated list commands. Each variant knows how to fetch its events,
+/// title its reply, and tag its inline-button callbacks (`<tag>:<page>`).
+#[derive(Clone, Copy)]
+enum ListKind {
+    Events,
+    Today,
+    Tomorrow,
+    Week,
+    Month,
+}
+
+impl ListKind {
+    /// Short tag used as the callback-data prefix (`<tag>:<page>`).
+    fn tag(self) -> &'static str {
+        match self {
+            ListKind::Events => "ev",
+            ListKind::Today => "td",
+            ListKind::Tomorrow => "tm",
+            ListKind::Week => "wk",
+            ListKind::Month => "mo",
+        }
+    }
+
+    /// Parses a callback-data tag back into its kind.
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "ev" => Some(ListKind::Events),
+            "td" => Some(ListKind::Today),
+            "tm" => Some(ListKind::Tomorrow),
+            "wk" => Some(ListKind::Week),
+            "mo" => Some(ListKind::Month),
+            _ => None,
+        }
+    }
+
+    /// Bare heading (no markdown markers); `format_page_at` adds `*…:*`.
+    fn title(self) -> &'static str {
+        match self {
+            ListKind::Events => "Upcoming events",
+            ListKind::Today => "Today's events",
+            ListKind::Tomorrow => "Tomorrow's events",
+            ListKind::Week => "This week's events",
+            ListKind::Month => "This month's events",
+        }
+    }
+
+    /// Message shown when the list is empty.
+    fn empty(self) -> &'static str {
+        match self {
+            ListKind::Events => "No upcoming events\\.",
+            ListKind::Today => "No events today\\.",
+            ListKind::Tomorrow => "No events tomorrow\\.",
+            ListKind::Week => "No events this week\\.",
+            ListKind::Month => "No events this month\\.",
+        }
+    }
+
+    /// Fetches the events for this list. Date ranges are computed relative to
+    /// "now", so paging recomputes them (a page turn across midnight reflects the
+    /// then-current day/week/month).
+    fn fetch(self, provider: &EventProvider, chat_id: i64) -> Vec<crate::types::EventInfo> {
+        match self {
+            ListKind::Events => provider.get_active_by_chat(chat_id),
+            ListKind::Today => {
+                let today = Local::now().naive_local().date();
+                provider.get_active_by_chat_on_date(chat_id, today)
+            }
+            ListKind::Tomorrow => {
+                let tomorrow = Local::now().naive_local().date() + Duration::days(1);
+                provider.get_active_by_chat_on_date(chat_id, tomorrow)
+            }
+            ListKind::Week => {
+                let today = Local::now().naive_local().date();
+                let start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+                let end = start + Duration::days(7);
+                provider.get_active_by_chat_in_range(chat_id, start, end)
+            }
+            ListKind::Month => {
+                let today = Local::now().naive_local().date();
+                let start =
+                    NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+                let (next_year, next_month) = if today.month() == 12 {
+                    (today.year() + 1, 1)
+                } else {
+                    (today.year(), today.month() + 1)
+                };
+                let end = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(start);
+                provider.get_active_by_chat_in_range(chat_id, start, end)
+            }
+        }
+    }
+}
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
@@ -49,11 +139,11 @@ impl Command {
     pub async fn handle(self, ctx: CmdContext<'_>) -> ResponseResult<()> {
         match self {
             Command::Help => handle_help(&ctx).await,
-            Command::Events => handle_events(&ctx).await,
-            Command::Today => handle_today(&ctx).await,
-            Command::Tomorrow => handle_tomorrow(&ctx).await,
-            Command::Week => handle_week(&ctx).await,
-            Command::Month => handle_month(&ctx).await,
+            Command::Events => handle_list(&ctx, ListKind::Events).await,
+            Command::Today => handle_list(&ctx, ListKind::Today).await,
+            Command::Tomorrow => handle_list(&ctx, ListKind::Tomorrow).await,
+            Command::Week => handle_list(&ctx, ListKind::Week).await,
+            Command::Month => handle_list(&ctx, ListKind::Month).await,
             Command::Import(user_id) => handle_import(&ctx, user_id).await,
             Command::Exit => handle_exit(&ctx).await,
         }
@@ -74,33 +164,67 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     Ok(())
 }
 
-/// Sends a MarkdownV2 list reply. If the send fails (e.g. the formatted list
-/// exceeds Telegram's 4096-char message limit and the API returns
-/// `MessageIsTooLong`), this logs the failure with context — which command, the
-/// chat, the event count and the rendered length — and warns the admin instead
-/// of letting the error bubble up to the REPL as a bare `Api(...)` line.
-async fn send_list_reply(
-    ctx: &CmdContext<'_>,
-    command: &str,
-    count: usize,
-    text: String,
-) -> ResponseResult<()> {
-    if let Err(e) = ctx
+/// Builds the inline navigation keyboard for a page of a `kind` list.
+///
+/// Returns `None` when everything fits on a single page (no buttons needed).
+/// Otherwise a single row holds `◀` / `▶` buttons (each present only when there
+/// is a page to move to), carrying `<tag>:<target-page>` callback data.
+fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<InlineKeyboardMarkup> {
+    if total_pages <= 1 {
+        return None;
+    }
+    let tag = kind.tag();
+    let mut row = Vec::new();
+    if page > 0 {
+        row.push(InlineKeyboardButton::callback(
+            "◀ Prev",
+            format!("{tag}:{}", page - 1),
+        ));
+    }
+    if page + 1 < total_pages {
+        row.push(InlineKeyboardButton::callback(
+            "Next ▶",
+            format!("{tag}:{}", page + 1),
+        ));
+    }
+    Some(InlineKeyboardMarkup::new(vec![row]))
+}
+
+/// Replies with the first page of a `kind` list, attaching navigation buttons
+/// when the list spans more than one page.
+async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()> {
+    let events = kind.fetch(ctx.provider, ctx.chat_id.0);
+    let (text, total_pages) = format_page_at(
+        &events,
+        Local::now().naive_local(),
+        0,
+        LIST_PAGE_SIZE,
+        kind.title(),
+        kind.empty(),
+    );
+
+    let mut req = ctx
         .bot
         .send_message(ctx.chat_id, &text)
-        .parse_mode(ParseMode::MarkdownV2)
-        .await
-    {
+        .parse_mode(ParseMode::MarkdownV2);
+    if let Some(kb) = list_keyboard(kind, 0, total_pages) {
+        req = req.reply_markup(kb);
+    }
+    if let Err(e) = req.await {
+        // A single page shouldn't exceed Telegram's 4096-char limit, but keep the
+        // safety net: log with context and warn the admin instead of bubbling up.
         log::error!(
-            "Failed to send /{command} reply to chat {}: {e} ({count} events, {} chars). \
-             Telegram caps messages at 4096 chars.",
+            "Failed to send /{} reply to chat {}: {e} ({} events, {} chars).",
+            kind.tag(),
             ctx.chat_id.0,
+            events.len(),
             text.chars().count(),
         );
         let warning = format!(
-            "Failed to send /{command} reply to chat {}: {e} ({count} events, {} chars). \
-             The list likely exceeds Telegram's 4096-char message limit.",
+            "Failed to send /{} reply to chat {}: {e} ({} events, {} chars).",
+            kind.tag(),
             ctx.chat_id.0,
+            events.len(),
             text.chars().count(),
         );
         if let Err(warn_err) = ctx.bot.send_message(ctx.admin_id, warning).await {
@@ -110,55 +234,57 @@ async fn send_list_reply(
     Ok(())
 }
 
-/// Replies with the chat's active upcoming events.
-async fn handle_events(ctx: &CmdContext<'_>) -> ResponseResult<()> {
-    let events = ctx.provider.get_active_by_chat(ctx.chat_id.0);
-    send_list_reply(ctx, "events", events.len(), format_events_list(&events)).await
-}
+/// Handles an inline-button press from any paginated list message: decodes the
+/// `<tag>:<page>` callback data, re-queries that list's events, renders the
+/// requested page, and edits the message in place.
+pub async fn handle_list_callback(
+    bot: &Bot,
+    provider: &EventProvider,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    // Always answer to clear the client's loading spinner.
+    bot.answer_callback_query(q.id.clone()).await?;
 
-/// Replies with the chat's active events scheduled for today.
-async fn handle_today(ctx: &CmdContext<'_>) -> ResponseResult<()> {
-    let today = Local::now().naive_local().date();
-    let events = ctx
-        .provider
-        .get_active_by_chat_on_date(ctx.chat_id.0, today);
-    send_list_reply(ctx, "today", events.len(), format_today_list(&events)).await
-}
-
-/// Replies with the chat's active events scheduled for tomorrow.
-async fn handle_tomorrow(ctx: &CmdContext<'_>) -> ResponseResult<()> {
-    let tomorrow = Local::now().naive_local().date() + Duration::days(1);
-    let events = ctx
-        .provider
-        .get_active_by_chat_on_date(ctx.chat_id.0, tomorrow);
-    send_list_reply(ctx, "tomorrow", events.len(), format_tomorrow_list(&events)).await
-}
-
-/// Replies with the chat's active events scheduled for the current week (Mon–Sun).
-async fn handle_week(ctx: &CmdContext<'_>) -> ResponseResult<()> {
-    let today = Local::now().naive_local().date();
-    let start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-    let end = start + Duration::days(7);
-    let events = ctx
-        .provider
-        .get_active_by_chat_in_range(ctx.chat_id.0, start, end);
-    send_list_reply(ctx, "week", events.len(), format_week_list(&events)).await
-}
-
-/// Replies with the chat's active events scheduled for the current calendar month.
-async fn handle_month(ctx: &CmdContext<'_>) -> ResponseResult<()> {
-    let today = Local::now().naive_local().date();
-    let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
-    let (next_year, next_month) = if today.month() == 12 {
-        (today.year() + 1, 1)
-    } else {
-        (today.year(), today.month() + 1)
+    let Some((kind, page)) = q.data.as_deref().and_then(|d| {
+        let (tag, page) = d.split_once(':')?;
+        Some((ListKind::from_tag(tag)?, page.parse::<usize>().ok()?))
+    }) else {
+        return Ok(());
     };
-    let end = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(start);
-    let events = ctx
-        .provider
-        .get_active_by_chat_in_range(ctx.chat_id.0, start, end);
-    send_list_reply(ctx, "month", events.len(), format_month_list(&events)).await
+
+    let Some(message) = q.regular_message() else {
+        // Message is too old/inaccessible to edit.
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    let message_id = message.id;
+
+    let events = kind.fetch(provider, chat_id.0);
+    let (text, total_pages) = format_page_at(
+        &events,
+        Local::now().naive_local(),
+        page,
+        LIST_PAGE_SIZE,
+        kind.title(),
+        kind.empty(),
+    );
+    let page = page.min(total_pages.saturating_sub(1));
+
+    let mut req = bot
+        .edit_message_text(chat_id, message_id, &text)
+        .parse_mode(ParseMode::MarkdownV2);
+    if let Some(kb) = list_keyboard(kind, page, total_pages) {
+        req = req.reply_markup(kb);
+    }
+    if let Err(e) = req.await {
+        // "message is not modified" (e.g. double-tap) is benign; just log others.
+        log::warn!(
+            "Failed to edit /{} page for chat {}: {e}",
+            kind.tag(),
+            chat_id.0
+        );
+    }
+    Ok(())
 }
 
 /// Begins a legacy import for `user_id`. Admin-only; records the pending target
