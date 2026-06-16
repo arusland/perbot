@@ -85,6 +85,21 @@ pub fn format_month_list_at(events: &[EventInfo], now: NaiveDateTime) -> String 
     )
 }
 
+/// Builds a MarkdownV2 reply listing this week's events ordered by next datetime.
+pub fn format_week_list(events: &[EventInfo]) -> String {
+    format_week_list_at(events, Local::now().naive_local())
+}
+
+/// Like [`format_week_list`] but with an explicit `now` for relative-time tests.
+pub fn format_week_list_at(events: &[EventInfo], now: NaiveDateTime) -> String {
+    format_list(
+        events,
+        now,
+        "*This week's events:*",
+        "No events this week\\.",
+    )
+}
+
 /// Renders an event list under `title`, or `empty` when there are no events.
 fn format_list(events: &[EventInfo], now: NaiveDateTime, title: &str, empty: &str) -> String {
     if events.is_empty() {
@@ -255,6 +270,25 @@ mod tests {
         assert!(out.starts_with("*This month's events:*\n"));
         assert!(out.contains("09:00 21\\.06\\.2026"));
         assert!(out.contains("pay rent"));
+    }
+
+    #[test]
+    fn format_week_list_empty() {
+        assert_eq!(
+            format_week_list_at(&[], Local::now().naive_local()),
+            "No events this week\\."
+        );
+    }
+
+    #[test]
+    fn format_week_list_rows() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let events = vec![sample_event("gym", Some(now + Duration::days(2)))];
+        let out = format_week_list_at(&events, now);
+        assert!(out.starts_with("*This week's events:*\n"));
+        assert!(out.contains("09:00 18\\.06\\.2026 \\(2d\\)"));
+        assert!(out.contains("gym"));
     }
 
     #[test]
