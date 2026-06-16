@@ -185,6 +185,18 @@ impl EventProvider {
         }
     }
 
+    /// Inserts an event exactly as supplied, without running the scheduler.
+    ///
+    /// Used by the legacy importer, where `next_datetime`/`active` are already
+    /// computed (and periodic events must keep their stored next activation
+    /// rather than being recalculated). Returns the new event id.
+    pub fn insert_prebuilt_event(&self, event: &EventInfo) -> Result<i64> {
+        let mut inner = self.inner.lock().unwrap();
+        let id = inner.storage.insert_event(event)?;
+        Self::load_next_event(&mut inner);
+        Ok(id)
+    }
+
     /// Recalculates all given events and reloads the next event from DB.
     fn update_and_reload(&self, events: Vec<EventInfo>) {
         self.update_at_and_reload(events, Local::now().naive_local());

@@ -36,6 +36,8 @@ pub struct EventInfo {
     pub next_datetime: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
     pub msg_id: i64,
+    /// `true` for events imported from the legacy MateBot `.alert` files.
+    pub legacy: bool,
 }
 
 /// User message information. Used both for inserting and for reading from the database.

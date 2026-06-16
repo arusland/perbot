@@ -336,6 +336,7 @@ mod tests {
             bare_hour: None,
             monthly_pattern: None,
             msg_id: 0,
+            legacy: false,
         }
     }
 

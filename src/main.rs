@@ -1,5 +1,6 @@
 use anyhow::Context as _;
-use perbot::commands::{CmdContext, Command};
+use perbot::commands::{self, CmdContext, Command};
+use perbot::import::{self, PendingImport};
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
@@ -78,10 +79,14 @@ async fn main() -> anyhow::Result<()> {
     // Start background polling thread: reloads events, sends missed, polls every second
     provider.start(msg_tx);
 
+    // Pending legacy import target (chat id) recorded by `/import <user_id>`.
+    let pending_import: PendingImport = import::new_pending();
+
     let handler_provider = provider.clone();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let provider = handler_provider.clone();
         let bot_username = bot_username.clone();
+        let pending_import = pending_import.clone();
         async move {
             // Save/update chat info
             let chat_info = extract_chat_info(&msg.chat);
@@ -89,9 +94,26 @@ async fn main() -> anyhow::Result<()> {
                 log::error!("Failed to save chat info: {}", e);
             }
 
+            let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
+            let is_admin = user_id == Some(admin_id.0);
+
+            // Legacy import: the admin sends the zip after `/import <user_id>`.
+            let pending_target = *pending_import.lock().unwrap();
+            if is_admin && let (Some(target), Some(doc)) = (pending_target, msg.document()) {
+                *pending_import.lock().unwrap() = None;
+                commands::handle_import_zip(
+                    &bot,
+                    &provider,
+                    msg.chat.id,
+                    target,
+                    doc.file.id.clone(),
+                )
+                .await?;
+                return Ok(());
+            }
+
             let reply_text = if let Some(text) = msg.text() {
                 // Store every incoming user message
-                let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
                 let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
                     Ok(id) => id,
                     Err(e) => {
@@ -99,8 +121,6 @@ async fn main() -> anyhow::Result<()> {
                         return Ok(());
                     }
                 };
-
-                let is_admin = user_id == Some(admin_id.0);
                 if let Ok(cmd) = Command::parse(text, &bot_username) {
                     let ctx = CmdContext {
                         bot: &bot,
@@ -108,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
                         provider: &provider,
                         admin_id,
                         is_admin,
+                        pending_import: &pending_import,
                     };
                     cmd.handle(ctx).await?;
                     return Ok(());

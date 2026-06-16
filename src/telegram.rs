@@ -188,6 +188,7 @@ mod tests {
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
             ),
             msg_id: 0,
+            legacy: false,
         }
     }
 

@@ -152,10 +152,24 @@ impl EventStorage {
                 bare_hour       INTEGER,
                 monthly_pattern TEXT,
                 msg_id          INTEGER NOT NULL REFERENCES messages(id),
-                years           TEXT
+                years           TEXT,
+                legacy          INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
+
+        // Migrate older databases that predate the `legacy` column.
+        let has_legacy = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(events)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            cols.filter_map(|c| c.ok()).any(|c| c == "legacy")
+        };
+        if !has_legacy {
+            self.conn.execute(
+                "ALTER TABLE events ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_chat_id ON events(chat_id)",
@@ -201,8 +215,8 @@ impl EventStorage {
         let years_str = event.years.as_ref().map(serialize_years);
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 event.chat_id,
                 date_str,
@@ -220,6 +234,7 @@ impl EventStorage {
                 monthly_str,
                 event.msg_id,
                 years_str,
+                event.legacy as i32,
             ],
         )?;
 
@@ -229,7 +244,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
         )?;
 
@@ -241,7 +256,7 @@ impl EventStorage {
     /// Retrieves all active events.
     pub fn get_active_events(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -253,7 +268,7 @@ impl EventStorage {
     /// Retrieves active events for a specific chat.
     pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -281,7 +296,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -310,7 +325,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -356,7 +371,7 @@ impl EventStorage {
     /// Returns an event by its ID.
     pub fn get_event(&self, id: i64) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE id = ?1",
         )?;
 
@@ -371,7 +386,7 @@ impl EventStorage {
     /// Returns the single nearest active event from `now`.
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE active = 1
              ORDER BY next_datetime ASC LIMIT 1",
         )?;
@@ -389,7 +404,7 @@ impl EventStorage {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE active = 1 AND next_datetime < ?1
              ORDER BY next_datetime ASC",
         )?;
@@ -403,7 +418,7 @@ impl EventStorage {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
              FROM events WHERE active = 1 AND next_datetime = ?1
              ORDER BY id ASC",
         )?;
@@ -569,6 +584,7 @@ impl EventStorage {
             bare_hour,
             monthly_pattern,
             msg_id: row.get(16)?,
+            legacy: row.get::<_, i32>(18)? != 0,
         })
     }
 }
@@ -631,6 +647,7 @@ mod tests {
             bare_hour: None,
             monthly_pattern: None,
             msg_id: 0,
+            legacy: false,
         }
     }
 

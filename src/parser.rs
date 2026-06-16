@@ -240,6 +240,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
         next_datetime: None,
         created_at: Local::now().naive_local(),
         msg_id: 0,
+        legacy: false,
     })
 }
 

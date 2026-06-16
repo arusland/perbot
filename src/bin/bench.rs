@@ -29,6 +29,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
         bare_hour: None,
         monthly_pattern: None,
         msg_id,
+        legacy: false,
     }
 }
 
