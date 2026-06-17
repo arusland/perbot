@@ -66,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for msg in messages {
-                let mut req = sender_bot.send_message(ChatId(msg.chat_id), &msg.text);
+                let text = if msg.snooze {
+                    format!("{}\n\n{}", msg.text, commands::SNOOZE_HINT)
+                } else {
+                    msg.text.clone()
+                };
+                let mut req = sender_bot.send_message(ChatId(msg.chat_id), text);
                 if msg.snooze {
                     req = req.reply_markup(commands::snooze_keyboard());
                 }

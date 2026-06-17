@@ -296,9 +296,14 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
     ("10 min", 10),
     ("30 min", 30),
     ("1 hour", 60),
+    ("2 hours", 120),
     ("8 hours", 480),
     ("1 day", 1440),
 ];
+
+/// Hint appended below a fired reminder, explaining the snooze buttons. Stripped
+/// off again when the title is recovered in `handle_snooze_callback`.
+pub const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
 /// Inline keyboard attached to a fired reminder, offering to re-send it after a
 /// fixed delay. Each button carries `sn:<minutes>` callback data; the title is
@@ -371,11 +376,14 @@ pub async fn handle_snooze_callback(
         return Ok(());
     };
 
-    // Recover the title from the reminder message the button is attached to.
-    let title = q
-        .regular_message()
-        .and_then(|m| m.text())
-        .map(str::to_string);
+    // Recover the title from the reminder message the button is attached to,
+    // dropping the appended snooze hint.
+    let title = q.regular_message().and_then(|m| m.text()).map(|t| {
+        t.strip_suffix(SNOOZE_HINT)
+            .unwrap_or(t)
+            .trim_end()
+            .to_string()
+    });
     let Some((message, title)) = q.regular_message().zip(title) else {
         bot.answer_callback_query(q.id)
             .text("Can't snooze this reminder.")
