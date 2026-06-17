@@ -1,6 +1,6 @@
 use crate::import::{self, PendingImport};
 use crate::state::EventProvider;
-use crate::telegram::{LIST_PAGE_SIZE, format_page_at};
+use crate::telegram::{LIST_PAGE_SIZE, format_page_at, scheduled_message};
 use crate::types::EventInfo;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
@@ -409,8 +409,9 @@ pub async fn handle_snooze_callback(
         return Ok(());
     }
 
-    bot.answer_callback_query(q.id)
-        .text(format!("Reminder set for {}", next.format("%H:%M")))
+    bot.answer_callback_query(q.id).await?;
+    bot.send_message(chat_id, scheduled_message(next))
+        .parse_mode(ParseMode::MarkdownV2)
         .await?;
     Ok(())
 }

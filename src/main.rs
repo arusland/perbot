@@ -4,7 +4,7 @@ use perbot::import::{self, PendingImport};
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{escape_markdown, extract_chat_info};
+use perbot::telegram::{escape_markdown, extract_chat_info, scheduled_message};
 use perbot::types::TgMessage;
 use teloxide::{
     prelude::*,
@@ -178,10 +178,7 @@ async fn message_handler(
             let stored = provider.insert_event_and_get(event);
 
             if let Some(dt) = stored.next_datetime {
-                format!(
-                    "Scheduled message for *{}*",
-                    dt.format("%H:%M %d\\.%m\\.%Y")
-                )
+                scheduled_message(dt)
             } else {
                 format!("*{}*", escape_markdown(text))
             }

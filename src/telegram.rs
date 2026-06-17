@@ -16,6 +16,15 @@ pub fn escape_markdown(text: &str) -> String {
     result
 }
 
+/// Confirmation sent when a reminder is scheduled (new parse or snooze).
+/// MarkdownV2: the title is bolded and the date dots are escaped.
+pub fn scheduled_message(dt: NaiveDateTime) -> String {
+    format!(
+        "Scheduled message for *{}*",
+        dt.format("%H:%M %d\\.%m\\.%Y")
+    )
+}
+
 /// Short relative time until `dt` from `now`, e.g. `13 mins`, `1h`, `2d`, `1w`.
 fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     let secs = (dt - now).num_seconds();
@@ -185,6 +194,18 @@ mod tests {
             legacy: false,
             snoozed: false,
         }
+    }
+
+    #[test]
+    fn scheduled_message_formats_datetime() {
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
+        assert_eq!(
+            scheduled_message(dt),
+            "Scheduled message for *13:05 31\\.12\\.2027*"
+        );
     }
 
     #[test]
