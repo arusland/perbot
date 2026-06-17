@@ -158,19 +158,6 @@ impl EventStorage {
             [],
         )?;
 
-        // Migrate older databases that predate the `legacy` column.
-        let has_legacy = {
-            let mut stmt = self.conn.prepare("PRAGMA table_info(events)")?;
-            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            cols.filter_map(|c| c.ok()).any(|c| c == "legacy")
-        };
-        if !has_legacy {
-            self.conn.execute(
-                "ALTER TABLE events ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0",
-                [],
-            )?;
-        }
-
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_chat_id ON events(chat_id)",
             [],
