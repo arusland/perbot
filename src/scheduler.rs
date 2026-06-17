@@ -337,6 +337,7 @@ mod tests {
             monthly_pattern: None,
             msg_id: 0,
             legacy: false,
+            snoozed: false,
         }
     }
 

@@ -30,6 +30,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
         monthly_pattern: None,
         msg_id,
         legacy: false,
+        snoozed: false,
     }
 }
 

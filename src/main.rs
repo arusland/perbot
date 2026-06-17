@@ -66,10 +66,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for msg in messages {
-                if let Err(e) = sender_bot
-                    .send_message(ChatId(msg.chat_id), &msg.text)
-                    .await
-                {
+                let mut req = sender_bot.send_message(ChatId(msg.chat_id), &msg.text);
+                if msg.snooze {
+                    req = req.reply_markup(commands::snooze_keyboard());
+                }
+                if let Err(e) = req.await {
                     log::error!("Failed to send message to {}: {}", msg.chat_id, e);
                 }
             }
@@ -111,7 +112,13 @@ async fn callback_handler(
     q: CallbackQuery,
     provider: EventProvider,
 ) -> ResponseResult<()> {
-    commands::handle_list_callback(&bot, &provider, q).await
+    // Snooze buttons on fired reminders carry `sn:<minutes>`; everything else is
+    // list pagination (`<tag>:<page>`).
+    if q.data.as_deref().is_some_and(|d| d.starts_with("sn:")) {
+        commands::handle_snooze_callback(&bot, &provider, q).await
+    } else {
+        commands::handle_list_callback(&bot, &provider, q).await
+    }
 }
 
 /// Handles a single incoming message: stores chat/message info, dispatches

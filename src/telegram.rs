@@ -183,6 +183,7 @@ mod tests {
             ),
             msg_id: 0,
             legacy: false,
+            snoozed: false,
         }
     }
 

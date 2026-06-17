@@ -153,7 +153,8 @@ impl EventStorage {
                 monthly_pattern TEXT,
                 msg_id          INTEGER NOT NULL REFERENCES messages(id),
                 years           TEXT,
-                legacy          INTEGER NOT NULL DEFAULT 0
+                legacy          INTEGER NOT NULL DEFAULT 0,
+                snoozed         INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -202,8 +203,8 @@ impl EventStorage {
         let years_str = event.years.as_ref().map(serialize_years);
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 event.chat_id,
                 date_str,
@@ -222,6 +223,7 @@ impl EventStorage {
                 event.msg_id,
                 years_str,
                 event.legacy as i32,
+                event.snoozed as i32,
             ],
         )?;
 
@@ -231,7 +233,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
         )?;
 
@@ -243,7 +245,7 @@ impl EventStorage {
     /// Retrieves all active events.
     pub fn get_active_events(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -255,7 +257,7 @@ impl EventStorage {
     /// Retrieves active events for a specific chat.
     pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -283,7 +285,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -312,7 +314,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -358,7 +360,7 @@ impl EventStorage {
     /// Returns an event by its ID.
     pub fn get_event(&self, id: i64) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE id = ?1",
         )?;
 
@@ -373,7 +375,7 @@ impl EventStorage {
     /// Returns the single nearest active event from `now`.
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE active = 1
              ORDER BY next_datetime ASC LIMIT 1",
         )?;
@@ -391,7 +393,7 @@ impl EventStorage {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE active = 1 AND next_datetime < ?1
              ORDER BY next_datetime ASC",
         )?;
@@ -405,7 +407,7 @@ impl EventStorage {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
              FROM events WHERE active = 1 AND next_datetime = ?1
              ORDER BY id ASC",
         )?;
@@ -572,6 +574,7 @@ impl EventStorage {
             monthly_pattern,
             msg_id: row.get(16)?,
             legacy: row.get::<_, i32>(18)? != 0,
+            snoozed: row.get::<_, i32>(19)? != 0,
         })
     }
 }
@@ -635,6 +638,7 @@ mod tests {
             monthly_pattern: None,
             msg_id: 0,
             legacy: false,
+            snoozed: false,
         }
     }
 

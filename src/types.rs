@@ -38,6 +38,8 @@ pub struct EventInfo {
     pub msg_id: i64,
     /// `true` for events imported from the legacy MateBot `.alert` files.
     pub legacy: bool,
+    /// `true` for one-off events created by the snooze flow.
+    pub snoozed: bool,
 }
 
 /// User message information. Used both for inserting and for reading from the database.
@@ -134,10 +136,12 @@ pub struct ChatInfo {
 }
 
 /// An outbound Telegram message: the destination chat and its (already
-/// formatted) text body.
+/// formatted) text body. `snooze` requests the snooze inline keyboard be
+/// attached when the message is sent (set for fired reminders).
 pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
+    pub snooze: bool,
 }
 
 /// Channel sender used by the scheduler to hand batches of due/missed messages

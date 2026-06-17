@@ -1,6 +1,7 @@
 use crate::import::{self, PendingImport};
 use crate::state::EventProvider;
 use crate::telegram::{LIST_PAGE_SIZE, format_page_at};
+use crate::types::EventInfo;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
 use teloxide::{
@@ -287,6 +288,133 @@ pub async fn handle_list_callback(
     Ok(())
 }
 
+/// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
+/// value is embedded in the callback data (`sn:<minutes>`).
+const SNOOZE_OPTIONS: &[(&str, i64)] = &[
+    ("1 min", 1),
+    ("5 min", 5),
+    ("10 min", 10),
+    ("30 min", 30),
+    ("1 hour", 60),
+    ("8 hours", 480),
+    ("1 day", 1440),
+];
+
+/// Inline keyboard attached to a fired reminder, offering to re-send it after a
+/// fixed delay. Each button carries `sn:<minutes>` callback data; the title is
+/// recovered from the reminder message text when the button is pressed.
+pub fn snooze_keyboard() -> InlineKeyboardMarkup {
+    // Four buttons on the first row, the rest on the second, to fit narrow screens.
+    let rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(label, minutes)| {
+                    InlineKeyboardButton::callback(*label, format!("sn:{minutes}"))
+                })
+                .collect()
+        })
+        .collect();
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// Builds the one-off event a snooze creates: an explicit-year reminder scheduled
+/// exactly at `next`, already marked active. It is inserted via
+/// `insert_prebuilt_event` (no scheduler run), and after it fires
+/// `scheduler::calc_next_at` returns `None` (no repetition, year explicit), so it
+/// goes inactive instead of repeating.
+fn snoozed_event(
+    chat_id: i64,
+    msg_id: i64,
+    title: String,
+    next: chrono::NaiveDateTime,
+) -> EventInfo {
+    EventInfo {
+        date: Some(next.date()),
+        time: Some(next.time()),
+        year_explicit: true,
+        days: None,
+        years: None,
+        repetition: None,
+        in_offset: None,
+        bare_hour: None,
+        monthly_pattern: None,
+        message: title,
+        id: 0,
+        chat_id,
+        active: true,
+        next_datetime: Some(next),
+        created_at: next,
+        msg_id,
+        legacy: false,
+        snoozed: true,
+    }
+}
+
+/// Handles a snooze-button press: creates a new one-off event with the same title
+/// as the fired reminder, scheduled at `now + <minutes>`. The original event is
+/// left untouched. Driven from `main`'s callback-query branch for `sn:`-prefixed
+/// callback data.
+pub async fn handle_snooze_callback(
+    bot: &Bot,
+    provider: &EventProvider,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    let minutes = q
+        .data
+        .as_deref()
+        .and_then(|d| d.strip_prefix("sn:"))
+        .and_then(|m| m.parse::<i64>().ok());
+    let Some(minutes) = minutes else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    // Recover the title from the reminder message the button is attached to.
+    let title = q
+        .regular_message()
+        .and_then(|m| m.text())
+        .map(str::to_string);
+    let Some((message, title)) = q.regular_message().zip(title) else {
+        bot.answer_callback_query(q.id)
+            .text("Can't snooze this reminder.")
+            .await?;
+        return Ok(());
+    };
+
+    let chat_id = message.chat.id;
+    let now = Local::now().naive_local();
+    let next = now + Duration::minutes(minutes);
+    let user_id = q.from.id.0 as i64;
+
+    // Backing message row (events.msg_id is a NOT NULL FK to messages).
+    let msg_id = match provider.insert_message(Some(user_id), chat_id.0, &title) {
+        Ok(id) => id,
+        Err(e) => {
+            log::error!("Failed to save snooze message for chat {}: {e}", chat_id.0);
+            bot.answer_callback_query(q.id)
+                .text("Failed to snooze.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let event = snoozed_event(chat_id.0, msg_id, title, next);
+    if let Err(e) = provider.insert_prebuilt_event(&event) {
+        log::error!("Failed to insert snoozed event for chat {}: {e}", chat_id.0);
+        bot.answer_callback_query(q.id)
+            .text("Failed to snooze.")
+            .await?;
+        return Ok(());
+    }
+
+    bot.answer_callback_query(q.id)
+        .text(format!("Reminder set for {}", next.format("%H:%M")))
+        .await?;
+    Ok(())
+}
+
 /// Begins a legacy import for `user_id`. Admin-only; records the pending target
 /// and asks the admin to send the zip of `.alert` files next.
 async fn handle_import(ctx: &CmdContext<'_>, user_id: i64) -> ResponseResult<()> {
@@ -364,4 +492,32 @@ async fn handle_exit(ctx: &CmdContext<'_>) -> ResponseResult<()> {
         process::exit(0);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler;
+
+    #[test]
+    fn snooze_keyboard_has_a_button_per_option() {
+        let kb = snooze_keyboard();
+        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
+        assert_eq!(count, SNOOZE_OPTIONS.len());
+    }
+
+    #[test]
+    fn snoozed_event_goes_inactive_after_firing() {
+        // The snoozed event is scheduled at `next`; once "now" reaches it (firing),
+        // calc_next_at must return inactive so it does not repeat.
+        let next = Local::now().naive_local() + Duration::minutes(5);
+        let event = snoozed_event(42, 7, "call mom".to_string(), next);
+        assert!(event.active);
+        assert!(event.snoozed);
+        assert_eq!(event.next_datetime, Some(next));
+
+        let fired = scheduler::calc_next_at(event, next);
+        assert!(!fired.active);
+        assert!(fired.next_datetime.is_none());
+    }
 }
