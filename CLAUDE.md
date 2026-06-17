@@ -4,6 +4,7 @@
 
 - When you complete work, print a short commit message for the changes.
 - After a feature, module, command, or behavior change, update this file to keep it accurate.
+- When asked to add a new datetime format, treat it with the same coverage as existing formats: update the parser (`parser.rs`), scheduling math (`scheduler.rs`) as needed, document it under **Datetime formats supported**, add unit tests alongside the existing ones, and add USER/SYSTEM scenarios to `test-cases.md`. If the new format conflicts or ambiguously overlaps with an existing format, stop and propose resolution options instead of silently changing existing behavior.
 
 ## Project Overview
 
