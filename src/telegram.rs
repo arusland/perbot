@@ -58,14 +58,16 @@ pub fn escape_markdown(text: &str) -> String {
 
 /// Confirmation sent when a reminder is scheduled (new parse or snooze).
 /// MarkdownV2: the bolded title shows the absolute datetime plus the relative
-/// time from `now` (e.g. `13:30 22.06.2026 (1d)`), escaped. For recurring events
-/// a "Next launches" preview is appended (escaped); one-off events (empty
-/// preview) render as just the title.
+/// time from `now` (e.g. `13:30 22.06.2026 (1d)`), escaped, followed by a
+/// `Message: <event.message>` line (escaped). For recurring events a "Next
+/// launches" preview is appended (escaped); one-off events (empty preview)
+/// render as just the title plus the message line.
 pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInfo) -> String {
     let preview = next_launches_preview(event, dt);
     format!(
-        "Scheduled message for *{}*{}",
+        "Scheduled message for *{}*\nMessage: {}{}",
         escape_markdown(&format_when(now, dt)),
+        escape_markdown(&event.message),
         escape_markdown(&preview)
     )
 }
@@ -267,7 +269,7 @@ mod tests {
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
             scheduled_message(now, dt, &event),
-            "Scheduled message for *13:05 31\\.12\\.2027 \\(1d\\)*"
+            "Scheduled message for *13:05 31\\.12\\.2027 \\(1d\\)*\nMessage: ring in the new year"
         );
     }
 
@@ -291,6 +293,7 @@ mod tests {
 
         let text = scheduled_message(now, dt, &event);
         assert!(text.starts_with("Scheduled message for *10:00 22\\.06\\.2026 \\(1h\\)*"));
+        assert!(text.contains("Message: standup"));
         // Preview lists launches strictly after the confirmed datetime, escaped.
         assert!(text.contains("Next launches:"));
         assert!(text.contains("• 10:00 23\\.06\\.2026"));
