@@ -395,7 +395,7 @@ pub async fn handle_snooze_callback(
     }
 
     bot.answer_callback_query(q.id).await?;
-    bot.send_message(chat_id, scheduled_message(next))
+    bot.send_message(chat_id, scheduled_message(now, next, &event))
         .parse_mode(ParseMode::MarkdownV2)
         .await?;
     Ok(())

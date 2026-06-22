@@ -28,43 +28,6 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
 /// the message text.
 const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
-/// Maximum upcoming launches previewed under a fired reminder. A further `• ...`
-/// bullet is shown when more launches follow.
-const MAX_NEXT_PREVIEW: usize = 3;
-
-/// Preview block of upcoming launches for a fired reminder, computed with
-/// `scheduler::calc_next_at`. Lists up to MAX_NEXT_PREVIEW launches as bullets,
-/// plus a trailing `• ...` when more remain. Returns "" for one-off events
-/// (no future occurrence). `after` is the firing datetime, used as both the
-/// search baseline and the relative-time origin.
-fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String {
-    let mut launches: Vec<NaiveDateTime> = Vec::new();
-    let mut current = event.clone();
-    let mut cursor = after;
-    // Probe one beyond the limit so we know whether to show the "..." bullet.
-    while launches.len() <= MAX_NEXT_PREVIEW {
-        current = scheduler::calc_next_at(current, cursor);
-        match current.next_datetime {
-            Some(next) => {
-                launches.push(next);
-                cursor = next;
-            }
-            None => break,
-        }
-    }
-    if launches.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("\n\nNext launches:");
-    for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
-        out.push_str(&format!("\n• {}", crate::telegram::format_when(after, *dt)));
-    }
-    if launches.len() > MAX_NEXT_PREVIEW {
-        out.push_str("\n• ...");
-    }
-    out
-}
-
 /// Inline keyboard attached to a fired reminder, offering to re-send it after a
 /// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
 /// `<id>` is the fired event's DB id (used to load the event when pressed).
@@ -350,7 +313,7 @@ impl EventProvider {
                     let messages: Vec<TgMessage> = events
                         .iter()
                         .map(|e| {
-                            let preview = next_launches_preview(e, dt);
+                            let preview = crate::telegram::next_launches_preview(e, dt);
                             TgMessage {
                                 chat_id: e.chat_id,
                                 text: format!("{}{}\n\n{}", e.message, preview, SNOOZE_HINT),
@@ -385,89 +348,6 @@ impl EventProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Repetition, TimeUnit};
-    use chrono::{NaiveDate, NaiveTime};
-    use std::collections::HashSet;
-
-    fn base_event() -> EventInfo {
-        EventInfo {
-            id: 0,
-            chat_id: 0,
-            date: None,
-            time: None,
-            year_explicit: false,
-            days: None,
-            years: None,
-            repetition: None,
-            in_offset: None,
-            bare_hour: None,
-            monthly_pattern: None,
-            message: String::new(),
-            active: false,
-            next_datetime: None,
-            created_at: NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
-            ),
-            msg_id: 0,
-            legacy: false,
-            snoozed: false,
-        }
-    }
-
-    fn dt(date: (i32, u32, u32), time: (u32, u32)) -> NaiveDateTime {
-        NaiveDateTime::new(
-            NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap(),
-            NaiveTime::from_hms_opt(time.0, time.1, 0).unwrap(),
-        )
-    }
-
-    #[test]
-    fn next_launches_preview_one_off_is_empty() {
-        let fire = dt((2026, 6, 22), (10, 0));
-        let mut event = base_event();
-        event.time = NaiveTime::from_hms_opt(10, 0, 0);
-        event.next_datetime = Some(fire);
-        assert_eq!(next_launches_preview(&event, fire), "");
-    }
-
-    #[test]
-    fn next_launches_preview_recurring_shows_three_plus_ellipsis() {
-        let fire = dt((2026, 6, 22), (10, 0));
-        let mut event = base_event();
-        event.time = NaiveTime::from_hms_opt(10, 0, 0);
-        event.repetition = Some(Repetition {
-            interval: 1,
-            unit: TimeUnit::Days,
-        });
-        event.next_datetime = Some(fire);
-
-        let preview = next_launches_preview(&event, fire);
-        assert!(preview.starts_with("\n\nNext launches:"));
-        // Three consecutive days after the firing day, then the overflow bullet.
-        assert!(preview.contains("• 10:00 23.06.2026"));
-        assert!(preview.contains("• 10:00 24.06.2026"));
-        assert!(preview.contains("• 10:00 25.06.2026"));
-        assert!(preview.contains("• ..."));
-        assert_eq!(preview.matches('•').count(), 4);
-    }
-
-    #[test]
-    fn next_launches_preview_fewer_than_three_has_no_ellipsis() {
-        // Year-restricted to 2027; firing on its second-to-last day leaves a single
-        // future launch (2027-12-31 23:00) before the schedule is exhausted.
-        let fire = dt((2027, 12, 30), (23, 0));
-        let mut event = base_event();
-        event.time = NaiveTime::from_hms_opt(23, 0, 0);
-        event.years = Some(HashSet::from([2027]));
-        event.next_datetime = Some(fire);
-
-        let preview = next_launches_preview(&event, fire);
-        assert!(preview.starts_with("\n\nNext launches:"));
-        assert!(preview.contains("• 23:00 31.12.2027"));
-        assert!(!preview.contains("• ..."));
-        assert_eq!(preview.matches('•').count(), 1);
-    }
 
     #[test]
     fn snooze_keyboard_has_a_button_per_option() {

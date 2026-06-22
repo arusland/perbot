@@ -1,6 +1,46 @@
+use crate::scheduler;
 use crate::types::{ChatInfo, ChatType, EventInfo};
 use chrono::{Local, NaiveDateTime};
 use std::fmt::Write as _;
+
+/// Maximum upcoming launches previewed for a reminder. A further `• ...` bullet
+/// is shown when more launches follow.
+const MAX_NEXT_PREVIEW: usize = 3;
+
+/// Preview block of upcoming launches for a reminder, computed with
+/// `scheduler::calc_next_at`. Lists up to MAX_NEXT_PREVIEW launches as bullets,
+/// plus a trailing `• ...` when more remain. Returns "" for one-off events
+/// (no future occurrence). `after` is the baseline (the launch being confirmed
+/// or fired), used as both the search baseline and the relative-time origin, so
+/// the listed launches are strictly after it. Output is plain text; callers
+/// targeting MarkdownV2 escape it with `escape_markdown`.
+pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String {
+    let mut launches: Vec<NaiveDateTime> = Vec::new();
+    let mut current = event.clone();
+    let mut cursor = after;
+    // Probe one beyond the limit so we know whether to show the "..." bullet.
+    while launches.len() <= MAX_NEXT_PREVIEW {
+        current = scheduler::calc_next_at(current, cursor);
+        match current.next_datetime {
+            Some(next) => {
+                launches.push(next);
+                cursor = next;
+            }
+            None => break,
+        }
+    }
+    if launches.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nNext launches:");
+    for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
+        out.push_str(&format!("\n• {}", format_when(after, *dt)));
+    }
+    if launches.len() > MAX_NEXT_PREVIEW {
+        out.push_str("\n• ...");
+    }
+    out
+}
 
 pub fn escape_markdown(text: &str) -> String {
     let special_chars = [
@@ -17,11 +57,16 @@ pub fn escape_markdown(text: &str) -> String {
 }
 
 /// Confirmation sent when a reminder is scheduled (new parse or snooze).
-/// MarkdownV2: the title is bolded and the date dots are escaped.
-pub fn scheduled_message(dt: NaiveDateTime) -> String {
+/// MarkdownV2: the bolded title shows the absolute datetime plus the relative
+/// time from `now` (e.g. `13:30 22.06.2026 (1d)`), escaped. For recurring events
+/// a "Next launches" preview is appended (escaped); one-off events (empty
+/// preview) render as just the title.
+pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInfo) -> String {
+    let preview = next_launches_preview(event, dt);
     format!(
-        "Scheduled message for *{}*",
-        dt.format("%H:%M %d\\.%m\\.%Y")
+        "Scheduled message for *{}*{}",
+        escape_markdown(&format_when(now, dt)),
+        escape_markdown(&preview)
     )
 }
 
@@ -209,14 +254,102 @@ mod tests {
 
     #[test]
     fn scheduled_message_formats_datetime() {
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 30).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
         let dt = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
             NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
         );
+        // A one-off event has no upcoming launches, so only the title is shown,
+        // with the relative time (1d) appended and escaped.
+        let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
-            scheduled_message(dt),
-            "Scheduled message for *13:05 31\\.12\\.2027*"
+            scheduled_message(now, dt, &event),
+            "Scheduled message for *13:05 31\\.12\\.2027 \\(1d\\)*"
         );
+    }
+
+    #[test]
+    fn scheduled_message_appends_escaped_preview_for_recurring() {
+        use crate::types::{Repetition, TimeUnit};
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(dt));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        let text = scheduled_message(now, dt, &event);
+        assert!(text.starts_with("Scheduled message for *10:00 22\\.06\\.2026 \\(1h\\)*"));
+        // Preview lists launches strictly after the confirmed datetime, escaped.
+        assert!(text.contains("Next launches:"));
+        assert!(text.contains("• 10:00 23\\.06\\.2026"));
+        assert!(text.contains("• \\.\\.\\."));
+    }
+
+    #[test]
+    fn next_launches_preview_one_off_is_empty() {
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("call mom", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        assert_eq!(next_launches_preview(&event, fire), "");
+    }
+
+    #[test]
+    fn next_launches_preview_recurring_shows_three_plus_ellipsis() {
+        use crate::types::{Repetition, TimeUnit};
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        let preview = next_launches_preview(&event, fire);
+        assert!(preview.starts_with("\n\nNext launches:"));
+        // Three consecutive days after the firing day, then the overflow bullet.
+        assert!(preview.contains("• 10:00 23.06.2026"));
+        assert!(preview.contains("• 10:00 24.06.2026"));
+        assert!(preview.contains("• 10:00 25.06.2026"));
+        assert!(preview.contains("• ..."));
+        assert_eq!(preview.matches('•').count(), 4);
+    }
+
+    #[test]
+    fn next_launches_preview_fewer_than_three_has_no_ellipsis() {
+        use std::collections::HashSet;
+        // Year-restricted to 2027; firing on its second-to-last day leaves a single
+        // future launch (2027-12-31 23:00) before the schedule is exhausted.
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 30).unwrap(),
+            NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("year end", Some(fire));
+        event.time = NaiveTime::from_hms_opt(23, 0, 0);
+        event.years = Some(HashSet::from([2027]));
+
+        let preview = next_launches_preview(&event, fire);
+        assert!(preview.starts_with("\n\nNext launches:"));
+        assert!(preview.contains("• 23:00 31.12.2027"));
+        assert!(!preview.contains("• ..."));
+        assert_eq!(preview.matches('•').count(), 1);
     }
 
     #[test]

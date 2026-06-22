@@ -178,7 +178,8 @@ async fn message_handler(
             let stored = provider.insert_event_and_get(event);
 
             if let Some(dt) = stored.next_datetime {
-                scheduled_message(dt)
+                let now = chrono::Local::now().naive_local();
+                scheduled_message(now, dt, &stored)
             } else {
                 format!("*{}*", escape_markdown(text))
             }
