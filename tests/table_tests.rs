@@ -8,6 +8,9 @@ struct TableRow {
     ts: NaiveDateTime,
     actor: String,
     value: String,
+    /// Expected reminder message for USER rows (4th column); `None` for SYSTEM
+    /// rows (whose 4th cell is empty and dropped by the empty-cell filter).
+    message: Option<String>,
     original: String,
 }
 
@@ -22,6 +25,10 @@ struct Table {
 /// The header row (where column[1] is not "USER" or "SYSTEM") and the
 /// separator row (e.g. `|---|---|---|`) are silently skipped.
 /// `### Heading` lines are captured as the table name.
+///
+/// USER rows carry an optional 4th column with the expected reminder message
+/// (must equal `EventInfo.message`); SYSTEM rows leave it empty, so the
+/// empty-cell filter drops it and they yield only 3 columns.
 ///
 /// Returns a list of tables; each table is a list of rows.
 fn parse_tables(content: &str) -> Vec<Table> {
@@ -61,6 +68,7 @@ fn parse_tables(content: &str) -> Vec<Table> {
                 ts,
                 actor,
                 value: cols[2].to_string(),
+                message: cols.get(3).map(|s| s.to_string()),
                 original: trimmed.to_string(),
             });
         } else {
@@ -139,6 +147,17 @@ fn run_table(table_idx: usize, table: &Table) {
         match row.actor.as_str() {
             "USER" => {
                 current_id = parser::parse(&row.value).map(|mut event| {
+                    if let Some(expected) = &row.message
+                        && &event.message != expected
+                    {
+                        fail_at(
+                            table_idx,
+                            table,
+                            step,
+                            &format!("expected message {:?}, got {:?}", expected, event.message),
+                            &event.message,
+                        );
+                    }
                     let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
                     event.chat_id = CHAT_ID;
                     event.msg_id = msg_id;
