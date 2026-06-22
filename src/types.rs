@@ -1,5 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use std::collections::HashSet;
+use teloxide::types::InlineKeyboardMarkup;
 use tokio::sync::mpsc;
 
 /// A parsed reminder event plus the fields used to track it in the database.
@@ -135,15 +136,16 @@ pub struct ChatInfo {
     pub created_at: Option<NaiveDateTime>,
 }
 
-/// An outbound Telegram message: the destination chat and its (already
-/// formatted) text body. `event_id` is `Some(id)` for a fired reminder, which
-/// requests the snooze inline keyboard for that event be attached when the
-/// message is sent; `None` for messages with no snooze keyboard (e.g. the
-/// missed-events batch).
+/// An outbound Telegram message: the destination chat, its final (already
+/// formatted, hint already appended) text body, and the inline keyboard the
+/// producer chose for it. `reply_markup` is `Some(..)` when the message should
+/// carry buttons (e.g. the snooze keyboard on a fired reminder) and `None`
+/// otherwise (e.g. the missed-events batch). The sender task forwards both
+/// verbatim — it does not decide which buttons a message gets.
 pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
-    pub event_id: Option<i64>,
+    pub reply_markup: Option<InlineKeyboardMarkup>,
 }
 
 /// Channel sender used by the scheduler to hand batches of due/missed messages

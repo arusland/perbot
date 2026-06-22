@@ -3,10 +3,49 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
 
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+
 use crate::error::Result;
 use crate::scheduler;
 use crate::storage::EventStorage;
 use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, TgMessage};
+
+/// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
+/// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
+const SNOOZE_OPTIONS: &[(&str, i64)] = &[
+    ("1 min", 1),
+    ("5 min", 5),
+    ("10 min", 10),
+    ("30 min", 30),
+    ("1 hour", 60),
+    ("2 hours", 120),
+    ("8 hours", 480),
+    ("1 day", 1440),
+];
+
+/// Hint appended below a fired reminder, explaining the snooze buttons. Purely
+/// informational — the snooze title is loaded from the stored event, not from
+/// the message text.
+const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
+
+/// Inline keyboard attached to a fired reminder, offering to re-send it after a
+/// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
+/// `<id>` is the fired event's DB id (used to load the event when pressed).
+fn snooze_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+    // Four buttons on the first row, the rest on the second, to fit narrow screens.
+    let rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(label, minutes)| {
+                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
+                })
+                .collect()
+        })
+        .collect();
+    InlineKeyboardMarkup::new(rows)
+}
 
 struct EventProviderState {
     storage: EventStorage,
@@ -242,7 +281,7 @@ impl EventProvider {
                         TgMessage {
                             chat_id,
                             text: format!("Missed:\n{}", combined),
-                            event_id: None,
+                            reply_markup: None,
                         }
                     })
                     .collect();
@@ -275,8 +314,8 @@ impl EventProvider {
                         .iter()
                         .map(|e| TgMessage {
                             chat_id: e.chat_id,
-                            text: e.message.clone(),
-                            event_id: Some(e.id),
+                            text: format!("{}\n\n{}", e.message, SNOOZE_HINT),
+                            reply_markup: Some(snooze_keyboard(e.id)),
                         })
                         .collect();
 
@@ -299,6 +338,36 @@ impl EventProvider {
                 inner.next_event = event;
             }
             Err(e) => log::error!("Failed to load next event: {}", e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snooze_keyboard_has_a_button_per_option() {
+        let kb = snooze_keyboard(42);
+        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
+        assert_eq!(count, SNOOZE_OPTIONS.len());
+    }
+
+    #[test]
+    fn snooze_keyboard_embeds_event_id_in_callback_data() {
+        use teloxide::types::InlineKeyboardButtonKind;
+
+        let kb = snooze_keyboard(42);
+        for (button, (_, minutes)) in kb
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .zip(SNOOZE_OPTIONS.iter())
+        {
+            let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+                panic!("expected callback-data button");
+            };
+            assert_eq!(data, &format!("eid:42:sn:{minutes}"));
         }
     }
 }

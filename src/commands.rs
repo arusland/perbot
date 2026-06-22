@@ -288,43 +288,6 @@ pub async fn handle_list_callback(
     Ok(())
 }
 
-/// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
-/// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
-const SNOOZE_OPTIONS: &[(&str, i64)] = &[
-    ("1 min", 1),
-    ("5 min", 5),
-    ("10 min", 10),
-    ("30 min", 30),
-    ("1 hour", 60),
-    ("2 hours", 120),
-    ("8 hours", 480),
-    ("1 day", 1440),
-];
-
-/// Hint appended below a fired reminder, explaining the snooze buttons. Purely
-/// informational — the snooze title is loaded from the stored event, not from
-/// the message text.
-pub const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
-
-/// Inline keyboard attached to a fired reminder, offering to re-send it after a
-/// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
-/// `<id>` is the fired event's DB id (used to load the event when pressed).
-pub fn snooze_keyboard(event_id: i64) -> InlineKeyboardMarkup {
-    // Four buttons on the first row, the rest on the second, to fit narrow screens.
-    let rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
-        .chunks(4)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|(label, minutes)| {
-                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
-                })
-                .collect()
-        })
-        .collect();
-    InlineKeyboardMarkup::new(rows)
-}
-
 /// Parses snooze callback data `eid:<id>:sn:<minutes>` into `(event_id, minutes)`.
 /// Returns `None` for any malformed input or a non-snooze action.
 fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
@@ -521,32 +484,6 @@ async fn handle_exit(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 mod tests {
     use super::*;
     use crate::scheduler;
-
-    #[test]
-    fn snooze_keyboard_has_a_button_per_option() {
-        let kb = snooze_keyboard(42);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len());
-    }
-
-    #[test]
-    fn snooze_keyboard_embeds_event_id_in_callback_data() {
-        use teloxide::types::InlineKeyboardButtonKind;
-
-        let kb = snooze_keyboard(42);
-        for (button, (_, minutes)) in kb
-            .inline_keyboard
-            .iter()
-            .flatten()
-            .zip(SNOOZE_OPTIONS.iter())
-        {
-            let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
-                panic!("expected callback-data button");
-            };
-            assert_eq!(data, &format!("eid:42:sn:{minutes}"));
-            assert_eq!(parse_snooze_callback(data), Some((42, *minutes)));
-        }
-    }
 
     #[test]
     fn parse_snooze_callback_round_trips_and_rejects_malformed() {
