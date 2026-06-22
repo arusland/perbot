@@ -49,6 +49,17 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     format!("{}w", days / 7)
 }
 
+/// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
+/// `14:00 23.06.2026 (1d)`. Unescaped — for plain-text messages such as fired
+/// reminders. List replies use `write_event_row` (MarkdownV2) instead.
+pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime) -> String {
+    format!(
+        "{} ({})",
+        dt.format("%H:%M %d.%m.%Y"),
+        format_relative(now, dt)
+    )
+}
+
 /// Appends a single MarkdownV2 event row (`• datetime (relative) — message`).
 fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
     let when = match e.next_datetime {
