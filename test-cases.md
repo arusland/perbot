@@ -108,6 +108,15 @@
 | 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  |
 | 2026-02-23 15:30:01 | SYSTEM | 2026-02-26 15:30:00            |
 
+### Case 7.3: Every 7 min — first and several
+| Current Time        | Actor  | Input / Expected Next          |
+|---------------------|--------|--------------------------------|
+| 2026-02-20 19:31:00 | USER   | 19:30 every 7 min call Peter   |
+| 2026-02-20 19:32:01 | SYSTEM | 2026-02-21 19:30:00            |
+| 2026-02-21 19:29:59 | SYSTEM | 2026-02-21 19:30:00            |
+| 2026-02-21 19:30:01 | SYSTEM | 2026-02-21 19:37:00            |
+| 2026-02-21 19:37:01 | SYSTEM | 2026-02-21 19:44:00            |
+
 ### Case 8: Every year — fires at next 1:34, does not deactivate
 
 | Current Time        | Actor  | Input / Expected Next       |
@@ -590,3 +599,11 @@
 |---------------------|--------|---------------------------------------------|
 | 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket |
 | 2026-04-03 10:00:01 | SYSTEM | 2026-04-05 10:00:00                         |
+
+### Case 41: Single-digit minute — "10:6" means "10:06", fires once
+
+| Current Time        | Actor  | Input / Expected Next |
+|---------------------|--------|-----------------------|
+| 2026-02-20 09:00:00 | USER   | 10:6 standup          |
+| 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 10:06:00   |
+| 2026-02-20 10:06:01 | SYSTEM | NONE                  |

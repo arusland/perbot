@@ -12,11 +12,12 @@ use crate::types::{
 // message. A clock time is matched wherever it appears (e.g. "call office at
 // 5:30" extracts 5:30), unlike the relative offset, bare hour, and short date
 // which must lead the message. 12h is tried before 24h so "5:24 PM" is not
-// partially consumed as "5:24".
+// partially consumed as "5:24". Minutes accept 1-2 digits so "10:6" means
+// "10:06" ("9:5 PM" -> 21:05).
 static RE_TIME_12H: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(\d{1,2}):(\d{2})\s*(AM|PM)").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(\d{1,2}):(\d{1,2})\s*(AM|PM)").unwrap());
 
-static RE_TIME_24H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d{1,2}):(\d{2})").unwrap());
+static RE_TIME_24H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d{1,2}):(\d{1,2})").unwrap());
 
 static RE_DATE_FULL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d{1,2})\.(\d{1,2})\.(\d{4})").unwrap());
@@ -25,7 +26,7 @@ static RE_DATE_SHORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d{1,2})\.(\d{1,2})(?:[^\.\d]|$)").unwrap());
 
 static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bevery\s+(?:(\d+)\s+)?(minutes?|hours?|days?|weeks?|months?|years?)\b")
+    Regex::new(r"(?i)\bevery\s+(?:(\d+)\s+)?(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b")
         .unwrap()
 });
 
@@ -259,6 +260,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_24h_single_digit_minute() {
+        // "10:6" is shorthand for "10:06"
+        let e = parse("10:6 standup").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 6, 0));
+        assert_eq!(e.message, "standup");
+    }
+
+    #[test]
+    fn parse_12h_single_digit_minute() {
+        let e = parse("9:5 PM call back").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(21, 5, 0));
+        assert_eq!(e.message, "call back");
+    }
+
+    #[test]
     fn parse_12h_time_am() {
         let e = parse("5:24 AM wake up").unwrap();
         assert_eq!(e.time, NaiveTime::from_hms_opt(5, 24, 0));
@@ -455,6 +471,16 @@ mod tests {
         assert_eq!(rep.interval, 2);
         assert_eq!(rep.unit, TimeUnit::Weeks);
         assert_eq!(e.message, "call office");
+    }
+
+    #[test]
+    fn parse_every_n_min_abbreviated() {
+        let e = parse("19:30 every 7 min call Peter").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(19, 30, 0));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 7);
+        assert_eq!(rep.unit, TimeUnit::Minutes);
+        assert_eq!(e.message, "call Peter");
     }
 
     #[test]

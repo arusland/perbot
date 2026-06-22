@@ -87,7 +87,7 @@ cargo run --bin bench      # storage benchmark (1000 events)
 `test-cases.md` holds markdown tables driving `tests/table_tests.rs`. Rows alternate `USER` (parse + `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, assert `next_datetime` or `NONE`). Add scenarios by appending `###` sections — no code changes needed.
 
 ## Datetime formats supported
-- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / relative offset / short date must lead.
+- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / relative offset / short date must lead. Minutes accept 1-2 digits, so `10:6` means `10:06` (`9:5 PM` → 21:05).
 - `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year.
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then repeat interval.
 - `8 call Alex` → next 08:00; `24 ...` → 00:00; `25 ...` → invalid (not parsed).
