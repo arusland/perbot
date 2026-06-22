@@ -242,7 +242,7 @@ impl EventProvider {
                         TgMessage {
                             chat_id,
                             text: format!("Missed:\n{}", combined),
-                            snooze: false,
+                            event_id: None,
                         }
                     })
                     .collect();
@@ -276,7 +276,7 @@ impl EventProvider {
                         .map(|e| TgMessage {
                             chat_id: e.chat_id,
                             text: e.message.clone(),
-                            snooze: true,
+                            event_id: Some(e.id),
                         })
                         .collect();
 

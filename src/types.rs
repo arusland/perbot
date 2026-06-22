@@ -136,12 +136,14 @@ pub struct ChatInfo {
 }
 
 /// An outbound Telegram message: the destination chat and its (already
-/// formatted) text body. `snooze` requests the snooze inline keyboard be
-/// attached when the message is sent (set for fired reminders).
+/// formatted) text body. `event_id` is `Some(id)` for a fired reminder, which
+/// requests the snooze inline keyboard for that event be attached when the
+/// message is sent; `None` for messages with no snooze keyboard (e.g. the
+/// missed-events batch).
 pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
-    pub snooze: bool,
+    pub event_id: Option<i64>,
 }
 
 /// Channel sender used by the scheduler to hand batches of due/missed messages

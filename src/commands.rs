@@ -289,7 +289,7 @@ pub async fn handle_list_callback(
 }
 
 /// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
-/// value is embedded in the callback data (`sn:<minutes>`).
+/// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
 const SNOOZE_OPTIONS: &[(&str, i64)] = &[
     ("1 min", 1),
     ("5 min", 5),
@@ -301,14 +301,15 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
     ("1 day", 1440),
 ];
 
-/// Hint appended below a fired reminder, explaining the snooze buttons. Stripped
-/// off again when the title is recovered in `handle_snooze_callback`.
+/// Hint appended below a fired reminder, explaining the snooze buttons. Purely
+/// informational — the snooze title is loaded from the stored event, not from
+/// the message text.
 pub const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
 /// Inline keyboard attached to a fired reminder, offering to re-send it after a
-/// fixed delay. Each button carries `sn:<minutes>` callback data; the title is
-/// recovered from the reminder message text when the button is pressed.
-pub fn snooze_keyboard() -> InlineKeyboardMarkup {
+/// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
+/// `<id>` is the fired event's DB id (used to load the event when pressed).
+pub fn snooze_keyboard(event_id: i64) -> InlineKeyboardMarkup {
     // Four buttons on the first row, the rest on the second, to fit narrow screens.
     let rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
         .chunks(4)
@@ -316,12 +317,21 @@ pub fn snooze_keyboard() -> InlineKeyboardMarkup {
             chunk
                 .iter()
                 .map(|(label, minutes)| {
-                    InlineKeyboardButton::callback(*label, format!("sn:{minutes}"))
+                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
                 })
                 .collect()
         })
         .collect();
     InlineKeyboardMarkup::new(rows)
+}
+
+/// Parses snooze callback data `eid:<id>:sn:<minutes>` into `(event_id, minutes)`.
+/// Returns `None` for any malformed input or a non-snooze action.
+fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
+    let rest = data.strip_prefix("eid:")?;
+    let (id, action) = rest.split_once(':')?;
+    let minutes = action.strip_prefix("sn:")?;
+    Some((id.parse::<i64>().ok()?, minutes.parse::<i64>().ok()?))
 }
 
 /// Builds the one-off event a snooze creates: an explicit-year reminder scheduled
@@ -359,39 +369,43 @@ fn snoozed_event(
 
 /// Handles a snooze-button press: creates a new one-off event with the same title
 /// as the fired reminder, scheduled at `now + <minutes>`. The original event is
-/// left untouched. Driven from `main`'s callback-query branch for `sn:`-prefixed
+/// left untouched. Driven from `main`'s callback-query branch for `eid:`-prefixed
 /// callback data.
+///
+/// The target event is identified by id from the callback data
+/// (`eid:<id>:sn:<minutes>`) and loaded from storage. Because callback ids are
+/// attacker-influenceable, the loaded event is only honored when it belongs to the
+/// chat the button was pressed in.
 pub async fn handle_snooze_callback(
     bot: &Bot,
     provider: &EventProvider,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
-    let minutes = q
-        .data
-        .as_deref()
-        .and_then(|d| d.strip_prefix("sn:"))
-        .and_then(|m| m.parse::<i64>().ok());
-    let Some(minutes) = minutes else {
+    let parsed = q.data.as_deref().and_then(parse_snooze_callback);
+    let Some((event_id, minutes)) = parsed else {
         bot.answer_callback_query(q.id).await?;
         return Ok(());
     };
 
-    // Recover the title from the reminder message the button is attached to,
-    // dropping the appended snooze hint.
-    let title = q.regular_message().and_then(|m| m.text()).map(|t| {
-        t.strip_suffix(SNOOZE_HINT)
-            .unwrap_or(t)
-            .trim_end()
-            .to_string()
-    });
-    let Some((message, title)) = q.regular_message().zip(title) else {
+    let Some(message) = q.regular_message() else {
         bot.answer_callback_query(q.id)
             .text("Can't snooze this reminder.")
             .await?;
         return Ok(());
     };
-
     let chat_id = message.chat.id;
+
+    // Load the event and verify it belongs to this chat before acting on it.
+    let title = match provider.get_event(event_id) {
+        Some(event) if event.chat_id == chat_id.0 => event.message,
+        _ => {
+            bot.answer_callback_query(q.id)
+                .text("Can't snooze this reminder.")
+                .await?;
+            return Ok(());
+        }
+    };
+
     let now = Local::now().naive_local();
     let next = now + Duration::minutes(minutes);
     let user_id = q.from.id.0 as i64;
@@ -510,9 +524,41 @@ mod tests {
 
     #[test]
     fn snooze_keyboard_has_a_button_per_option() {
-        let kb = snooze_keyboard();
+        let kb = snooze_keyboard(42);
         let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
         assert_eq!(count, SNOOZE_OPTIONS.len());
+    }
+
+    #[test]
+    fn snooze_keyboard_embeds_event_id_in_callback_data() {
+        use teloxide::types::InlineKeyboardButtonKind;
+
+        let kb = snooze_keyboard(42);
+        for (button, (_, minutes)) in kb
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .zip(SNOOZE_OPTIONS.iter())
+        {
+            let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+                panic!("expected callback-data button");
+            };
+            assert_eq!(data, &format!("eid:42:sn:{minutes}"));
+            assert_eq!(parse_snooze_callback(data), Some((42, *minutes)));
+        }
+    }
+
+    #[test]
+    fn parse_snooze_callback_round_trips_and_rejects_malformed() {
+        assert_eq!(parse_snooze_callback("eid:42:sn:30"), Some((42, 30)));
+        assert_eq!(parse_snooze_callback("eid:-7:sn:1"), Some((-7, 1)));
+
+        // Old format, non-numeric id/minutes, missing parts, and list callbacks.
+        assert_eq!(parse_snooze_callback("sn:30"), None);
+        assert_eq!(parse_snooze_callback("eid:x:sn:30"), None);
+        assert_eq!(parse_snooze_callback("eid:42:sn:"), None);
+        assert_eq!(parse_snooze_callback("eid:42:sn:abc"), None);
+        assert_eq!(parse_snooze_callback("ev:1"), None);
     }
 
     #[test]

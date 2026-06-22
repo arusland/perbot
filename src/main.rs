@@ -66,14 +66,14 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for msg in messages {
-                let text = if msg.snooze {
+                let text = if msg.event_id.is_some() {
                     format!("{}\n\n{}", msg.text, commands::SNOOZE_HINT)
                 } else {
                     msg.text.clone()
                 };
                 let mut req = sender_bot.send_message(ChatId(msg.chat_id), text);
-                if msg.snooze {
-                    req = req.reply_markup(commands::snooze_keyboard());
+                if let Some(event_id) = msg.event_id {
+                    req = req.reply_markup(commands::snooze_keyboard(event_id));
                 }
                 if let Err(e) = req.await {
                     log::error!("Failed to send message to {}: {}", msg.chat_id, e);
@@ -117,9 +117,9 @@ async fn callback_handler(
     q: CallbackQuery,
     provider: EventProvider,
 ) -> ResponseResult<()> {
-    // Snooze buttons on fired reminders carry `sn:<minutes>`; everything else is
-    // list pagination (`<tag>:<page>`).
-    if q.data.as_deref().is_some_and(|d| d.starts_with("sn:")) {
+    // Event-specific callbacks carry the `eid:<id>:…` envelope (snooze is the only
+    // action today); everything else is list pagination (`<tag>:<page>`).
+    if q.data.as_deref().is_some_and(|d| d.starts_with("eid:")) {
         commands::handle_snooze_callback(&bot, &provider, q).await
     } else {
         commands::handle_list_callback(&bot, &provider, q).await
