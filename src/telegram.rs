@@ -65,11 +65,11 @@ pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInf
 fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     let secs = (dt - now).num_seconds();
     if secs <= 0 {
-        return "now".to_string();
+        return "soon".to_string();
     }
     let mins = secs / 60;
     if mins < 1 {
-        return "now".to_string();
+        return "soon".to_string();
     }
     if mins < 60 {
         return format!("{} min{}", mins, if mins == 1 { "" } else { "s" });
@@ -444,8 +444,8 @@ mod tests {
     fn relative_time_units() {
         let now =
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        assert_eq!(at(now, Duration::seconds(30)), "now");
-        assert_eq!(at(now, Duration::seconds(-5)), "now");
+        assert_eq!(at(now, Duration::seconds(30)), "soon");
+        assert_eq!(at(now, Duration::seconds(-5)), "soon");
         assert_eq!(at(now, Duration::minutes(1)), "1 min");
         assert_eq!(at(now, Duration::minutes(13)), "13 mins");
         assert_eq!(at(now, Duration::hours(1)), "1h");
