@@ -57,6 +57,31 @@ cargo run --bin bench      # storage benchmark (1000 events)
 
 - **bin/bench.rs** — Storage throughput benchmark.
 
+## EventInfo fields
+
+`EventInfo` (`types.rs`) carries one reminder end to end. The first group is set by `parser::parse`; the trailing group is filled by storage/scheduling and defaults to zero/`false`/`None` on a freshly parsed value. The time/recurrence fields are largely mutually exclusive — a given message populates whichever one matched.
+
+| Field | Type | Set by | Used when / for |
+|-------|------|--------|-----------------|
+| `date` | `Option<NaiveDate>` | parser | Short date / full date given (`1:23 26.11`, `31.12.2027`). One-off on that calendar day. |
+| `time` | `Option<NaiveTime>` | parser | Clock time given anywhere (`13:23`, `5:24 PM`). Combined with `date`/`days`/`monthly_pattern`/`years`; absent for `in_offset`/`bare_hour`. |
+| `year_explicit` | `bool` | parser | `true` only when a full date spelled the year (`31.12.2027`); controls whether the year in `date` is honored or rolled forward. |
+| `days` | `Option<HashSet<Weekday>>` | parser | Weekday-set recurrence (`13:45 mon-fri`). Fires at `time` on each listed weekday; pairs with `years` to restrict to given years. |
+| `years` | `Option<HashSet<i32>>` | parser | Standalone 4-digit year token(s) in 2000..=2100 (`13:25 2027 fri,sun`). Restricts a `days` schedule to those years. |
+| `repetition` | `Option<Repetition>` | parser | `every <n> <unit>` interval (`every 2 weeks`, `every hour`). Recurs from the start datetime / offset; reused by `scheduler` to advance `next_datetime`. |
+| `in_offset` | `Option<(u32, TimeUnit)>` | parser | Relative offset (`8 min call her`, `2 hours reminder`). Schedules at `now + offset`; with `repetition`, repeats by that interval. Mutually exclusive with `time`/`date`. |
+| `bare_hour` | `Option<u32>` | parser | Leading bare hour 0..=24 (`8 call Alex` → next 08:00, `24` → 00:00). Next occurrence of that hour. |
+| `monthly_pattern` | `Option<MonthlyPattern>` | parser | Ordinal weekday (`first sunday`, `3rd friday`) or last day of month (`last day`). Fires monthly at `time` on the matching day. |
+| `message` | `String` | parser | Remainder after extracting time/date components — the reminder text sent to the user. |
+| `id` | `i64` | storage | DB primary key; `0` before insert, real id after. |
+| `chat_id` | `i64` | storage/caller | Destination chat; set when associating the event with a chat. |
+| `active` | `bool` | scheduler | `true` while the event still has a future occurrence; `mark_inactive` / scheduling clears it when exhausted. |
+| `next_datetime` | `Option<NaiveDateTime>` | scheduler | Next fire time computed by `calc_next[_at]`; `None` when no future occurrence (event becomes inactive). |
+| `created_at` | `NaiveDateTime` | storage/converter | Insertion time; for legacy imports parsed from the `.alert` filename. |
+| `msg_id` | `i64` | storage/caller | FK to the originating `messages` row (`events.msg_id` NOT NULL). |
+| `legacy` | `bool` | converter | `true` for events imported from legacy MateBot `.alert` files. |
+| `snoozed` | `bool` | snooze flow | `true` for one-off events created by `handle_snooze_callback`. |
+
 ## Test Cases
 
 `test-cases.md` holds markdown tables driving `tests/table_tests.rs`. Rows alternate `USER` (parse + `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, assert `next_datetime` or `NONE`). Add scenarios by appending `###` sections — no code changes needed.
