@@ -192,7 +192,6 @@
 | 2026-10-26 11:26:01 | SYSTEM | 2026-11-09 11:26:00                      |           |
 
 ### Case 13: Single weekday — created on that weekday, fires today then repeats weekly
-
 | Current Time        | Actor  | Input / Expected Next   | Message     |
 |---------------------|--------|-------------------------|-------------|
 | 2026-02-20 10:00:00 | USER   | 10:30 fri release day   | release day |
@@ -200,7 +199,15 @@
 | 2026-02-20 10:30:01 | SYSTEM | 2026-02-27 10:30:00     |             |
 | 2026-02-27 10:30:01 | SYSTEM | 2026-03-06 10:30:00     |             |
 
-### Case 13.2: Single weekday — first and last only
+### Case 13.2: "Every friday" — the same as "friday"
+| Current Time        | Actor  | Input / Expected Next   | Message           |
+|---------------------|--------|-------------------------|-------------------|
+| 2026-02-20 10:00:00 | USER   | 10:30 Every  fri release day   | release day |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:30:00           |             |
+| 2026-02-20 10:30:01 | SYSTEM | 2026-02-27 10:30:00           |             |
+| 2026-02-27 10:30:01 | SYSTEM | 2026-03-06 10:30:00           |             |
+
+### Case 13.3: Single weekday — first and last only
 | Current Time        | Actor  | Input / Expected Next   | Message     |
 |---------------------|--------|-------------------------|-------------|
 | 2026-02-20 10:00:00 | USER   | 10:30 fri release day   | release day |

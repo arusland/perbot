@@ -36,8 +36,11 @@ static RE_IN_OFFSET: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_BARE_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,2})\s").unwrap());
 
+// An optional leading "every" is absorbed so "every fri" is treated exactly
+// like "fri" (a weekly recurrence on that weekday set), consuming the word so it
+// does not leak into the message or get misread by RE_EVERY.
 static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
+    Regex::new(r"(?i)\b(?:every\s+)?((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
 });
 
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
@@ -455,6 +458,18 @@ mod tests {
         let expected_days: HashSet<Weekday> = [Weekday::Wed].into_iter().collect();
         assert_eq!(e.days, Some(expected_days));
         assert_eq!(e.message, "meeting");
+    }
+
+    #[test]
+    fn parse_every_weekday_same_as_weekday() {
+        // "every fri" is treated exactly like "fri" — a weekly recurrence on
+        // that weekday, with "every" consumed (not left in the message).
+        let e = parse("10:30 every fri release day").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 30, 0));
+        let expected_days: HashSet<Weekday> = [Weekday::Fri].into_iter().collect();
+        assert_eq!(e.days, Some(expected_days));
+        assert!(e.repetition.is_none());
+        assert_eq!(e.message, "release day");
     }
 
     // --- Repetition tests ---

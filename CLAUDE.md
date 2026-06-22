@@ -88,7 +88,7 @@ cargo run --bin bench      # storage benchmark (1000 events)
 
 ## Datetime formats supported
 - `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / relative offset / short date must lead. Minutes accept 1-2 digits, so `10:6` means `10:06` (`9:5 PM` → 21:05).
-- `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year.
+- `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year. An optional leading `every` is absorbed, so `10:30 every fri` is identical to `10:30 fri`.
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then repeat interval.
 - `8 call Alex` → next 08:00; `24 ...` → 00:00; `25 ...` → invalid (not parsed).
 - `8 min call her`, `8 min every hour` — relative offset, optionally repeating.
