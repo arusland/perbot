@@ -14,9 +14,9 @@ use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, TgMessage};
 /// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
 const SNOOZE_OPTIONS: &[(&str, i64)] = &[
     ("1 min", 1),
-    ("5 min", 5),
-    ("10 min", 10),
-    ("30 min", 30),
+    ("5 mins", 5),
+    ("10 mins", 10),
+    ("30 mins", 30),
     ("1 hour", 60),
     ("2 hours", 120),
     ("8 hours", 480),
