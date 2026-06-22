@@ -2,6 +2,7 @@ use crate::scheduler;
 use crate::types::{ChatInfo, ChatType, EventInfo};
 use chrono::{Local, NaiveDateTime};
 use std::fmt::Write as _;
+use teloxide::utils::html;
 
 /// Maximum upcoming launches previewed for a reminder. A further `• ...` bullet
 /// is shown when more launches follow.
@@ -13,7 +14,8 @@ const MAX_NEXT_PREVIEW: usize = 3;
 /// (no future occurrence). `after` is the baseline (the launch being confirmed
 /// or fired), used as both the search baseline and the relative-time origin, so
 /// the listed launches are strictly after it. Output is plain text; callers
-/// targeting MarkdownV2 escape it with `escape_markdown`.
+/// targeting HTML escape it with `teloxide::utils::html::escape` (the bullets and
+/// datetimes contain no HTML specials, so escaping is a no-op in practice).
 pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String {
     let mut launches: Vec<NaiveDateTime> = Vec::new();
     let mut current = event.clone();
@@ -42,33 +44,20 @@ pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String 
     out
 }
 
-pub fn escape_markdown(text: &str) -> String {
-    let special_chars = [
-        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
-    ];
-    let mut result = String::with_capacity(text.len() * 2);
-    for c in text.chars() {
-        if special_chars.contains(&c) {
-            result.push('\\');
-        }
-        result.push(c);
-    }
-    result
-}
-
 /// Confirmation sent when a reminder is scheduled (new parse or snooze).
-/// MarkdownV2: the bolded title shows the absolute datetime plus the relative
-/// time from `now` (e.g. `13:30 22.06.2026 (1d)`), escaped, followed by a
-/// `Message: <event.message>` line (escaped). For recurring events a "Next
-/// launches" preview is appended (escaped); one-off events (empty preview)
+/// HTML: the bolded title shows the absolute datetime plus the relative time
+/// from `now` (e.g. `13:30 22.06.2026 (1d)`), followed by a
+/// `Message: <event.message>` line. `event.message` is already an HTML fragment
+/// (the user's formatting preserved), so it is embedded verbatim. For recurring
+/// events a "Next launches" preview is appended; one-off events (empty preview)
 /// render as just the title plus the message line.
 pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInfo) -> String {
     let preview = next_launches_preview(event, dt);
     format!(
-        "Scheduled message for *{}*\nMessage: {}{}",
-        escape_markdown(&format_when(now, dt)),
-        escape_markdown(&event.message),
-        escape_markdown(&preview)
+        "Scheduled message for <b>{}</b>\nMessage: {}{}",
+        html::escape(&format_when(now, dt)),
+        event.message,
+        html::escape(&preview)
     )
 }
 
@@ -97,8 +86,8 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
 }
 
 /// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
-/// `14:00 23.06.2026 (1d)`. Unescaped — for plain-text messages such as fired
-/// reminders. List replies use `write_event_row` (MarkdownV2) instead.
+/// `14:00 23.06.2026 (1d)`. Unescaped — for the fired-reminder preview. List
+/// replies use `write_event_row` (HTML) instead.
 pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     format!(
         "{} ({})",
@@ -107,17 +96,15 @@ pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     )
 }
 
-/// Appends a single MarkdownV2 event row (`• datetime (relative) — message`).
+/// Appends a single HTML event row (`• datetime (relative) — message`). The
+/// datetime/relative parts contain no HTML specials; `e.message` is already an
+/// HTML fragment, so it is embedded verbatim.
 fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
     let when = match e.next_datetime {
-        Some(dt) => format!(
-            "{} \\({}\\)",
-            dt.format("%H:%M %d\\.%m\\.%Y"),
-            escape_markdown(&format_relative(now, dt))
-        ),
+        Some(dt) => html::escape(&format_when(now, dt)),
         None => "—".to_string(),
     };
-    let _ = writeln!(out, "• {} — {}", when, escape_markdown(&e.message));
+    let _ = writeln!(out, "• {} — {}", when, e.message);
 }
 
 /// Number of events shown per page in a paginated list reply.
@@ -129,7 +116,7 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
     len.div_ceil(per_page).max(1)
 }
 
-/// Builds the MarkdownV2 reply for a single page of an event list.
+/// Builds the HTML reply for a single page of an event list.
 ///
 /// `title` is the bare heading (e.g. `"Upcoming events"`); a `(page x/y)` suffix
 /// is appended only when there is more than one page. `empty` is the full message
@@ -171,9 +158,14 @@ pub fn format_page_at(
     let slice = &events[start..(start + per_page).min(events.len())];
 
     let mut out = if pages > 1 {
-        format!("*{} \\(page {}/{}\\):*\n", title, page + 1, pages)
+        format!(
+            "<b>{} (page {}/{}):</b>\n",
+            html::escape(title),
+            page + 1,
+            pages
+        )
     } else {
-        format!("*{}:*\n", title)
+        format!("<b>{}:</b>\n", html::escape(title))
     };
     for e in slice {
         write_event_row(&mut out, e, now);
@@ -265,16 +257,34 @@ mod tests {
             NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
         );
         // A one-off event has no upcoming launches, so only the title is shown,
-        // with the relative time (1d) appended and escaped.
+        // with the relative time (1d) appended.
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
             scheduled_message(now, dt, &event),
-            "Scheduled message for *13:05 31\\.12\\.2027 \\(1d\\)*\nMessage: ring in the new year"
+            "Scheduled message for <b>13:05 31.12.2027 (1d)</b>\nMessage: ring in the new year"
         );
     }
 
     #[test]
-    fn scheduled_message_appends_escaped_preview_for_recurring() {
+    fn scheduled_message_embeds_html_message_verbatim() {
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        // `message` is already an HTML fragment; it is embedded as-is.
+        let event = sample_event("<b>call</b> the office", Some(dt));
+        assert_eq!(
+            scheduled_message(now, dt, &event),
+            "Scheduled message for <b>10:00 22.06.2026 (1h)</b>\nMessage: <b>call</b> the office"
+        );
+    }
+
+    #[test]
+    fn scheduled_message_appends_preview_for_recurring() {
         use crate::types::{Repetition, TimeUnit};
         let now = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
@@ -292,12 +302,12 @@ mod tests {
         });
 
         let text = scheduled_message(now, dt, &event);
-        assert!(text.starts_with("Scheduled message for *10:00 22\\.06\\.2026 \\(1h\\)*"));
+        assert!(text.starts_with("Scheduled message for <b>10:00 22.06.2026 (1h)</b>"));
         assert!(text.contains("Message: standup"));
-        // Preview lists launches strictly after the confirmed datetime, escaped.
+        // Preview lists launches strictly after the confirmed datetime.
         assert!(text.contains("Next launches:"));
-        assert!(text.contains("• 10:00 23\\.06\\.2026"));
-        assert!(text.contains("• \\.\\.\\."));
+        assert!(text.contains("• 10:00 23.06.2026"));
+        assert!(text.contains("• ..."));
     }
 
     #[test]
@@ -371,9 +381,9 @@ mod tests {
             0,
             10,
             "Upcoming events",
-            "No upcoming events\\.",
+            "No upcoming events.",
         );
-        assert_eq!(text, "No upcoming events\\.");
+        assert_eq!(text, "No upcoming events.");
         assert_eq!(pages, 1);
     }
 
@@ -383,15 +393,16 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![
             sample_event("call mom", Some(now + Duration::hours(2))),
-            // Markdown special chars in the message must be escaped.
+            // `message` is an HTML fragment, embedded verbatim (parens are not
+            // HTML specials).
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
         let (text, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
         assert_eq!(pages, 1);
-        assert!(text.starts_with("*Upcoming events:*\n"));
-        assert!(text.contains("14:00 15\\.06\\.2026 \\(2h\\)"));
-        assert!(text.contains("pay rent \\(urgent\\)"));
-        assert!(text.contains("\\(3d\\)"));
+        assert!(text.starts_with("<b>Upcoming events:</b>\n"));
+        assert!(text.contains("14:00 15.06.2026 (2h)"));
+        assert!(text.contains("pay rent (urgent)"));
+        assert!(text.contains("(3d)"));
     }
 
     #[test]
@@ -400,8 +411,8 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
         let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none");
-        assert!(text.starts_with("*Today's events:*\n"));
-        assert!(text.contains("10:00 16\\.06\\.2026 \\(1h\\)"));
+        assert!(text.starts_with("<b>Today's events:</b>\n"));
+        assert!(text.contains("10:00 16.06.2026 (1h)"));
         assert!(text.contains("standup"));
     }
 
@@ -416,14 +427,14 @@ mod tests {
         // First page: 10 rows, labelled 1/3.
         let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
         assert_eq!(pages, 3);
-        assert!(p0.starts_with("*Upcoming events \\(page 1/3\\):*\n"));
+        assert!(p0.starts_with("<b>Upcoming events (page 1/3):</b>\n"));
         assert!(p0.contains("event 0"));
         assert!(p0.contains("event 9"));
         assert!(!p0.contains("event 10"));
 
         // Last page: only 5 rows, labelled 3/3. Out-of-range page clamps to last.
         let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none");
-        assert!(p_last.starts_with("*Upcoming events \\(page 3/3\\):*\n"));
+        assert!(p_last.starts_with("<b>Upcoming events (page 3/3):</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
         assert_eq!(p_last.lines().count(), 1 + 5);

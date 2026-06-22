@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{Local, NaiveDate, NaiveDateTime};
 
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::utils::html;
 
 use crate::error::Result;
 use crate::scheduler;
@@ -313,10 +314,17 @@ impl EventProvider {
                     let messages: Vec<TgMessage> = events
                         .iter()
                         .map(|e| {
+                            // `e.message` is already an HTML fragment; the preview
+                            // and hint are plain text, so escape them for HTML.
                             let preview = crate::telegram::next_launches_preview(e, dt);
                             TgMessage {
                                 chat_id: e.chat_id,
-                                text: format!("{}{}\n\n{}", e.message, preview, SNOOZE_HINT),
+                                text: format!(
+                                    "{}{}\n\n{}",
+                                    e.message,
+                                    html::escape(&preview),
+                                    html::escape(SNOOZE_HINT)
+                                ),
                                 reply_markup: Some(snooze_keyboard(e.id)),
                             }
                         })

@@ -11,6 +11,7 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use regex::Regex;
+use teloxide::utils::html;
 
 use crate::scheduler;
 use crate::types::{EventInfo, Repetition, TimeUnit};
@@ -284,7 +285,9 @@ pub fn convert(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| input.trim().to_string());
 
-    let mut event = base_event(chat_id, created_at, message);
+    // `EventInfo.message` is an HTML fragment; legacy text has no formatting, so
+    // escape it into a safe plain fragment.
+    let mut event = base_event(chat_id, created_at, html::escape(&message));
 
     if let Some(p) = &parse {
         event.time = Some(p.time);

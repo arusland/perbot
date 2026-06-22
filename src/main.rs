@@ -4,12 +4,13 @@ use perbot::import::{self, PendingImport};
 use perbot::parser;
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{escape_markdown, extract_chat_info, scheduled_message};
+use perbot::telegram::{extract_chat_info, scheduled_message};
 use perbot::types::TgMessage;
 use teloxide::{
     prelude::*,
     types::{BotCommandScope, ParseMode},
     utils::command::BotCommands,
+    utils::html,
 };
 use tokio::sync::mpsc;
 
@@ -29,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("TG_BOT_TOKEN").context("TG_BOT_TOKEN environment variable not set")?;
     let bot = Bot::new(token);
     if let Err(e) = bot
-        .send_message(admin_id, "*Bot started*")
-        .parse_mode(ParseMode::MarkdownV2)
+        .send_message(admin_id, "<b>Bot started</b>")
+        .parse_mode(ParseMode::Html)
         .await
     {
         log::warn!("Failed to send startup message: {}", e);
@@ -66,7 +67,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for msg in messages {
-                let mut req = sender_bot.send_message(ChatId(msg.chat_id), msg.text);
+                // Every routed `text` is an HTML fragment (the reminder body may
+                // carry the user's formatting), so always send as HTML.
+                let mut req = sender_bot
+                    .send_message(ChatId(msg.chat_id), msg.text)
+                    .parse_mode(ParseMode::Html);
                 if let Some(kb) = msg.reply_markup {
                     req = req.reply_markup(kb);
                 }
@@ -171,9 +176,13 @@ async fn message_handler(
             return Ok(());
         }
 
-        if let Some(mut event) = parser::parse(text) {
+        if let Some((mut event, spans)) = parser::parse_full(text) {
             event.chat_id = msg.chat.id.0;
             event.msg_id = msg_id;
+            // Preserve the user's formatting: render the surviving message body
+            // as an HTML fragment, re-mapping the message's entities onto it.
+            let entities = msg.parse_entities().unwrap_or_default();
+            event.message = perbot::richtext::render_html(text, &spans, &entities);
 
             let stored = provider.insert_event_and_get(event);
 
@@ -181,43 +190,43 @@ async fn message_handler(
                 let now = chrono::Local::now().naive_local();
                 scheduled_message(now, dt, &stored)
             } else {
-                format!("*{}*", escape_markdown(text))
+                format!("<b>{}</b>", html::escape(text))
             }
         } else {
-            format!("Unparsable message: *{}*", escape_markdown(text))
+            format!("Unparsable message: <b>{}</b>", html::escape(text))
         }
     } else if msg.photo().is_some() {
-        "Received a photo\\!".to_string()
+        "Received a photo!".to_string()
     } else if msg.video().is_some() {
-        "Received a video\\!".to_string()
+        "Received a video!".to_string()
     } else if msg.audio().is_some() {
-        "Received an audio file\\!".to_string()
+        "Received an audio file!".to_string()
     } else if msg.voice().is_some() {
-        "Received a voice message\\!".to_string()
+        "Received a voice message!".to_string()
     } else if msg.document().is_some() {
-        "Received a document\\!".to_string()
+        "Received a document!".to_string()
     } else if msg.sticker().is_some() {
-        "Received a sticker\\!".to_string()
+        "Received a sticker!".to_string()
     } else if msg.animation().is_some() {
-        "Received an animation\\!".to_string()
+        "Received an animation!".to_string()
     } else if msg.video_note().is_some() {
-        "Received a video note\\!".to_string()
+        "Received a video note!".to_string()
     } else if msg.contact().is_some() {
-        "Received a contact\\!".to_string()
+        "Received a contact!".to_string()
     } else if msg.location().is_some() {
-        "Received a location\\!".to_string()
+        "Received a location!".to_string()
     } else if msg.venue().is_some() {
-        "Received a venue\\!".to_string()
+        "Received a venue!".to_string()
     } else if msg.poll().is_some() {
-        "Received a poll\\!".to_string()
+        "Received a poll!".to_string()
     } else if msg.dice().is_some() {
-        "Received a dice\\!".to_string()
+        "Received a dice!".to_string()
     } else {
-        "Received an unknown message type\\!".to_string()
+        "Received an unknown message type!".to_string()
     };
 
     bot.send_message(msg.chat.id, reply_text)
-        .parse_mode(ParseMode::MarkdownV2)
+        .parse_mode(ParseMode::Html)
         .await?;
 
     Ok(())

@@ -1,6 +1,7 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveTime, Weekday};
 use regex::Regex;
 use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use crate::types::{
@@ -65,6 +66,61 @@ fn ordinal_from_str(s: &str) -> Option<Ordinal> {
     }
 }
 
+/// The working message text plus the byte ranges of the *original* input that
+/// survive token extraction, kept in lockstep so callers can map message
+/// entities (whose offsets reference the original text) onto the leftover body.
+///
+/// `spans` are original-input byte ranges in order; their concatenation always
+/// equals `text`. Every parser deletion is a single contiguous removal, applied
+/// via [`Remaining::delete`].
+struct Remaining {
+    text: String,
+    spans: Vec<Range<usize>>,
+}
+
+impl Remaining {
+    fn new(input: &str) -> Self {
+        let spans = if input.is_empty() {
+            Vec::new()
+        } else {
+            // One span covering the whole input (not a Vec of its indices).
+            std::iter::once(0..input.len()).collect()
+        };
+        Self {
+            text: input.to_string(),
+            spans,
+        }
+    }
+
+    /// Removes `cur` (a byte range in the *current* `text`) from both `text` and
+    /// the surviving-span map.
+    fn delete(&mut self, cur: Range<usize>) {
+        self.text = format!("{}{}", &self.text[..cur.start], &self.text[cur.end..]);
+
+        let mut new_spans: Vec<Range<usize>> = Vec::new();
+        let mut pos = 0usize; // current-coord offset at the start of each span
+        for span in &self.spans {
+            let len = span.end - span.start;
+            let span_start = pos; // this span's range in current coords
+            let span_end = pos + len;
+
+            // Keep the portion before the deletion.
+            if span_start < cur.start {
+                let keep_end = cur.start.min(span_end);
+                new_spans.push(span.start..span.start + (keep_end - span_start));
+            }
+            // Keep the portion after the deletion.
+            if span_end > cur.end {
+                let keep_start = cur.end.max(span_start);
+                new_spans.push(span.start + (keep_start - span_start)..span.end);
+            }
+            pos = span_end;
+        }
+        new_spans.retain(|s| s.start < s.end);
+        self.spans = new_spans;
+    }
+}
+
 /// Parses a natural-language reminder from `input`.
 ///
 /// Extracts the time/date components (see module regexes) and returns an
@@ -72,7 +128,15 @@ fn ordinal_from_str(s: &str) -> Option<Ordinal> {
 /// time component is found or nothing is left for the message body. The
 /// DB-tracking fields are left at their defaults (zero/false/None).
 pub fn parse(input: &str) -> Option<EventInfo> {
-    let mut remaining = input.to_string();
+    parse_full(input).map(|(event, _)| event)
+}
+
+/// Like [`parse`] but also returns the byte ranges of `input` that compose the
+/// message body (before whitespace normalization). Their concatenation equals
+/// the pre-normalized leftover text; `crate::richtext` uses them to re-map the
+/// message's formatting entities onto the surviving body.
+pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    let mut rem = Remaining::new(input);
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
     let mut year_explicit = false;
@@ -83,20 +147,23 @@ pub fn parse(input: &str) -> Option<EventInfo> {
     let mut monthly_pattern: Option<MonthlyPattern> = None;
 
     // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
-    if let Some(caps) = RE_IN_OFFSET.captures(&remaining)
+    if let Some(caps) = RE_IN_OFFSET.captures(&rem.text)
         && let Ok(n) = caps[1].parse::<u32>()
         && let Some(unit) = unit_from_str(&caps[2])
     {
+        let end = caps.get(0).unwrap().end();
         in_offset = Some((n, unit));
-        remaining = remaining[caps.get(0).unwrap().end()..].to_string();
+        rem.delete(0..end);
     }
 
     if in_offset.is_none() {
         // 12h time (must be checked before 24h to avoid partial match)
-        if let Some(caps) = RE_TIME_12H.captures(&remaining) {
+        if let Some(caps) = RE_TIME_12H.captures(&rem.text) {
             let mut hour: u32 = caps[1].parse().ok()?;
             let minute: u32 = caps[2].parse().ok()?;
             let ampm = caps[3].to_ascii_uppercase();
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
 
             if hour > 12 || minute >= 60 || hour == 0 {
                 return None;
@@ -109,51 +176,55 @@ pub fn parse(input: &str) -> Option<EventInfo> {
             }
 
             time = Some(NaiveTime::from_hms_opt(hour, minute, 0)?);
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
-        } else if let Some(caps) = RE_TIME_24H.captures(&remaining) {
+            rem.delete(start..end);
+        } else if let Some(caps) = RE_TIME_24H.captures(&rem.text) {
             let hour: u32 = caps[1].parse().ok()?;
             let minute: u32 = caps[2].parse().ok()?;
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
 
             time = Some(NaiveTime::from_hms_opt(hour, minute, 0)?);
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
+            rem.delete(start..end);
         }
 
         // Bare hour: "8 call Alex" -> bare_hour=8, "0 call Sacha" -> bare_hour=0
         if time.is_none()
-            && let Some(caps) = RE_BARE_HOUR.captures(&remaining)
+            && let Some(caps) = RE_BARE_HOUR.captures(&rem.text)
             && let Ok(n) = caps[1].parse::<u32>()
             && n <= 24
         {
+            let end = caps.get(0).unwrap().end();
             bare_hour = Some(n);
-            remaining = remaining[caps.get(0).unwrap().end()..].to_string();
+            rem.delete(0..end);
         }
 
         // Full date (must be checked before short date)
-        if let Some(caps) = RE_DATE_FULL.captures(&remaining) {
+        if let Some(caps) = RE_DATE_FULL.captures(&rem.text) {
             let day: u32 = caps[1].parse().ok()?;
             let month: u32 = caps[2].parse().ok()?;
             let year: i32 = caps[3].parse().ok()?;
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
 
             date = Some(NaiveDate::from_ymd_opt(year, month, day)?);
             year_explicit = true;
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
-        } else if let Some(caps) = RE_DATE_SHORT.captures(&remaining) {
+            rem.delete(start..end);
+        } else if let Some(caps) = RE_DATE_SHORT.captures(&rem.text) {
             let day: u32 = caps[1].parse().ok()?;
             let month: u32 = caps[2].parse().ok()?;
             let year = Local::now().year();
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
 
             date = Some(NaiveDate::from_ymd_opt(year, month, day)?);
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
+            rem.delete(start..end);
         }
 
         // Years: "2027", "2027,2028" — only when no full date was already parsed
         if date.is_none()
-            && let Some(m) = RE_YEARS.find(&remaining)
+            && let Some(m) = RE_YEARS.find(&rem.text)
         {
+            let (mstart, mend) = (m.start(), m.end());
             let year_set: HashSet<i32> = m
                 .as_str()
                 .split(',')
@@ -162,15 +233,17 @@ pub fn parse(input: &str) -> Option<EventInfo> {
                 .collect();
             if !year_set.is_empty() {
                 years = Some(year_set);
-                remaining = remaining[..m.start()].to_string() + &remaining[m.end()..];
+                rem.delete(mstart..mend);
             }
         }
 
         // Monthly pattern: "first sunday", "last monday", "last day of the month"
-        if let Some(caps) = RE_MONTHLY.captures(&remaining)
+        if let Some(caps) = RE_MONTHLY.captures(&rem.text)
             && let Some(ord) = ordinal_from_str(&caps[1])
         {
             let target = caps[2].to_ascii_lowercase();
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
             let pattern = if target == "day" {
                 if ord == Ordinal::Last {
                     Some(MonthlyPattern::LastDay)
@@ -183,37 +256,38 @@ pub fn parse(input: &str) -> Option<EventInfo> {
 
             if pattern.is_some() {
                 monthly_pattern = pattern;
-                remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                    + &remaining[caps.get(0).unwrap().end()..];
+                rem.delete(start..end);
             }
         }
 
         // Days of week (skip if monthly pattern already matched)
         if monthly_pattern.is_none()
-            && let Some(caps) = RE_DAYS.captures(&remaining)
+            && let Some(caps) = RE_DAYS.captures(&rem.text)
             && let Some(parsed) = parse_days(&caps[1])
         {
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
             days = Some(parsed);
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
+            rem.delete(start..end);
         }
     }
 
     // Repetition: "every N unit" or "every unit" (checked for both offset and time modes)
     let mut repetition: Option<Repetition> = None;
-    if let Some(caps) = RE_EVERY.captures(&remaining) {
+    if let Some(caps) = RE_EVERY.captures(&rem.text) {
         let interval: u32 = caps
             .get(1)
             .map(|m| m.as_str().parse().unwrap_or(1))
             .unwrap_or(1);
         if let Some(unit) = unit_from_str(&caps[2]) {
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
             repetition = Some(Repetition { interval, unit });
-            remaining = remaining[..caps.get(0).unwrap().start()].to_string()
-                + &remaining[caps.get(0).unwrap().end()..];
+            rem.delete(start..end);
         }
     }
 
-    let message = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
+    let message = rem.text.split_whitespace().collect::<Vec<_>>().join(" ");
 
     if time.is_none()
         && date.is_none()
@@ -227,7 +301,7 @@ pub fn parse(input: &str) -> Option<EventInfo> {
         return None;
     }
 
-    Some(EventInfo {
+    let event = EventInfo {
         date,
         time,
         year_explicit,
@@ -246,13 +320,62 @@ pub fn parse(input: &str) -> Option<EventInfo> {
         msg_id: 0,
         legacy: false,
         snoozed: false,
-    })
+    };
+    Some((event, rem.spans))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Datelike;
+
+    /// Concatenates the surviving spans back out of the original input.
+    fn concat_spans(input: &str, spans: &[Range<usize>]) -> String {
+        spans.iter().map(|s| &input[s.clone()]).collect()
+    }
+
+    #[test]
+    fn parse_full_spans_concatenate_to_leftover() {
+        // Leading time prefix removed.
+        let input = "13:23 lunch meeting";
+        let (e, spans) = parse_full(input).unwrap();
+        let leftover = concat_spans(input, &spans);
+        assert_eq!(leftover, " lunch meeting");
+        assert_eq!(
+            leftover.split_whitespace().collect::<Vec<_>>().join(" "),
+            e.message
+        );
+    }
+
+    #[test]
+    fn parse_full_spans_handle_mid_text_time_removal() {
+        // A clock time is matched anywhere, so the removed range is in the
+        // middle/end of the body; the surviving spans skip exactly that range.
+        let input = "call office at 17:00";
+        let (e, spans) = parse_full(input).unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(17, 0, 0));
+        let leftover = concat_spans(input, &spans);
+        assert_eq!(leftover, "call office at ");
+        assert_eq!(
+            leftover.split_whitespace().collect::<Vec<_>>().join(" "),
+            e.message
+        );
+        assert_eq!(e.message, "call office at");
+    }
+
+    #[test]
+    fn parse_full_spans_handle_multiple_removals() {
+        // Time + short date + weekday all stripped; spans still reconstruct the
+        // exact leftover and normalize to the message.
+        let input = "9:00 AM 15.03 sun,sat weekend task";
+        let (e, spans) = parse_full(input).unwrap();
+        let leftover = concat_spans(input, &spans);
+        assert_eq!(
+            leftover.split_whitespace().collect::<Vec<_>>().join(" "),
+            e.message
+        );
+        assert_eq!(e.message, "weekend task");
+    }
 
     #[test]
     fn parse_24h_time_with_message() {

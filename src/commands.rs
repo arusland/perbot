@@ -46,7 +46,7 @@ impl ListKind {
         }
     }
 
-    /// Bare heading (no markdown markers); `format_page_at` adds `*…:*`.
+    /// Bare heading (no markup); `format_page_at` wraps it in `<b>…:</b>`.
     fn title(self) -> &'static str {
         match self {
             ListKind::Events => "Upcoming events",
@@ -57,14 +57,14 @@ impl ListKind {
         }
     }
 
-    /// Message shown when the list is empty.
+    /// Message shown when the list is empty (plain text, HTML-safe).
     fn empty(self) -> &'static str {
         match self {
-            ListKind::Events => "No upcoming events\\.",
-            ListKind::Today => "No events today\\.",
-            ListKind::Tomorrow => "No events tomorrow\\.",
-            ListKind::Week => "No events this week\\.",
-            ListKind::Month => "No events this month\\.",
+            ListKind::Events => "No upcoming events.",
+            ListKind::Today => "No events today.",
+            ListKind::Tomorrow => "No events tomorrow.",
+            ListKind::Week => "No events this week.",
+            ListKind::Month => "No events this month.",
         }
     }
 
@@ -207,7 +207,7 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
     let mut req = ctx
         .bot
         .send_message(ctx.chat_id, &text)
-        .parse_mode(ParseMode::MarkdownV2);
+        .parse_mode(ParseMode::Html);
     if let Some(kb) = list_keyboard(kind, 0, total_pages) {
         req = req.reply_markup(kb);
     }
@@ -273,7 +273,7 @@ pub async fn handle_list_callback(
 
     let mut req = bot
         .edit_message_text(chat_id, message_id, &text)
-        .parse_mode(ParseMode::MarkdownV2);
+        .parse_mode(ParseMode::Html);
     if let Some(kb) = list_keyboard(kind, page, total_pages) {
         req = req.reply_markup(kb);
     }
@@ -359,6 +359,8 @@ pub async fn handle_snooze_callback(
     let chat_id = message.chat.id;
 
     // Load the event and verify it belongs to this chat before acting on it.
+    // `event.message` is an HTML fragment, so the snoozed copy keeps the user's
+    // formatting verbatim.
     let title = match provider.get_event(event_id) {
         Some(event) if event.chat_id == chat_id.0 => event.message,
         _ => {
@@ -396,7 +398,7 @@ pub async fn handle_snooze_callback(
 
     bot.answer_callback_query(q.id).await?;
     bot.send_message(chat_id, scheduled_message(now, next, &event))
-        .parse_mode(ParseMode::MarkdownV2)
+        .parse_mode(ParseMode::Html)
         .await?;
     Ok(())
 }

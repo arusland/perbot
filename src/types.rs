@@ -29,7 +29,14 @@ pub struct EventInfo {
     pub bare_hour: Option<u32>,
     /// "first sunday", "last monday", "last day of the month"
     pub monthly_pattern: Option<MonthlyPattern>,
-    /// remainder after extracting all time/date components
+    /// The reminder body as an **HTML fragment**, ready to embed in
+    /// `ParseMode::Html` output. It is the text left after extracting all
+    /// time/date components, with the user's Telegram formatting (bold, italic,
+    /// links, …) preserved as HTML tags. Plain messages are escaped HTML (so
+    /// `<`/`>`/`&` are safe). The parser fills this with the *plain* extracted
+    /// text as a transient value; `main` replaces it with the HTML rendering
+    /// (`crate::richtext::render_html`) before persisting. Every consumer
+    /// (confirmation, lists, fired reminder, snooze) reads the HTML form.
     pub message: String,
     pub id: i64,
     pub chat_id: i64,
@@ -141,7 +148,8 @@ pub struct ChatInfo {
 /// producer chose for it. `reply_markup` is `Some(..)` when the message should
 /// carry buttons (e.g. the snooze keyboard on a fired reminder) and `None`
 /// otherwise (e.g. the missed-events batch). The sender task forwards both
-/// verbatim — it does not decide which buttons a message gets.
+/// verbatim — it does not decide which buttons a message gets. `text` is always
+/// an HTML fragment; the sender always sends it with `ParseMode::Html`.
 pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
