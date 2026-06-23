@@ -287,7 +287,12 @@ pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
     }
 
-    let message = rem.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Derive the plain message from the same normalization `richtext` uses for
+    // the HTML fragment (single source of truth): horizontal whitespace within a
+    // line collapses to single spaces, line breaks are preserved verbatim. The
+    // surviving spans concatenate to `rem.text`, so this processes the same
+    // characters.
+    let (message, _) = crate::richtext::normalize(input, &rem.spans);
 
     if time.is_none()
         && date.is_none()
@@ -463,6 +468,21 @@ mod tests {
         );
         assert!(e.year_explicit);
         assert_eq!(e.message, "fireworks");
+    }
+
+    #[test]
+    fn parse_preserves_newline_in_message() {
+        let e = parse("13:30 line one\nline two").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(13, 30, 0));
+        assert_eq!(e.message, "line one\nline two");
+    }
+
+    #[test]
+    fn parse_preserves_blank_line_in_message() {
+        // Horizontal whitespace within each line collapses, but the blank line
+        // (two newlines) survives verbatim.
+        let e = parse("9:00 buy   milk\n\ncall  mom").unwrap();
+        assert_eq!(e.message, "buy milk\n\ncall mom");
     }
 
     #[test]

@@ -67,8 +67,8 @@ fn parse_tables(content: &str) -> Vec<Table> {
             current_rows.push(TableRow {
                 ts,
                 actor,
-                value: cols[2].to_string(),
-                message: cols.get(3).map(|s| s.to_string()),
+                value: unescape(cols[2]),
+                message: cols.get(3).map(|s| unescape(s)),
                 original: trimmed.to_string(),
             });
         } else {
@@ -93,6 +93,13 @@ fn parse_tables(content: &str) -> Vec<Table> {
     }
 
     tables
+}
+
+/// Decodes the literal two-char `\n` escape into a real newline, so a multiline
+/// message can be expressed inside a single markdown table cell (which cannot
+/// contain a real line break).
+fn unescape(s: &str) -> String {
+    s.replace("\\n", "\n")
 }
 
 fn format_table_with_arrows(rows: &[TableRow], actuals: &[(usize, String)]) -> String {

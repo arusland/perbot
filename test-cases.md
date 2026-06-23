@@ -7,6 +7,7 @@
 * When actor is USER, third column contains user's input in chat like "12:45 call Poly", test framework should parse it as EventInfo and than map it to StoredEvent (now it's current StoredEvent)
 * When actor is SYSTEM, test framework call function storage::play_at with current StoredEvent and current time from first column. Now returned value is new current StoredEvent. And current event's next_datetime must be equals to the time in third column (format YYYY-MM-DD HH:MM:SS). If after call play_at new StoredEvent.active==false then third column must be NONE.
 * Fourth column holds the pure reminder message. When actor is USER it must equal the parsed `event.message`; when actor is SYSTEM it is left empty.
+* A literal `\n` in the Input or Message column is decoded to a real newline (a markdown table cell cannot hold a line break), so multiline messages can be expressed.
 
 ## Cases
 
@@ -615,3 +616,11 @@
 | 2026-02-20 09:00:00 | USER   | 10:6 standup          | standup |
 | 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 10:06:00   |         |
 | 2026-02-20 10:06:01 | SYSTEM | NONE                  |         |
+
+### Case 42: Multiline message — line breaks preserved, fires once
+
+| Current Time        | Actor  | Input / Expected Next       | Message            |
+|---------------------|--------|-----------------------------|--------------------|
+| 2026-02-20 09:00:00 | USER   | 12:45 buy milk\ncall mom    | buy milk\ncall mom |
+| 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 12:45:00         |                    |
+| 2026-02-20 12:45:01 | SYSTEM | NONE                        |                    |
