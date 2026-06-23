@@ -122,6 +122,8 @@ pub enum Command {
     Month,
     #[command(description = "import legacy alerts for a chat (admin only)", hide)]
     Import(i64),
+    #[command(description = "download the database file (admin only)", hide)]
+    Database,
     #[command(description = "shut the bot down (admin only)", hide)]
     Exit,
 }
@@ -147,6 +149,7 @@ impl Command {
             Command::Week => handle_list(&ctx, ListKind::Week).await,
             Command::Month => handle_list(&ctx, ListKind::Month).await,
             Command::Import(user_id) => handle_import(&ctx, user_id).await,
+            Command::Database => handle_database(&ctx).await,
             Command::Exit => handle_exit(&ctx).await,
         }
     }
@@ -159,6 +162,7 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
         help.push_str(
             "\n\nAdmin commands:\n\
              /import <user_id> — import legacy alerts for a chat\n\
+             /database — download the database file\n\
              /exit — shut the bot down",
         );
     }
@@ -491,6 +495,35 @@ pub async fn handle_import_zip(
                 .await?;
         }
     }
+    Ok(())
+}
+
+/// Sends a consistent snapshot of the SQLite database back as a document.
+/// Admin-only; non-admins get a rejection reply. The bot holds an open connection,
+/// so we snapshot via `VACUUM INTO` (a temp file) rather than copying the live file,
+/// then clean the snapshot up.
+async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+    if !ctx.is_admin {
+        ctx.bot.send_message(ctx.chat_id, "Not authorized.").await?;
+        return Ok(());
+    }
+
+    let snapshot = std::env::temp_dir().join("perbot-db-snapshot.sqlite");
+    // VACUUM INTO requires the destination not to exist.
+    let _ = std::fs::remove_file(&snapshot);
+    if let Err(e) = ctx.provider.backup_database(&snapshot) {
+        log::error!("Failed to snapshot database: {e}");
+        ctx.bot
+            .send_message(ctx.chat_id, format!("Failed to snapshot database: {e}"))
+            .await?;
+        return Ok(());
+    }
+
+    let doc = InputFile::file(&snapshot).file_name("perbot.db");
+    if let Err(e) = ctx.bot.send_document(ctx.chat_id, doc).await {
+        log::error!("Failed to send database to chat {}: {e}", ctx.chat_id.0);
+    }
+    let _ = std::fs::remove_file(&snapshot);
     Ok(())
 }
 

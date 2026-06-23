@@ -80,6 +80,13 @@ impl EventProvider {
         inner.storage.upsert_chat(chat)
     }
 
+    /// Writes a consistent snapshot of the database to `dest` (see
+    /// `EventStorage::backup_to`). Used by the admin `/database` command.
+    pub fn backup_database<P: AsRef<std::path::Path>>(&self, dest: P) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.backup_to(dest)
+    }
+
     pub fn insert_message(&self, user_id: Option<i64>, chat_id: i64, message: &str) -> Result<i64> {
         let inner = self.inner.lock().unwrap();
         let msg = MessageInfo {

@@ -103,6 +103,15 @@ impl EventStorage {
         Ok(storage)
     }
 
+    /// Writes a consistent snapshot of the database to `dest` using `VACUUM INTO`.
+    /// `dest` must not already exist (SQLite requirement); the caller removes it
+    /// first. Yields a self-contained copy regardless of journal mode.
+    pub fn backup_to<P: AsRef<Path>>(&self, dest: P) -> Result<()> {
+        let path = dest.as_ref().to_string_lossy();
+        self.conn.execute("VACUUM INTO ?1", [path.as_ref()])?;
+        Ok(())
+    }
+
     /// Initializes the database schema.
     fn init_schema(&self) -> Result<()> {
         self.conn.execute_batch("PRAGMA foreign_keys = ON")?;
