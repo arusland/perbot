@@ -124,6 +124,8 @@ pub enum Command {
     Import(i64),
     #[command(description = "download the database file (admin only)", hide)]
     Database,
+    #[command(description = "download the current log file (admin only)", hide)]
+    Logs,
     #[command(description = "shut the bot down (admin only)", hide)]
     Exit,
 }
@@ -150,6 +152,7 @@ impl Command {
             Command::Month => handle_list(&ctx, ListKind::Month).await,
             Command::Import(user_id) => handle_import(&ctx, user_id).await,
             Command::Database => handle_database(&ctx).await,
+            Command::Logs => handle_logs(&ctx).await,
             Command::Exit => handle_exit(&ctx).await,
         }
     }
@@ -163,6 +166,7 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
             "\n\nAdmin commands:\n\
              /import <user_id> — import legacy alerts for a chat\n\
              /database — download the database file\n\
+             /logs — download the current log file\n\
              /exit — shut the bot down",
         );
     }
@@ -524,6 +528,31 @@ async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
         log::error!("Failed to send database to chat {}: {e}", ctx.chat_id.0);
     }
     let _ = std::fs::remove_file(&snapshot);
+    Ok(())
+}
+
+/// Sends the current log file back as a document. Admin-only; non-admins get a
+/// rejection reply. The log file is append-only text, so it is sent directly
+/// (no snapshot needed).
+async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+    if !ctx.is_admin {
+        ctx.bot.send_message(ctx.chat_id, "Not authorized.").await?;
+        return Ok(());
+    }
+
+    let path = crate::logger::current_log_path();
+    log::info!("Sending log file: {:?}", path);
+    if !path.exists() {
+        ctx.bot
+            .send_message(ctx.chat_id, "No log file found.")
+            .await?;
+        return Ok(());
+    }
+
+    let doc = InputFile::file(&path).file_name("perbot.log");
+    if let Err(e) = ctx.bot.send_document(ctx.chat_id, doc).await {
+        log::error!("Failed to send logs to chat {}: {e}", ctx.chat_id.0);
+    }
     Ok(())
 }
 

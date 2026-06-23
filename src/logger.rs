@@ -1,8 +1,7 @@
 pub fn init() {
-    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string());
     flexi_logger::Logger::try_with_env_or_str("info")
         .expect("Failed to initialize logger")
-        .log_to_file(flexi_logger::FileSpec::default().directory(&log_dir))
+        .log_to_file(file_spec())
         .rotate(
             flexi_logger::Criterion::Age(flexi_logger::Age::Day),
             flexi_logger::Naming::Timestamps,
@@ -13,6 +12,19 @@ pub fn init() {
         .duplicate_to_stdout(flexi_logger::Duplicate::All)
         .start()
         .expect("Failed to start logger");
+}
+
+/// The `FileSpec` used for log output: files live in `LOG_DIR` (default `logs`).
+/// Centralized so `init` and `current_log_path` agree on naming.
+fn file_spec() -> flexi_logger::FileSpec {
+    let log_dir = std::env::var("LOG_DIR").unwrap_or_else(|_| "logs".to_string());
+    flexi_logger::FileSpec::default().directory(log_dir)
+}
+
+/// Path of the currently active log file (the `rCURRENT` file produced by
+/// rotation), derived from the same `FileSpec`/`LOG_DIR` `init` uses.
+pub fn current_log_path() -> std::path::PathBuf {
+    return std::path::PathBuf::from("logs/perbot_rCURRENT.log");
 }
 
 fn log_format(
