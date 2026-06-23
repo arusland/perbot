@@ -211,6 +211,7 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
+        matches!(kind, ListKind::Events),
     );
 
     let mut req = ctx
@@ -277,6 +278,7 @@ pub async fn handle_list_callback(
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
+        matches!(kind, ListKind::Events),
     );
     let page = page.min(total_pages.saturating_sub(1));
 

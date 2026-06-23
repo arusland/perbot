@@ -107,6 +107,56 @@ fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
     let _ = writeln!(out, "• {} — {}", when, e.message);
 }
 
+/// Max characters of message shown in the two-line `/events` row before it is
+/// truncated with a trailing `...`.
+const MESSAGE_PREVIEW_MAX: usize = 50;
+
+/// Plain-text, newline-free preview of an HTML message fragment, truncated to
+/// `max` characters (chars, not bytes) with a trailing `...` when longer.
+/// Strips HTML tags, unescapes the three specials `teloxide::utils::html::escape`
+/// emits (`&amp; &lt; &gt;`), and collapses all whitespace (incl. newlines) to
+/// single spaces. The result is plain text; callers targeting HTML must escape it.
+fn message_preview(html_fragment: &str, max: usize) -> String {
+    // Strip tags: drop everything between '<' and the next '>'.
+    let mut stripped = String::with_capacity(html_fragment.len());
+    let mut in_tag = false;
+    for c in html_fragment.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => stripped.push(c),
+            _ => {}
+        }
+    }
+    // Unescape: do `&lt;`/`&gt;` before `&amp;` so an escaped `&` is not turned
+    // into the start of another entity.
+    let unescaped = stripped
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    // Collapse all whitespace (incl. newlines) to single spaces; trim ends.
+    let collapsed = unescaped.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Truncate by char count for UTF-8 safety.
+    if collapsed.chars().count() > max {
+        let head: String = collapsed.chars().take(max).collect();
+        format!("{head}...")
+    } else {
+        collapsed
+    }
+}
+
+/// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
+/// line, then an indented plain-text message preview (tags stripped, truncated).
+/// The preview is plain text, so it is HTML-escaped before output.
+fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+    let when = match e.next_datetime {
+        Some(dt) => html::escape(&format_when(now, dt)),
+        None => "—".to_string(),
+    };
+    let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
+    let _ = writeln!(out, "• <b>{when}</b>\n  {message}");
+}
+
 /// Number of events shown per page in a paginated list reply.
 pub const LIST_PAGE_SIZE: usize = 10;
 
@@ -122,13 +172,16 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
 /// is appended only when there is more than one page. `empty` is the full message
 /// shown when there are no events. Returns the rendered text and the total number
 /// of pages, so the caller can decide whether to attach navigation buttons.
-/// `page` is clamped to the valid range.
+/// `page` is clamped to the valid range. When `two_line` is true (used by
+/// `/events`), each event renders as a datetime line plus an indented plain-text
+/// message preview; otherwise as the single-line HTML row.
 pub fn format_page(
     events: &[EventInfo],
     page: usize,
     per_page: usize,
     title: &str,
     empty: &str,
+    two_line: bool,
 ) -> (String, usize) {
     format_page_at(
         events,
@@ -137,6 +190,7 @@ pub fn format_page(
         per_page,
         title,
         empty,
+        two_line,
     )
 }
 
@@ -148,6 +202,7 @@ pub fn format_page_at(
     per_page: usize,
     title: &str,
     empty: &str,
+    two_line: bool,
 ) -> (String, usize) {
     let pages = total_pages(events.len(), per_page);
     if events.is_empty() {
@@ -168,7 +223,11 @@ pub fn format_page_at(
         format!("<b>{}:</b>\n", html::escape(title))
     };
     for e in slice {
-        write_event_row(&mut out, e, now);
+        if two_line {
+            write_event_row_two_line(&mut out, e, now);
+        } else {
+            write_event_row(&mut out, e, now);
+        }
     }
     (out, pages)
 }
@@ -382,6 +441,7 @@ mod tests {
             10,
             "Upcoming events",
             "No upcoming events.",
+            false,
         );
         assert_eq!(text, "No upcoming events.");
         assert_eq!(pages, 1);
@@ -397,7 +457,7 @@ mod tests {
             // HTML specials).
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
-        let (text, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
+        let (text, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", false);
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         assert!(text.contains("14:00 15.06.2026 (2h)"));
@@ -410,7 +470,7 @@ mod tests {
         let now =
             NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
-        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none");
+        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none", false);
         assert!(text.starts_with("<b>Today's events:</b>\n"));
         assert!(text.contains("10:00 16.06.2026 (1h)"));
         assert!(text.contains("standup"));
@@ -425,7 +485,7 @@ mod tests {
             .collect();
 
         // First page: 10 rows, labelled 1/3.
-        let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none");
+        let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", false);
         assert_eq!(pages, 3);
         assert!(p0.starts_with("<b>Upcoming events (page 1/3):</b>\n"));
         assert!(p0.contains("event 0"));
@@ -433,11 +493,69 @@ mod tests {
         assert!(!p0.contains("event 10"));
 
         // Last page: only 5 rows, labelled 3/3. Out-of-range page clamps to last.
-        let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none");
+        let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none", false);
         assert!(p_last.starts_with("<b>Upcoming events (page 3/3):</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
         assert_eq!(p_last.lines().count(), 1 + 5);
+    }
+
+    #[test]
+    fn message_preview_strips_tags_and_unescapes() {
+        assert_eq!(
+            message_preview("<b>call</b> the office", 50),
+            "call the office"
+        );
+        assert_eq!(message_preview("<a href=\"x\">site</a>", 50), "site");
+        assert_eq!(message_preview("a &amp; b", 50), "a & b");
+        assert_eq!(message_preview("&lt;tag&gt;", 50), "<tag>");
+    }
+
+    #[test]
+    fn message_preview_removes_newlines() {
+        assert_eq!(message_preview("line1\nline2", 50), "line1 line2");
+        assert_eq!(message_preview("a\n\n  b\tc", 50), "a b c");
+    }
+
+    #[test]
+    fn message_preview_truncates_by_chars() {
+        // 30 chars -> first 20 + "...".
+        let msg = "abcdefghijklmnopqrstuvwxyz1234";
+        assert_eq!(message_preview(msg, 20), "abcdefghijklmnopqrst...");
+        // Short message left intact.
+        assert_eq!(message_preview("short", 20), "short");
+        // Exactly 20 chars: no ellipsis.
+        assert_eq!(
+            message_preview("01234567890123456789", 20),
+            "01234567890123456789"
+        );
+    }
+
+    #[test]
+    fn message_preview_truncation_is_utf8_safe() {
+        // 21 multi-byte chars; truncating by bytes would panic, by chars is fine.
+        let msg = "ñññññññññññññññññññññ";
+        let out = message_preview(msg, 20);
+        assert_eq!(out.chars().count(), 23); // 20 + "..."
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn format_page_two_line_layout() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        // Message longer than MESSAGE_PREVIEW_MAX (50) to exercise truncation.
+        let events = vec![sample_event(
+            "<b>call</b> the office right now please and bring the documents",
+            Some(now + Duration::hours(2)),
+        )];
+        let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true);
+        assert!(text.starts_with("<b>Upcoming events:</b>\n"));
+        // Bold datetime line and message live on separate lines; no `—` separator.
+        assert!(text.contains("• <b>14:00 15.06.2026 (2h)</b>\n"));
+        assert!(!text.contains(" — "));
+        // Plain text, tag-free, truncated to MESSAGE_PREVIEW_MAX chars + "...".
+        assert!(text.contains("  call the office right now please and bring the doc..."));
     }
 
     #[test]
