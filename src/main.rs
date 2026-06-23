@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use perbot::commands::{self, CmdContext, Command};
 use perbot::import::{self, PendingImport};
 use perbot::parser;
+use perbot::pending::{self, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
 use perbot::telegram::{extract_chat_info, scheduled_message};
@@ -88,6 +89,9 @@ async fn main() -> anyhow::Result<()> {
     // Pending legacy import target (chat id) recorded by `/import <user_id>`.
     let pending_import: PendingImport = import::new_pending();
 
+    // Per-chat events awaiting a reminder body after a time-only message.
+    let pending_msg: PendingMessage = pending::new_pending();
+
     // Dispatcher with two branches: text/document messages and inline-button
     // callbacks (used by paginated `/events`). Shared deps are injected via
     // `dptree::deps!`.
@@ -100,7 +104,8 @@ async fn main() -> anyhow::Result<()> {
             provider,
             admin_id,
             bot_username,
-            pending_import
+            pending_import,
+            pending_msg
         ])
         .enable_ctrlc_handler()
         .build()
@@ -116,13 +121,19 @@ async fn callback_handler(
     bot: Bot,
     q: CallbackQuery,
     provider: EventProvider,
+    pending_msg: PendingMessage,
 ) -> ResponseResult<()> {
-    // Event-specific callbacks carry the `eid:<id>:…` envelope (snooze is the only
-    // action today); everything else is list pagination (`<tag>:<page>`).
-    if q.data.as_deref().is_some_and(|d| d.starts_with("eid:")) {
-        commands::handle_snooze_callback(&bot, &provider, q).await
-    } else {
-        commands::handle_list_callback(&bot, &provider, q).await
+    // `eid:<id>:…` is the event-specific envelope (snooze today); `pm:` cancels a
+    // pending "send me the reminder text" prompt; everything else is list
+    // pagination (`<tag>:<page>`).
+    match q.data.as_deref() {
+        Some(d) if d.starts_with("eid:") => {
+            commands::handle_snooze_callback(&bot, &provider, q).await
+        }
+        Some(d) if d.starts_with("pm:") => {
+            commands::handle_cancel_pending(&bot, &pending_msg, q).await
+        }
+        _ => commands::handle_list_callback(&bot, &provider, q).await,
     }
 }
 
@@ -135,6 +146,7 @@ async fn message_handler(
     admin_id: ChatId,
     bot_username: String,
     pending_import: PendingImport,
+    pending_msg: PendingMessage,
 ) -> ResponseResult<()> {
     // Save/update chat info
     let chat_info = extract_chat_info(&msg.chat);
@@ -176,6 +188,39 @@ async fn message_handler(
             return Ok(());
         }
 
+        // Completing a pending "send me the reminder text": once a chat is waiting
+        // for a body, the next non-command text is used verbatim as that body.
+        let pending_event = pending_msg.lock().unwrap().remove(&msg.chat.id.0);
+        if let Some(mut event) = pending_event {
+            let entities = msg.parse_entities().unwrap_or_default();
+            // The whole reply text is the body, so a single span covers all of it.
+            let span = 0..text.len();
+            let body = perbot::richtext::render_html(text, std::slice::from_ref(&span), &entities);
+            if body.is_empty() {
+                // Whitespace-only reply carries no usable body: keep waiting and
+                // re-prompt with the Cancel button.
+                pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
+                bot.send_message(msg.chat.id, pending::ASK_TEXT)
+                    .reply_markup(pending::cancel_keyboard())
+                    .await?;
+                return Ok(());
+            }
+            event.chat_id = msg.chat.id.0;
+            event.msg_id = msg_id;
+            event.message = body;
+            let stored = provider.insert_event_and_get(event);
+            let reply = if let Some(dt) = stored.next_datetime {
+                let now = chrono::Local::now().naive_local();
+                scheduled_message(now, dt, &stored)
+            } else {
+                format!("<b>{}</b>", html::escape(text))
+            };
+            bot.send_message(msg.chat.id, reply)
+                .parse_mode(ParseMode::Html)
+                .await?;
+            return Ok(());
+        }
+
         if let Some((mut event, spans)) = parser::parse_full(text) {
             event.chat_id = msg.chat.id.0;
             event.msg_id = msg_id;
@@ -192,6 +237,14 @@ async fn message_handler(
             } else {
                 format!("<b>{}</b>", html::escape(text))
             }
+        } else if let Some(event) = parser::parse_time_only(text) {
+            // A time was given but no reminder body: hold the parsed event and ask
+            // for the text, offering a Cancel button.
+            pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
+            bot.send_message(msg.chat.id, pending::ASK_TEXT)
+                .reply_markup(pending::cancel_keyboard())
+                .await?;
+            return Ok(());
         } else {
             format!("Unparsable message: <b>{}</b>", html::escape(text))
         }

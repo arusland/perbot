@@ -135,7 +135,36 @@ pub fn parse(input: &str) -> Option<EventInfo> {
 /// message body (before whitespace normalization). Their concatenation equals
 /// the pre-normalized leftover text; `crate::richtext` uses them to re-map the
 /// message's formatting entities onto the surviving body.
+///
+/// Returns `None` when no time component is found or when the message body is
+/// empty (a time was given but no reminder text). To detect the latter case on
+/// its own, use [`parse_time_only`].
 pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    let (event, spans) = parse_components(input)?;
+    if event.message.is_empty() {
+        return None;
+    }
+    Some((event, spans))
+}
+
+/// Returns the parsed event when `input` carries a recognizable time component
+/// but **no** message body (e.g. `13:30`, `in 8 min`, `mon-fri 9:00`). Returns
+/// `None` when there is no time component or when a body was supplied (in which
+/// case [`parse_full`] handles it). Used by the interactive "send me the reminder
+/// text" flow.
+pub fn parse_time_only(input: &str) -> Option<EventInfo> {
+    let (event, _) = parse_components(input)?;
+    if event.message.is_empty() {
+        Some(event)
+    } else {
+        None
+    }
+}
+
+/// Extracts the time/date components and leftover message body. Returns `None`
+/// only when no time component is found; the returned `message` may be empty (the
+/// callers [`parse_full`] / [`parse_time_only`] decide how to treat that).
+fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
     let mut rem = Remaining::new(input);
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
@@ -302,9 +331,6 @@ pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
     {
         return None;
     }
-    if message.is_empty() {
-        return None;
-    }
 
     let event = EventInfo {
         date,
@@ -337,6 +363,28 @@ mod tests {
     /// Concatenates the surviving spans back out of the original input.
     fn concat_spans(input: &str, spans: &[Range<usize>]) -> String {
         spans.iter().map(|s| &input[s.clone()]).collect()
+    }
+
+    #[test]
+    fn parse_time_only_detects_body_less_inputs() {
+        // A time with no body: parse_full rejects it, parse_time_only accepts it.
+        for input in ["13:30", "5:24 PM", "8 min", "9:00 mon-fri"] {
+            assert!(
+                parse_full(input).is_none(),
+                "parse_full should reject body-less {input:?}"
+            );
+            let event = parse_time_only(input)
+                .unwrap_or_else(|| panic!("parse_time_only should accept {input:?}"));
+            assert!(event.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_time_only_rejects_bodies_and_unparsable() {
+        // A body was supplied -> parse_full's job, not parse_time_only's.
+        assert!(parse_time_only("13:30 lunch").is_none());
+        // No time component at all.
+        assert!(parse_time_only("hello").is_none());
     }
 
     #[test]

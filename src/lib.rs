@@ -4,6 +4,7 @@ pub mod error;
 pub mod import;
 pub mod logger;
 pub mod parser;
+pub mod pending;
 pub mod richtext;
 pub mod scheduler;
 pub mod state;

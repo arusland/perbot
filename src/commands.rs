@@ -1,4 +1,5 @@
 use crate::import::{self, PendingImport};
+use crate::pending::PendingMessage;
 use crate::state::EventProvider;
 use crate::telegram::{LIST_PAGE_SIZE, format_page_at, scheduled_message};
 use crate::types::EventInfo;
@@ -400,6 +401,35 @@ pub async fn handle_snooze_callback(
     bot.send_message(chat_id, scheduled_message(now, next, &event))
         .parse_mode(ParseMode::Html)
         .await?;
+    Ok(())
+}
+
+/// Handles a Cancel-button press from the "send me the reminder text" prompt:
+/// drops the pending request for the chat and edits the prompt to "Cancelled."
+/// (clearing the keyboard). Routed from `main`'s callback branch for the `pm:`
+/// prefix.
+pub async fn handle_cancel_pending(
+    bot: &Bot,
+    pending_msg: &PendingMessage,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    bot.answer_callback_query(q.id.clone()).await?;
+
+    let Some(message) = q.regular_message() else {
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    pending_msg.lock().unwrap().remove(&chat_id.0);
+
+    if let Err(e) = bot
+        .edit_message_text(chat_id, message.id, "Cancelled.")
+        .await
+    {
+        log::warn!(
+            "Failed to edit cancelled prompt for chat {}: {e}",
+            chat_id.0
+        );
+    }
     Ok(())
 }
 
