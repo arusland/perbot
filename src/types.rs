@@ -106,6 +106,27 @@ pub enum TimeUnit {
     Years,
 }
 
+impl TimeUnit {
+    /// Lower-case unit word: plural (`"days"`, the form persisted in storage) or
+    /// singular (`"day"`) when `plural` is false.
+    pub fn label(self, plural: bool) -> &'static str {
+        match (self, plural) {
+            (TimeUnit::Minutes, true) => "minutes",
+            (TimeUnit::Minutes, false) => "minute",
+            (TimeUnit::Hours, true) => "hours",
+            (TimeUnit::Hours, false) => "hour",
+            (TimeUnit::Days, true) => "days",
+            (TimeUnit::Days, false) => "day",
+            (TimeUnit::Weeks, true) => "weeks",
+            (TimeUnit::Weeks, false) => "week",
+            (TimeUnit::Months, true) => "months",
+            (TimeUnit::Months, false) => "month",
+            (TimeUnit::Years, true) => "years",
+            (TimeUnit::Years, false) => "year",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Repetition {
     pub interval: u32,

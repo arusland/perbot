@@ -5,8 +5,8 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::types::{
-    ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit,
-    day_to_str, parse_days, unit_from_str,
+    ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, Ordinal, Repetition, day_to_str,
+    parse_days, unit_from_str,
 };
 
 // --- Private serialization helpers ---
@@ -16,17 +16,6 @@ fn serialize_days(days: &HashSet<Weekday>) -> String {
     let mut day_strs: Vec<&str> = days.iter().copied().map(day_to_str).collect();
     day_strs.sort_by_key(|d| order.iter().position(|o| o == d).unwrap_or(7));
     day_strs.join(",")
-}
-
-fn serialize_time_unit(unit: TimeUnit) -> &'static str {
-    match unit {
-        TimeUnit::Minutes => "minutes",
-        TimeUnit::Hours => "hours",
-        TimeUnit::Days => "days",
-        TimeUnit::Weeks => "weeks",
-        TimeUnit::Months => "months",
-        TimeUnit::Years => "years",
-    }
 }
 
 fn serialize_years(years: &HashSet<i32>) -> String {
@@ -195,14 +184,11 @@ impl EventStorage {
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
         let days_str = event.days.as_ref().map(serialize_days);
         let (repeat_interval, repeat_unit) = match &event.repetition {
-            Some(rep) => (
-                Some(rep.interval),
-                Some(serialize_time_unit(rep.unit).to_string()),
-            ),
+            Some(rep) => (Some(rep.interval), Some(rep.unit.label(true).to_string())),
             None => (None, None),
         };
         let (in_offset_val, in_offset_unit) = match event.in_offset {
-            Some((v, u)) => (Some(v), Some(serialize_time_unit(u).to_string())),
+            Some((v, u)) => (Some(v), Some(u.label(true).to_string())),
             None => (None, None),
         };
         let monthly_str = event

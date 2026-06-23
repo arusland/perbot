@@ -1,6 +1,6 @@
 use crate::scheduler;
-use crate::types::{ChatInfo, ChatType, EventInfo};
-use chrono::{Local, NaiveDateTime};
+use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern, Ordinal};
+use chrono::{Local, NaiveDateTime, Weekday};
 use std::fmt::Write as _;
 use teloxide::utils::html;
 
@@ -145,16 +145,81 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
     }
 }
 
+/// Lower-case full weekday name, e.g. `"friday"`.
+fn weekday_name(d: Weekday) -> &'static str {
+    match d {
+        Weekday::Mon => "monday",
+        Weekday::Tue => "tuesday",
+        Weekday::Wed => "wednesday",
+        Weekday::Thu => "thursday",
+        Weekday::Fri => "friday",
+        Weekday::Sat => "saturday",
+        Weekday::Sun => "sunday",
+    }
+}
+
+/// Ordinal word used in monthly patterns, e.g. `"first"`, `"last"`.
+fn ordinal_name(o: Ordinal) -> &'static str {
+    match o {
+        Ordinal::First => "first",
+        Ordinal::Second => "second",
+        Ordinal::Third => "third",
+        Ordinal::Fourth => "fourth",
+        Ordinal::Fifth => "fifth",
+        Ordinal::Last => "last",
+    }
+}
+
+/// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
+/// `"every friday"`, `"every first sunday"`, `"last day of the month"`. Returns
+/// `None` for one-off events (no recurrence). The recurrence-bearing fields are
+/// mutually exclusive, checked in priority order. Output is plain text with no
+/// HTML specials.
+fn describe_recurrence(e: &EventInfo) -> Option<String> {
+    if let Some(rep) = &e.repetition {
+        let unit = rep.unit.label(rep.interval != 1);
+        return Some(if rep.interval == 1 {
+            format!("every {unit}")
+        } else {
+            format!("every {} {unit}", rep.interval)
+        });
+    }
+    if let Some(days) = &e.days {
+        let mut list: Vec<Weekday> = days.iter().copied().collect();
+        list.sort_by_key(|d| d.num_days_from_monday());
+        let names = list
+            .iter()
+            .map(|d| weekday_name(*d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("every {names}"));
+    }
+    if let Some(pattern) = &e.monthly_pattern {
+        return Some(match pattern {
+            MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                format!("every {} {}", ordinal_name(*ord), weekday_name(*wd))
+            }
+            MonthlyPattern::LastDay => "last day of the month".to_string(),
+        });
+    }
+    None
+}
+
 /// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
-/// line, then an indented plain-text message preview (tags stripped, truncated).
-/// The preview is plain text, so it is HTML-escaped before output.
+/// line — with `, <recurrence>` appended when the event repeats — then an indented
+/// plain-text message preview (tags stripped, truncated). The preview is plain
+/// text, so it is HTML-escaped before output.
 fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
     let when = match e.next_datetime {
         Some(dt) => html::escape(&format_when(now, dt)),
         None => "—".to_string(),
     };
+    let recurrence = match describe_recurrence(e) {
+        Some(r) => format!(", {}", html::escape(&r)),
+        None => String::new(),
+    };
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
-    let _ = writeln!(out, "• <b>{when}</b>\n  {message}");
+    let _ = writeln!(out, "• <b>{when}{recurrence}</b>\n  {message}");
 }
 
 /// Number of events shown per page in a paginated list reply.
@@ -556,6 +621,68 @@ mod tests {
         assert!(!text.contains(" — "));
         // Plain text, tag-free, truncated to MESSAGE_PREVIEW_MAX chars + "...".
         assert!(text.contains("  call the office right now please and bring the doc..."));
+        // One-off event: no recurrence suffix on the datetime line.
+        assert!(!text.contains(", every"));
+    }
+
+    #[test]
+    fn describe_recurrence_variants() {
+        use crate::types::{Repetition, TimeUnit};
+        use std::collections::HashSet;
+
+        let mut e = sample_event("x", None);
+        // One-off → no recurrence.
+        assert_eq!(describe_recurrence(&e), None);
+
+        // Interval repetition: plural and singular (n == 1).
+        e.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+        assert_eq!(describe_recurrence(&e).as_deref(), Some("every 2 days"));
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        assert_eq!(describe_recurrence(&e).as_deref(), Some("every hour"));
+        e.repetition = None;
+
+        // Single weekday, then a sorted multi-day set (Mon before Fri).
+        e.days = Some(HashSet::from([Weekday::Fri]));
+        assert_eq!(describe_recurrence(&e).as_deref(), Some("every friday"));
+        e.days = Some(HashSet::from([Weekday::Fri, Weekday::Mon]));
+        assert_eq!(
+            describe_recurrence(&e).as_deref(),
+            Some("every monday, friday")
+        );
+        e.days = None;
+
+        // Monthly patterns.
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        assert_eq!(
+            describe_recurrence(&e).as_deref(),
+            Some("every first sunday")
+        );
+        e.monthly_pattern = Some(MonthlyPattern::LastDay);
+        assert_eq!(
+            describe_recurrence(&e).as_deref(),
+            Some("last day of the month")
+        );
+    }
+
+    #[test]
+    fn format_page_two_line_appends_recurrence() {
+        use crate::types::{Repetition, TimeUnit};
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let mut e = sample_event("standup", Some(now + Duration::hours(2)));
+        e.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+        let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true);
+        // Recurrence follows the relative time inside the bold datetime line.
+        assert!(text.contains("• <b>14:00 15.06.2026 (2h), every 2 days</b>\n"));
     }
 
     #[test]
