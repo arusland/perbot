@@ -11,6 +11,9 @@ struct TableRow {
     /// Expected reminder message for USER rows (4th column); `None` for SYSTEM
     /// rows (whose 4th cell is empty and dropped by the empty-cell filter).
     message: Option<String>,
+    /// Expected `EventInfo::normalize_time()` for USER rows (5th column); `None`
+    /// for SYSTEM rows and for USER rows whose input fails to parse (empty cell).
+    normalized: Option<String>,
     original: String,
 }
 
@@ -27,8 +30,10 @@ struct Table {
 /// `### Heading` lines are captured as the table name.
 ///
 /// USER rows carry an optional 4th column with the expected reminder message
-/// (must equal `EventInfo.message`); SYSTEM rows leave it empty, so the
-/// empty-cell filter drops it and they yield only 3 columns.
+/// (must equal `EventInfo.message`) and an optional 5th column with the expected
+/// canonical time expression (must equal `EventInfo.normalize_time()`); SYSTEM
+/// rows leave both empty, so the empty-cell filter drops them and they yield only
+/// 3 columns.
 ///
 /// Returns a list of tables; each table is a list of rows.
 fn parse_tables(content: &str) -> Vec<Table> {
@@ -69,6 +74,7 @@ fn parse_tables(content: &str) -> Vec<Table> {
                 actor,
                 value: unescape(cols[2]),
                 message: cols.get(3).map(|s| unescape(s)),
+                normalized: cols.get(4).map(|s| unescape(s)),
                 original: trimmed.to_string(),
             });
         } else {
@@ -164,6 +170,18 @@ fn run_table(table_idx: usize, table: &Table) {
                             &format!("expected message {:?}, got {:?}", expected, event.message),
                             &event.message,
                         );
+                    }
+                    if let Some(expected) = &row.normalized {
+                        let actual = event.normalize_time();
+                        if &actual != expected {
+                            fail_at(
+                                table_idx,
+                                table,
+                                step,
+                                &format!("expected normalized {:?}, got {:?}", expected, actual),
+                                &actual,
+                            );
+                        }
                     }
                     let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
                     event.chat_id = CHAT_ID;

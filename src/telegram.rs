@@ -1,5 +1,5 @@
 use crate::scheduler;
-use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern, Ordinal};
+use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern, ordinal_word, weekday_full};
 use chrono::{Local, NaiveDateTime, Weekday};
 use std::fmt::Write as _;
 use teloxide::utils::html;
@@ -145,31 +145,6 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
     }
 }
 
-/// Lower-case full weekday name, e.g. `"friday"`.
-fn weekday_name(d: Weekday) -> &'static str {
-    match d {
-        Weekday::Mon => "monday",
-        Weekday::Tue => "tuesday",
-        Weekday::Wed => "wednesday",
-        Weekday::Thu => "thursday",
-        Weekday::Fri => "friday",
-        Weekday::Sat => "saturday",
-        Weekday::Sun => "sunday",
-    }
-}
-
-/// Ordinal word used in monthly patterns, e.g. `"first"`, `"last"`.
-fn ordinal_name(o: Ordinal) -> &'static str {
-    match o {
-        Ordinal::First => "first",
-        Ordinal::Second => "second",
-        Ordinal::Third => "third",
-        Ordinal::Fourth => "fourth",
-        Ordinal::Fifth => "fifth",
-        Ordinal::Last => "last",
-    }
-}
-
 /// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
 /// `"every friday"`, `"every first sunday"`, `"last day of the month"`. Returns
 /// `None` for one-off events (no recurrence). The recurrence-bearing fields are
@@ -189,7 +164,7 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
         list.sort_by_key(|d| d.num_days_from_monday());
         let names = list
             .iter()
-            .map(|d| weekday_name(*d))
+            .map(|d| weekday_full(*d))
             .collect::<Vec<_>>()
             .join(", ");
         return Some(format!("every {names}"));
@@ -197,7 +172,7 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
     if let Some(pattern) = &e.monthly_pattern {
         return Some(match pattern {
             MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                format!("every {} {}", ordinal_name(*ord), weekday_name(*wd))
+                format!("every {} {}", ordinal_word(*ord), weekday_full(*wd))
             }
             MonthlyPattern::LastDay => "last day of the month".to_string(),
         });
@@ -627,7 +602,7 @@ mod tests {
 
     #[test]
     fn describe_recurrence_variants() {
-        use crate::types::{Repetition, TimeUnit};
+        use crate::types::{Ordinal, Repetition, TimeUnit};
         use std::collections::HashSet;
 
         let mut e = sample_event("x", None);

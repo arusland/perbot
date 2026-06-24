@@ -31,8 +31,11 @@ static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
+// An optional leading "in" is absorbed so "in 8 min" is identical to "8 min"
+// (and matches the canonical form emitted by `EventInfo::normalize_time`).
 static RE_IN_OFFSET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(\d+)\s+(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b").unwrap()
+    Regex::new(r"(?i)^(?:in\s+)?(\d+)\s+(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b")
+        .unwrap()
 });
 
 static RE_BARE_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,2})\s").unwrap());
@@ -793,6 +796,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_minutes_offset_with_leading_in() {
+        // An optional leading "in" is absorbed (matches the normalize_time form).
+        let e = parse("in 8 min call her").unwrap();
+        assert_eq!(e.in_offset, Some((8, TimeUnit::Minutes)));
+        assert_eq!(e.message, "call her");
+        let e = parse("in 8 min every 2 hours test").unwrap();
+        assert_eq!(e.in_offset, Some((8, TimeUnit::Minutes)));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 2);
+        assert_eq!(rep.unit, TimeUnit::Hours);
+        assert_eq!(e.message, "test");
+    }
+
+    #[test]
     fn parse_minutes_offset_with_repetition() {
         let e = parse("8 min every hour check server").unwrap();
         assert_eq!(e.in_offset, Some((8, TimeUnit::Minutes)));
@@ -956,5 +973,49 @@ mod tests {
         assert_eq!(rep.interval, 1);
         assert_eq!(rep.unit, TimeUnit::Months);
         assert_eq!(e.message, "call mom");
+    }
+
+    // --- normalize_time round-trip tests ---
+
+    #[test]
+    fn normalize_time_round_trips() {
+        // Each canonical string, when re-parsed (with a trailing message), must
+        // produce an event whose `normalize_time()` is byte-identical — the
+        // idempotency guarantee of the canonical form.
+        for s in [
+            "12:02",
+            "01:25",
+            "17:24",
+            "08:00",
+            "00:00",
+            "in 8 minutes",
+            "in 1 minute",
+            "in 3 hours",
+            "in 8 minutes every hour",
+            "in 20 hours every 2 weeks",
+            "11:26 12.10.2026",
+            "11:26 12.10.2026 every 2 weeks",
+            "01:23 26.11",
+            "10:25 Mon-Fri",
+            "01:25 Mon-Sat",
+            "13:25 Mon-Wed,Fri",
+            "13:25 2027 Fri,Sun",
+            "13:25 2027,2028 Fri,Sun",
+            "10:00 first sunday",
+            "17:00 third friday",
+            "18:00 last day of the month",
+            "10:00 first friday every 10 days",
+            "15:30 every 3 days",
+            "01:34 every year",
+            "21:00 every 2 days",
+        ] {
+            let event = parse(&format!("{s} reminder"))
+                .unwrap_or_else(|| panic!("canonical string {s:?} should parse"));
+            assert_eq!(
+                event.normalize_time(),
+                s,
+                "normalize_time should round-trip {s:?}"
+            );
+        }
     }
 }
