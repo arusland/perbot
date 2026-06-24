@@ -113,6 +113,9 @@ impl EventInfo {
                     format!("{} {}", ordinal_word(*ord), weekday_full(*wd))
                 }
                 MonthlyPattern::LastDay => "last day of the month".to_string(),
+                MonthlyPattern::DayOfMonth(d) => {
+                    format!("each {} of the month", ordinal_suffix(*d))
+                }
             });
         }
 
@@ -262,6 +265,9 @@ pub enum Ordinal {
 pub enum MonthlyPattern {
     OrdinalWeekday(Ordinal, Weekday),
     LastDay,
+    /// Fixed calendar day of the month (`28` → the 28th). Months that lack that
+    /// day (e.g. the 31st in February) are skipped.
+    DayOfMonth(u32),
 }
 
 /// Chat information. Used both for upserting and for reading from the database.
@@ -409,6 +415,19 @@ pub(crate) fn weekday_full(d: Weekday) -> &'static str {
         Weekday::Sat => "saturday",
         Weekday::Sun => "sunday",
     }
+}
+
+/// English ordinal numeral (`1` → `"1st"`, `2` → `"2nd"`, `3` → `"3rd"`,
+/// `4`…`20` → `"th"`, `21` → `"21st"`, …), used by day-of-month patterns.
+pub(crate) fn ordinal_suffix(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, 11) | (2, 12) | (3, 13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }
 
 /// Ordinal word used in monthly patterns (`"first"`…`"last"`).
@@ -576,6 +595,35 @@ mod tests {
         e.time = NaiveTime::from_hms_opt(18, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(e.normalize_time(), "18:00 last day of the month");
+    }
+
+    #[test]
+    fn normalize_day_of_month() {
+        let mut e = blank();
+        e.time = NaiveTime::from_hms_opt(22, 15, 0);
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        assert_eq!(e.normalize_time(), "22:15 each 28th of the month");
+        // Combined with a repeat interval (day-of-month rendered before repetition).
+        e.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+        assert_eq!(
+            e.normalize_time(),
+            "22:15 each 28th of the month every 2 days"
+        );
+        // Ordinal suffixes.
+        e.repetition = None;
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(1));
+        assert_eq!(e.normalize_time(), "22:15 each 1st of the month");
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(2));
+        assert_eq!(e.normalize_time(), "22:15 each 2nd of the month");
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(3));
+        assert_eq!(e.normalize_time(), "22:15 each 3rd of the month");
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(11));
+        assert_eq!(e.normalize_time(), "22:15 each 11th of the month");
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(21));
+        assert_eq!(e.normalize_time(), "22:15 each 21st of the month");
     }
 
     #[test]

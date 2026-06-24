@@ -131,6 +131,9 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
             for _ in 0..13 {
                 let target_date = match pattern {
                     MonthlyPattern::LastDay => last_day_of_month_date(year, month),
+                    // `from_ymd_opt` yields `None` for days the month lacks
+                    // (e.g. the 31st in February), so the loop skips that month.
+                    MonthlyPattern::DayOfMonth(d) => NaiveDate::from_ymd_opt(year, month, *d),
                     MonthlyPattern::OrdinalWeekday(ord, wd) => {
                         let n = match ord {
                             Ordinal::First => 1,
@@ -312,7 +315,7 @@ fn advance_by(dt: NaiveDateTime, interval: u32, unit: TimeUnit) -> Option<NaiveD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
+    use crate::types::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit};
     use std::collections::HashSet;
 
     fn make_play_event() -> EventInfo {
@@ -459,6 +462,82 @@ mod tests {
         assert!(dt > now);
         let next_day = dt.date().succ_opt().unwrap();
         assert_ne!(next_day.month(), dt.date().month());
+    }
+
+    #[test]
+    fn play_monthly_day_of_month() {
+        // From 2026-06-24, the next 28th-of-month at 22:15 is 2026-06-28.
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(22, 15, 0).unwrap());
+        event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+            NaiveTime::from_hms_opt(19, 36, 0).unwrap(),
+        );
+        let result = calc_next_at(event, now);
+        assert!(result.active);
+        assert_eq!(
+            result.next_datetime,
+            Some(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2026, 6, 28).unwrap(),
+                NaiveTime::from_hms_opt(22, 15, 0).unwrap(),
+            ))
+        );
+    }
+
+    #[test]
+    fn play_monthly_day_of_month_skips_short_month() {
+        // The 31st: from 2026-02-15 the next valid month is March (Feb has no 31st).
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(31));
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 2, 15).unwrap(),
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        );
+        let result = calc_next_at(event, now);
+        assert_eq!(
+            result.next_datetime,
+            Some(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2026, 3, 31).unwrap(),
+                NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            ))
+        );
+    }
+
+    #[test]
+    fn play_monthly_day_of_month_with_repetition_priority() {
+        // Day-of-month anchor (28th) has priority; "every 2 days" resumes from it.
+        // Mirrors test-cases.md Case 7.4.
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(22, 15, 0).unwrap());
+        event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        event.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+
+        let at = |y, m, d, h, mi, s| {
+            NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+                NaiveTime::from_hms_opt(h, mi, s).unwrap(),
+            )
+        };
+
+        // First scheduling: the 28th anchor.
+        event = calc_next_at(event, at(2026, 6, 24, 19, 36, 0));
+        assert_eq!(event.next_datetime, Some(at(2026, 6, 28, 22, 15, 0)));
+        // After the anchor fires, the interval takes over: +2 days.
+        event = calc_next_at(event, at(2026, 6, 28, 22, 15, 1));
+        assert_eq!(event.next_datetime, Some(at(2026, 6, 30, 22, 15, 0)));
+        event = calc_next_at(event, at(2026, 6, 30, 22, 15, 1));
+        assert_eq!(event.next_datetime, Some(at(2026, 7, 2, 22, 15, 0)));
+        // Jumping ahead: the next 28th anchor wins over the interval step.
+        event = calc_next_at(event, at(2026, 7, 28, 22, 14, 1));
+        assert_eq!(event.next_datetime, Some(at(2026, 7, 28, 22, 15, 0)));
+        // Interval resumes from the anchor.
+        event = calc_next_at(event, at(2026, 7, 28, 22, 15, 1));
+        assert_eq!(event.next_datetime, Some(at(2026, 7, 30, 22, 15, 0)));
     }
 
     #[test]

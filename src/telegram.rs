@@ -1,5 +1,7 @@
 use crate::scheduler;
-use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern, ordinal_word, weekday_full};
+use crate::types::{
+    ChatInfo, ChatType, EventInfo, MonthlyPattern, ordinal_suffix, ordinal_word, weekday_full,
+};
 use chrono::{Local, NaiveDateTime, Weekday};
 use std::fmt::Write as _;
 use teloxide::utils::html;
@@ -175,6 +177,7 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
                 format!("every {} {}", ordinal_word(*ord), weekday_full(*wd))
             }
             MonthlyPattern::LastDay => "last day of the month".to_string(),
+            MonthlyPattern::DayOfMonth(d) => format!("{} of the month", ordinal_suffix(*d)),
         });
     }
     None
@@ -642,6 +645,11 @@ mod tests {
         assert_eq!(
             describe_recurrence(&e).as_deref(),
             Some("last day of the month")
+        );
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        assert_eq!(
+            describe_recurrence(&e).as_deref(),
+            Some("28th of the month")
         );
     }
 

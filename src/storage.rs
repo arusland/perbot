@@ -47,6 +47,7 @@ fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
             format!("{}_{}", ord_str, day_to_str(*wd))
         }
         MonthlyPattern::LastDay => "last_day".to_string(),
+        MonthlyPattern::DayOfMonth(d) => format!("day_{d}"),
     }
 }
 
@@ -55,6 +56,9 @@ fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
 fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
     if s == "last_day" {
         return Some(MonthlyPattern::LastDay);
+    }
+    if let Some(rest) = s.strip_prefix("day_") {
+        return rest.parse().ok().map(MonthlyPattern::DayOfMonth);
     }
     let (ord_str, wd_str) = s.split_once('_')?;
     let ord = match ord_str {
@@ -1028,6 +1032,29 @@ mod tests {
         let stored = storage.get_event(id).unwrap().unwrap();
 
         assert_eq!(stored.monthly_pattern, Some(MonthlyPattern::LastDay));
+    }
+
+    #[test]
+    fn test_monthly_pattern_day_of_month_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+        let mut event = make_event("call Mal");
+        event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
+        event.date = None;
+        event.time = Some(NaiveTime::from_hms_opt(22, 15, 0).unwrap());
+        event.year_explicit = false;
+        event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        event.next_datetime = Some(NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 28).unwrap(),
+            NaiveTime::from_hms_opt(22, 15, 0).unwrap(),
+        ));
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get_event(id).unwrap().unwrap();
+
+        assert_eq!(stored.monthly_pattern, Some(MonthlyPattern::DayOfMonth(28)));
+        assert_eq!(stored.message, "call Mal");
     }
 
     #[test]

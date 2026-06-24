@@ -47,6 +47,16 @@ static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:every\s+)?((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
 });
 
+// Fixed day of the month: "28 of the month", "28th of the month",
+// "every 28 of the month", "each 5 of the month". The literal "of [the] month"
+// is required so it never collides with the bare-hour format (extraction also
+// runs before bare hour). An optional leading "every"/"each" is absorbed (the
+// canonical form uses "each"); an optional ordinal suffix is accepted.
+static RE_DAY_OF_MONTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:every\s+|each\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(?:the\s+)?month\b")
+        .unwrap()
+});
+
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
 });
@@ -219,8 +229,22 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
             rem.delete(start..end);
         }
 
+        // Day of the month: "every 28 of the month", "28th of the month".
+        // Checked before the bare hour so "<N> of the month" always wins the
+        // overlap (e.g. "5 of the month" is day-5, not hour-5).
+        if let Some(caps) = RE_DAY_OF_MONTH.captures(&rem.text)
+            && let Ok(day) = caps[1].parse::<u32>()
+            && (1..=31).contains(&day)
+        {
+            let m = caps.get(0).unwrap();
+            let (start, end) = (m.start(), m.end());
+            monthly_pattern = Some(MonthlyPattern::DayOfMonth(day));
+            rem.delete(start..end);
+        }
+
         // Bare hour: "8 call Alex" -> bare_hour=8, "0 call Sacha" -> bare_hour=0
         if time.is_none()
+            && monthly_pattern.is_none()
             && let Some(caps) = RE_BARE_HOUR.captures(&rem.text)
             && let Ok(n) = caps[1].parse::<u32>()
             && n <= 24
@@ -270,7 +294,8 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
 
         // Monthly pattern: "first sunday", "last monday", "last day of the month"
-        if let Some(caps) = RE_MONTHLY.captures(&rem.text)
+        if monthly_pattern.is_none()
+            && let Some(caps) = RE_MONTHLY.captures(&rem.text)
             && let Some(ord) = ordinal_from_str(&caps[1])
         {
             let target = caps[2].to_ascii_lowercase();
@@ -963,6 +988,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_day_of_month_every_prefix() {
+        let e = parse("12:05 every 28 of the month pay rent").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(12, 5, 0));
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(28)));
+        assert!(e.days.is_none());
+        assert!(e.bare_hour.is_none());
+        assert!(e.repetition.is_none());
+        assert_eq!(e.message, "pay rent");
+    }
+
+    #[test]
+    fn parse_day_of_month_ordinal_suffix() {
+        let e = parse("9:00 28th of the month check").unwrap();
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(28)));
+        assert_eq!(e.message, "check");
+    }
+
+    #[test]
+    fn parse_day_of_month_each_prefix() {
+        let e = parse("8:00 each 5 of the month water plants").unwrap();
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(5)));
+        assert_eq!(e.message, "water plants");
+    }
+
+    #[test]
+    fn parse_day_of_month_beats_bare_hour() {
+        // "5 of the month" is day-5, not bare-hour-5.
+        let e = parse("5 of the month rent").unwrap();
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(5)));
+        assert!(e.bare_hour.is_none());
+        assert!(e.time.is_none());
+        assert_eq!(e.message, "rent");
+    }
+
+    #[test]
+    fn parse_day_of_month_with_repetition() {
+        // The user's example: day-of-month anchor combined with a repeat interval.
+        let e = parse("22:15 every 28 of the month every 2 day call Mal").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(22, 15, 0));
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(28)));
+        let rep = e.repetition.unwrap();
+        assert_eq!(rep.interval, 2);
+        assert_eq!(rep.unit, TimeUnit::Days);
+        assert_eq!(e.message, "call Mal");
+    }
+
+    #[test]
     fn parse_monthly_with_repetition() {
         let e = parse("10:00 first sunday every month call mom").unwrap();
         assert_eq!(
@@ -1004,6 +1076,8 @@ mod tests {
             "10:00 first sunday",
             "17:00 third friday",
             "18:00 last day of the month",
+            "22:15 each 28th of the month",
+            "22:15 each 28th of the month every 2 days",
             "10:00 first friday every 10 days",
             "15:30 every 3 days",
             "01:34 every year",
