@@ -177,7 +177,7 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
                 format!("every {} {}", ordinal_word(*ord), weekday_full(*wd))
             }
             MonthlyPattern::LastDay => "last day of the month".to_string(),
-            MonthlyPattern::DayOfMonth(d) => format!("{} of the month", ordinal_suffix(*d)),
+            MonthlyPattern::DayOfMonth(d) => format!("{} day of the month", ordinal_suffix(*d)),
         });
     }
     None
@@ -649,7 +649,7 @@ mod tests {
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
         assert_eq!(
             describe_recurrence(&e).as_deref(),
-            Some("28th of the month")
+            Some("28th day of the month")
         );
     }
 
