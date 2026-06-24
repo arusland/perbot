@@ -215,26 +215,6 @@ fn parse_legacy(input: &str) -> Option<LegacyParse> {
     })
 }
 
-/// First date on or after `start` whose day-of-month equals `day`.
-fn next_day_on_or_after(start: NaiveDate, day: u32) -> Option<NaiveDate> {
-    let mut y = start.year();
-    let mut m = start.month();
-    for _ in 0..48 {
-        if let Some(d) = NaiveDate::from_ymd_opt(y, m, day)
-            && d >= start
-        {
-            return Some(d);
-        }
-        if m == 12 {
-            y += 1;
-            m = 1;
-        } else {
-            m += 1;
-        }
-    }
-    None
-}
-
 fn ms_to_naive_local(ms: i64) -> Option<NaiveDateTime> {
     Local
         .timestamp_millis_opt(ms)
@@ -305,14 +285,8 @@ pub fn convert(
             // occurrence rather than the creation year.
             event.date = NaiveDate::from_ymd_opt(now.year(), mo, d);
         } else if let Some(d) = p.day {
-            if event.repetition.is_some() {
-                // Day-of-month with a period: recurring monthly anchor.
-                event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(d));
-            } else {
-                // Day-of-month only, no period: one-shot on its next occurrence from creation.
-                event.date = next_day_on_or_after(created_at.date(), d);
-                event.year_explicit = true;
-            }
+            // Day-of-month (with or without a legacy period): recurring monthly anchor.
+            event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(d));
         }
     }
 
@@ -500,36 +474,54 @@ mod tests {
     }
 
     #[test]
-    fn day_only_is_one_shot_concrete_date() {
-        // Created 2024-10-12; day 27 -> 2024-10-27, in the past now -> inactive.
+    fn day_only_maps_to_monthly_pattern() {
+        // Created 2024-10-12; day 27 -> recurring "each 27th of the month".
         let created = created_at_from_filename("20241012_105344_580.alert").unwrap();
         let c = convert("16:33 27: concert", created, None, 42, now());
-        assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2024, 10, 27));
-        assert!(c.event.year_explicit);
-        assert_eq!(c.status, Status::Inactive);
-        assert_eq!(c.event.normalize_time(), "16:33 27.10.2024");
+        assert_eq!(
+            c.event.next_datetime,
+            Some(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2026, 6, 27).unwrap(),
+                NaiveTime::from_hms_opt(16, 33, 0).unwrap(),
+            ))
+        );
+        assert_eq!(c.status, Status::Scheduled);
+        assert_eq!(c.event.normalize_time(), "16:33 each 27th of the month");
     }
 
     #[test]
     fn period_maps_to_repetition() {
-        // "28/1:" -> day 28, every 1 day.
-        let p = parse_legacy("22:15 28/1: rent").unwrap();
-        assert_eq!(p.day, Some(28));
+        let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
+        // "28/1:" -> each 28th of the month, every 1 day.
+        let c = convert("22:15 28/1: rent", created, None, 42, now());
         assert_eq!(
-            p.repetition,
+            c.event.monthly_pattern,
+            Some(MonthlyPattern::DayOfMonth(28))
+        );
+        assert_eq!(
+            c.event.repetition,
             Some(Repetition {
                 interval: 1,
                 unit: TimeUnit::Days
             })
         );
-        // "05/2:11:" -> day 5 every 2 days, month 11.
-        let p = parse_legacy("11:07 05/2:11: bday").unwrap();
-        assert_eq!((p.day, p.month), (Some(5), Some(11)));
-        assert_eq!(p.repetition.unwrap().unit, TimeUnit::Days);
-        // Minute period "11:36/90 4:" -> every 90 minutes.
-        let p = parse_legacy("11:36/90 4: pay").unwrap();
-        assert_eq!(p.repetition.unwrap().unit, TimeUnit::Minutes);
-        assert_eq!(p.day, Some(4));
+        assert_eq!(
+            c.event.normalize_time(),
+            "22:15 each 28th of the month every day"
+        );
+        // "05/2:11:" -> day 5 of month 11 (yearly date), every 2 days.
+        let c = convert("11:07 05/2:11: bday", created, None, 42, now());
+        assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
+        assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
+        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days");
+        // Minute period "11:36/90 4:" -> each 4th of the month, every 90 minutes.
+        let c = convert("11:36/90 4: pay", created, None, 42, now());
+        assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
+        assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Minutes);
+        assert_eq!(
+            c.event.normalize_time(),
+            "11:36 each 4th of the month every 90 minutes"
+        );
     }
 
     #[test]
