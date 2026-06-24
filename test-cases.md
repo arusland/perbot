@@ -470,7 +470,7 @@
 
 | Current Time        | Actor   | Input / Expected Next           | Message     | Normalized         |
 |---------------------|---------|---------------------------------|-------------|--------------------|
-| 2026-02-20 10:00:00 | USER    | 10:00 first sunday buy package  | buy package | 10:00 first sunday |
+| 2026-02-20 10:00:00 | USER    | 10:00 first sunday buy package  | buy package | 10:00 first Sunday |
 | 2026-02-20 10:00:00 | SYSTEM  | 2026-03-01 10:00:00             |             |                    |
 | 2026-03-01 10:00:01 | SYSTEM  | 2026-04-05 10:00:00             |             |                    |
 | 2026-04-05 10:00:01 | SYSTEM  | 2026-05-03 10:00:00             |             |                    |
@@ -478,28 +478,28 @@
 ### Case 29.2: First Sunday of month mid-month — first and last only
 | Current Time        | Actor   | Input / Expected Next           | Message     | Normalized         |
 |---------------------|---------|---------------------------------|-------------|--------------------|
-| 2026-02-20 10:00:00 | USER    | 10:00 first sunday buy package  | buy package | 10:00 first sunday |
+| 2026-02-20 10:00:00 | USER    | 10:00 first sunday buy package  | buy package | 10:00 first Sunday |
 | 2026-04-05 10:00:01 | SYSTEM  | 2026-05-03 10:00:00             |             |                    |
 
 ### Case 30: First Sunday of month — created before first Sunday of current month, fires this month
 
 | Current Time        | Actor  | Input / Expected Next           | Message     | Normalized         |
 |---------------------|--------|---------------------------------|-------------|--------------------|
-| 2026-03-01 09:00:00 | USER   | 10:00 first sunday buy package  | buy package | 10:00 first sunday |
+| 2026-03-01 09:00:00 | USER   | 10:00 first sunday buy package  | buy package | 10:00 first Sunday |
 | 2026-03-01 09:00:00 | SYSTEM | 2026-03-01 10:00:00             |             |                    |
 | 2026-03-01 10:00:01 | SYSTEM | 2026-04-05 10:00:00             |             |                    |
 
 ### Case 30.2: First Sunday of month this month — first and last only
 | Current Time        | Actor  | Input / Expected Next           | Message     | Normalized         |
 |---------------------|--------|---------------------------------|-------------|--------------------|
-| 2026-03-01 09:00:00 | USER   | 10:00 first sunday buy package  | buy package | 10:00 first sunday |
+| 2026-03-01 09:00:00 | USER   | 10:00 first sunday buy package  | buy package | 10:00 first Sunday |
 | 2026-03-01 10:00:01 | SYSTEM | 2026-04-05 10:00:00             |             |                    |
 
 ### Case 31: Last Monday of month — created before last Monday of current month, fires this month
 
 | Current Time        | Actor  | Input / Expected Next          | Message      | Normalized        |
 |---------------------|--------|--------------------------------|--------------|-------------------|
-| 2026-02-20 08:00:00 | USER   | 9:30 last monday sell package  | sell package | 09:30 last monday |
+| 2026-02-20 08:00:00 | USER   | 9:30 last monday sell package  | sell package | 09:30 last Monday |
 | 2026-02-20 08:00:00 | SYSTEM | 2026-02-23 09:30:00            |              |                   |
 | 2026-02-23 09:30:01 | SYSTEM | 2026-03-30 09:30:00            |              |                   |
 | 2026-03-30 09:30:01 | SYSTEM | 2026-04-27 09:30:00            |              |                   |
@@ -507,21 +507,21 @@
 ### Case 31.2: Last Monday of month — first and last only
 | Current Time        | Actor  | Input / Expected Next          | Message      | Normalized        |
 |---------------------|--------|--------------------------------|--------------|-------------------|
-| 2026-02-20 08:00:00 | USER   | 9:30 last monday sell package  | sell package | 09:30 last monday |
+| 2026-02-20 08:00:00 | USER   | 9:30 last monday sell package  | sell package | 09:30 last Monday |
 | 2026-03-30 09:30:01 | SYSTEM | 2026-04-27 09:30:00            |              |                   |
 
 ### Case 32: Last Saturday of month — created after last Saturday of current month, skips to next month
 
 | Current Time        | Actor  | Input / Expected Next       | Message      | Normalized          |
 |---------------------|--------|-----------------------------|--------------|---------------------|
-| 2026-02-28 11:35:00 | USER   | 9:30 last sat sell package  | sell package | 09:30 last saturday |
+| 2026-02-28 11:35:00 | USER   | 9:30 last sat sell package  | sell package | 09:30 last Saturday |
 | 2026-02-28 11:35:00 | SYSTEM | 2026-03-28 09:30:00         |              |                     |
 | 2026-03-28 09:30:01 | SYSTEM | 2026-04-25 09:30:00         |              |                     |
 
 ### Case 32.2: Last Saturday of month — first and last only
 | Current Time        | Actor  | Input / Expected Next       | Message      | Normalized          |
 |---------------------|--------|-----------------------------|--------------|---------------------|
-| 2026-02-28 11:35:00 | USER   | 9:30 last sat sell package  | sell package | 09:30 last saturday |
+| 2026-02-28 11:35:00 | USER   | 9:30 last sat sell package  | sell package | 09:30 last Saturday |
 | 2026-03-28 09:30:01 | SYSTEM | 2026-04-25 09:30:00         |              |                     |
 
 ### Case 33: Last day of month — fires on last day of each month
@@ -587,7 +587,7 @@
 
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-16 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third friday|
+| 2026-02-16 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third Friday|
 | 2026-02-16 10:00:00 | SYSTEM  | 2026-02-20 17:00:00         |            |                   |
 | 2026-02-20 17:00:01 | SYSTEM  | 2026-03-20 17:00:00         |            |                   |
 | 2026-03-20 17:00:01 | SYSTEM  | 2026-04-17 17:00:00         |            |                   |
@@ -595,14 +595,14 @@
 ### Case 37.2: 3rd Friday of month before — first and last only
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-16 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third friday|
+| 2026-02-16 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third Friday|
 | 2026-03-20 17:00:01 | SYSTEM  | 2026-04-17 17:00:00         |            |                   |
 
 ### Case 38: 3rd Friday of month — created after 3rd Friday of current month, skips to next month
 
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-21 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third friday|
+| 2026-02-21 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third Friday|
 | 2026-02-21 10:00:00 | SYSTEM  | 2026-03-20 17:00:00         |            |                   |
 | 2026-03-20 17:00:01 | SYSTEM  | 2026-04-17 17:00:00         |            |                   |
 | 2026-04-17 17:00:01 | SYSTEM  | 2026-05-15 17:00:00         |            |                   |
@@ -610,14 +610,14 @@
 ### Case 38.2: 3rd Friday of month after — first and last only
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-21 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third friday|
+| 2026-02-21 10:00:00 | USER    | 17:00 3rd friday happy hour | happy hour | 17:00 third Friday|
 | 2026-04-17 17:00:01 | SYSTEM  | 2026-05-15 17:00:00         |            |                   |
 
 ### Case 39: 5th Friday of month - some months will be skipped, not all months have 5 Fridays
 
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-16 10:00:00 | USER    | 17:00 5th friday happy hour | happy hour | 17:00 fifth friday|
+| 2026-02-16 10:00:00 | USER    | 17:00 5th friday happy hour | happy hour | 17:00 fifth Friday|
 | 2026-02-16 10:00:00 | SYSTEM  | 2026-05-29 17:00:00         |            |                   |
 | 2026-05-29 17:00:01 | SYSTEM  | 2026-07-31 17:00:00         |            |                   |
 | 2026-07-31 17:00:01 | SYSTEM  | 2026-10-30 17:00:00         |            |                   |
@@ -625,14 +625,14 @@
 ### Case 39.2: 5th Friday of month — first and last only
 | Current Time        | Actor   | Input / Expected Next       | Message    | Normalized        |
 |---------------------|---------|-----------------------------|------------|-------------------|
-| 2026-02-16 10:00:00 | USER    | 17:00 5th friday happy hour | happy hour | 17:00 fifth friday|
+| 2026-02-16 10:00:00 | USER    | 17:00 5th friday happy hour | happy hour | 17:00 fifth Friday|
 | 2026-07-31 17:00:01 | SYSTEM  | 2026-10-30 17:00:00         |            |                   |
 
 ### Case 40: First Friday of month with repition. Repition must be canceled just before next first Friday
 
 | Current Time        | Actor  | Input / Expected Next                       | Message    | Normalized                       |
 |---------------------|--------|---------------------------------------------|------------|----------------------------------|
-| 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket | buy ticket | 10:00 first friday every 10 days |
+| 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket | buy ticket | 10:00 first Friday every 10 days |
 | 2026-03-01 09:00:00 | SYSTEM | 2026-03-06 10:00:00                         |            |                                  |
 | 2026-03-06 10:00:01 | SYSTEM | 2026-03-16 10:00:00                         |            |                                  |
 | 2026-03-16 10:00:01 | SYSTEM | 2026-03-26 10:00:00                         |            |                                  |
@@ -642,7 +642,7 @@
 ### Case 40.2: First Friday with repetition — first and last only
 | Current Time        | Actor  | Input / Expected Next                       | Message    | Normalized                       |
 |---------------------|--------|---------------------------------------------|------------|----------------------------------|
-| 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket | buy ticket | 10:00 first friday every 10 days |
+| 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket | buy ticket | 10:00 first Friday every 10 days |
 | 2026-04-03 10:00:01 | SYSTEM | 2026-04-05 10:00:00                         |            |                                  |
 
 ### Case 41: Single-digit minute — "10:6" means "10:06", fires once

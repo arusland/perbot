@@ -627,11 +627,11 @@ mod tests {
 
         // Single weekday, then a sorted multi-day set (Mon before Fri).
         e.days = Some(HashSet::from([Weekday::Fri]));
-        assert_eq!(describe_recurrence(&e).as_deref(), Some("every friday"));
+        assert_eq!(describe_recurrence(&e).as_deref(), Some("every Friday"));
         e.days = Some(HashSet::from([Weekday::Fri, Weekday::Mon]));
         assert_eq!(
             describe_recurrence(&e).as_deref(),
-            Some("every monday, friday")
+            Some("every Monday, Friday")
         );
         e.days = None;
 
@@ -639,7 +639,7 @@ mod tests {
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
         assert_eq!(
             describe_recurrence(&e).as_deref(),
-            Some("every first sunday")
+            Some("every first Sunday")
         );
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(

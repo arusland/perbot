@@ -407,13 +407,13 @@ pub(crate) fn day_to_str_cap(d: Weekday) -> &'static str {
 /// Lower-case full weekday name (`"monday"`…`"sunday"`).
 pub(crate) fn weekday_full(d: Weekday) -> &'static str {
     match d {
-        Weekday::Mon => "monday",
-        Weekday::Tue => "tuesday",
-        Weekday::Wed => "wednesday",
-        Weekday::Thu => "thursday",
-        Weekday::Fri => "friday",
-        Weekday::Sat => "saturday",
-        Weekday::Sun => "sunday",
+        Weekday::Mon => "Monday",
+        Weekday::Tue => "Tuesday",
+        Weekday::Wed => "Wednesday",
+        Weekday::Thu => "Thursday",
+        Weekday::Fri => "Friday",
+        Weekday::Sat => "Saturday",
+        Weekday::Sun => "Sunday",
     }
 }
 
@@ -588,10 +588,10 @@ mod tests {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(10, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
-        assert_eq!(e.normalize_time(), "10:00 first sunday");
+        assert_eq!(e.normalize_time(), "10:00 first Sunday");
         e.time = NaiveTime::from_hms_opt(17, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Third, Weekday::Fri));
-        assert_eq!(e.normalize_time(), "17:00 third friday");
+        assert_eq!(e.normalize_time(), "17:00 third Friday");
         e.time = NaiveTime::from_hms_opt(18, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(e.normalize_time(), "18:00 last day of the month");
