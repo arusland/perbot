@@ -14,7 +14,7 @@ use regex::Regex;
 use teloxide::utils::html;
 
 use crate::scheduler;
-use crate::types::{EventInfo, Repetition, TimeUnit};
+use crate::types::{EventInfo, MonthlyPattern, Repetition, TimeUnit};
 
 /// Outcome of converting a single legacy alert.
 pub struct Converted {
@@ -305,9 +305,14 @@ pub fn convert(
             // occurrence rather than the creation year.
             event.date = NaiveDate::from_ymd_opt(now.year(), mo, d);
         } else if let Some(d) = p.day {
-            // Day-of-month only: one-shot on its next occurrence from creation.
-            event.date = next_day_on_or_after(created_at.date(), d);
-            event.year_explicit = true;
+            if event.repetition.is_some() {
+                // Day-of-month with a period: recurring monthly anchor.
+                event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(d));
+            } else {
+                // Day-of-month only, no period: one-shot on its next occurrence from creation.
+                event.date = next_day_on_or_after(created_at.date(), d);
+                event.year_explicit = true;
+            }
         }
     }
 
@@ -388,6 +393,13 @@ fn summarize(event: &EventInfo) -> String {
             .collect();
         parts.push(format!("days={}", names.join(",")));
     }
+    if let Some(pattern) = &event.monthly_pattern {
+        parts.push(match pattern {
+            MonthlyPattern::DayOfMonth(d) => format!("day-of-month={d}"),
+            MonthlyPattern::LastDay => "monthly=last-day".to_string(),
+            MonthlyPattern::OrdinalWeekday(ord, wd) => format!("monthly={ord:?}-{wd:?}"),
+        });
+    }
     if let Some(rep) = &event.repetition {
         parts.push(format!("repeat=every {} {:?}", rep.interval, rep.unit));
     }
@@ -448,6 +460,7 @@ mod tests {
         assert_eq!(next.time(), NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         assert!(!c.event.year_explicit);
         assert!(c.event.legacy);
+        assert_eq!(c.event.normalize_time(), "10:00 26.09");
     }
 
     #[test]
@@ -458,6 +471,7 @@ mod tests {
         assert!(!c.event.active);
         assert!(c.event.year_explicit);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 4, 9));
+        assert_eq!(c.event.normalize_time(), "08:22 09.04.2026");
     }
 
     #[test]
@@ -469,6 +483,7 @@ mod tests {
             c.event.next_datetime.unwrap().date(),
             NaiveDate::from_ymd_opt(2026, 6, 20).unwrap()
         );
+        assert_eq!(c.event.normalize_time(), "18:50 20.06.2026");
     }
 
     #[test]
@@ -476,11 +491,12 @@ mod tests {
         let created = created_at_from_filename("20230620_140142_480.alert").unwrap();
         let c = convert("17:00 1-5 snack", created, None, 42, now());
         assert_eq!(c.status, Status::Scheduled);
-        let days = c.event.days.unwrap();
+        let days = c.event.days.as_ref().unwrap();
         assert_eq!(days.len(), 5);
         assert!(days.contains(&Weekday::Mon) && days.contains(&Weekday::Fri));
         assert!(!days.contains(&Weekday::Sat));
         assert!(c.event.date.is_none());
+        assert_eq!(c.event.normalize_time(), "17:00 Mon-Fri");
     }
 
     #[test]
@@ -491,6 +507,7 @@ mod tests {
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2024, 10, 27));
         assert!(c.event.year_explicit);
         assert_eq!(c.status, Status::Inactive);
+        assert_eq!(c.event.normalize_time(), "16:33 27.10.2024");
     }
 
     #[test]
@@ -527,6 +544,10 @@ mod tests {
         let c = convert("22:15 28/1: rent", created, Some(future_ms), 42, now());
         assert_eq!(c.status, Status::Scheduled);
         assert!(c.event.next_datetime.is_some());
+        assert_eq!(
+            c.event.normalize_time(),
+            "22:15 each 28th of the month every day"
+        );
 
         // Stale activation is rolled forward using the input's period (every 1 day).
         let past_ms = Local
@@ -539,6 +560,10 @@ mod tests {
         assert!(c.event.active);
         assert!(c.recalculated);
         assert!(c.event.next_datetime.unwrap() > now());
+        assert_eq!(
+            c.event.normalize_time(),
+            "22:15 each 28th of the month every day"
+        );
     }
 
     #[test]
