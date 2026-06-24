@@ -348,6 +348,17 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
     }
 
+    // A short date (no explicit year) recurs every year; an explicit "every
+    // year" suffix is redundant and already handled above. Skip when the user
+    // gave their own repeat interval or a weekday set (which carries its own
+    // recurrence).
+    if date.is_some() && !year_explicit && repetition.is_none() && days.is_none() {
+        repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Years,
+        });
+    }
+
     // Derive the plain message from the same normalization `richtext` uses for
     // the HTML fragment (single source of truth): horizontal whitespace within a
     // line collapses to single spaces, line breaks are preserved verbatim. The
@@ -526,6 +537,42 @@ mod tests {
         assert_eq!(d.month(), 11);
         assert!(!e.year_explicit);
         assert_eq!(e.message, "birthday reminder");
+    }
+
+    #[test]
+    fn parse_short_date_implies_yearly() {
+        // A short date (no explicit year) recurs every year.
+        let e = parse("10:03 15.12 Poly's bday").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 3, 0));
+        let d = e.date.unwrap();
+        assert_eq!(d.day(), 15);
+        assert_eq!(d.month(), 12);
+        assert!(!e.year_explicit);
+        assert_eq!(
+            e.repetition,
+            Some(Repetition {
+                interval: 1,
+                unit: TimeUnit::Years
+            })
+        );
+        assert_eq!(e.message, "Poly's bday");
+        assert_eq!(e.normalize_time(), "10:03 15.12 every year");
+    }
+
+    #[test]
+    fn parse_short_date_explicit_every_year_not_duplicated() {
+        // An explicit "every year" suffix is redundant — same single repetition.
+        let e = parse("10:03 15.12 Every yeaR Poly's bday").unwrap();
+        assert_eq!(
+            e.repetition,
+            Some(Repetition {
+                interval: 1,
+                unit: TimeUnit::Years
+            })
+        );
+        assert!(!e.year_explicit);
+        assert_eq!(e.message, "Poly's bday");
+        assert_eq!(e.normalize_time(), "10:03 15.12 every year");
     }
 
     #[test]
@@ -1079,7 +1126,7 @@ mod tests {
             "in 20 hours every 2 weeks",
             "11:26 12.10.2026",
             "11:26 12.10.2026 every 2 weeks",
-            "01:23 26.11",
+            "01:23 26.11 every year",
             "10:25 Mon-Fri",
             "01:25 Mon-Sat",
             "13:25 Mon-Wed,Fri",

@@ -197,9 +197,19 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                     None
                 }
             } else {
-                // Short date in the past — try next year
-                let next = NaiveDate::from_ymd_opt(d.year() + 1, d.month(), d.day())?;
-                Some(next.and_time(t))
+                // Short date without an explicit year recurs (every year by
+                // default): advance from this year's occurrence by the repeat
+                // interval until it is strictly in the future.
+                let (interval, unit) = event
+                    .repetition
+                    .as_ref()
+                    .map(|r| (r.interval, r.unit))
+                    .unwrap_or((1, TimeUnit::Years));
+                let mut next = dt;
+                while next <= now {
+                    next = advance_by(next, interval, unit)?;
+                }
+                Some(next)
             }
         }
         (Some(t), None) => {
@@ -235,8 +245,18 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
             } else if event.year_explicit {
                 None
             } else {
-                let next = NaiveDate::from_ymd_opt(d.year() + 1, d.month(), d.day())?;
-                Some(next.and_hms_opt(0, 0, 0)?)
+                // Short date without an explicit year recurs (every year by
+                // default): advance until strictly in the future.
+                let (interval, unit) = event
+                    .repetition
+                    .as_ref()
+                    .map(|r| (r.interval, r.unit))
+                    .unwrap_or((1, TimeUnit::Years));
+                let mut next = dt;
+                while next <= now {
+                    next = advance_by(next, interval, unit)?;
+                }
+                Some(next)
             }
         }
         (None, None) => None,
@@ -378,6 +398,38 @@ mod tests {
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert_eq!(dt.date().year(), past.date().year() + 1);
+    }
+
+    #[test]
+    fn play_short_date_recurs_yearly_across_reloads() {
+        // A short date (no explicit year) is an annual reminder: it must keep
+        // advancing year over year, not stall on a single +1-year roll. Mirrors
+        // test-cases.md Case 9.3 (birthday at 10:03 15.12).
+        let at = |y, m, d, h, mi, s| {
+            NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+                NaiveTime::from_hms_opt(h, mi, s).unwrap(),
+            )
+        };
+
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(10, 3, 0);
+        event.date = NaiveDate::from_ymd_opt(2026, 12, 15);
+        event.year_explicit = false;
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Years,
+        });
+
+        // First scheduling at 10:03:01 on the day itself — already past, so next
+        // year.
+        event = calc_next_at(event, at(2026, 12, 15, 10, 3, 1));
+        assert_eq!(event.next_datetime, Some(at(2027, 12, 15, 10, 3, 0)));
+        // Each subsequent reload advances another year.
+        event = calc_next_at(event, at(2027, 12, 15, 10, 3, 1));
+        assert_eq!(event.next_datetime, Some(at(2028, 12, 15, 10, 3, 0)));
+        event = calc_next_at(event, at(2028, 12, 15, 10, 3, 1));
+        assert_eq!(event.next_datetime, Some(at(2029, 12, 15, 10, 3, 0)));
     }
 
     #[test]

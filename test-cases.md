@@ -175,6 +175,22 @@
 | 2026-12-31 23:59:59 | USER   | 1:06 every year happy new year | happy new year | 01:06 every year |
 | 2028-01-01 01:06:01 | SYSTEM | 2029-01-01 01:06:00            |                |                  |
 
+### Case 9.3: Birthday every year
+| Current Time        | Actor  | Input / Expected Next          | Message        | Normalized       |
+|---------------------|--------|--------------------------------|----------------|------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Poly's bday        | Poly's bday    | 10:03 15.12 every year |
+| 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
+| 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
+| 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
+
+### Case 9.4: Birthday every year with optional "every year"
+| Current Time        | Actor  | Input / Expected Next               | Message        | Normalized       |
+|---------------------|--------|-------------------------------------|----------------|------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Every yeaR Poly's bday  | Poly's bday    | 10:03 15.12 every year |
+| 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
+| 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
+| 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
+
 ### Case 10: every month - fires at next 20:00, does not deactivate
 
 | Current Time        | Actor  | Input / Expected Next          | Message    | Normalized        |

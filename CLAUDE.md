@@ -69,9 +69,9 @@ cargo run --bin bench      # storage benchmark (1000 events)
 
 | Field | Type | Set by | Used when / for |
 |-------|------|--------|-----------------|
-| `date` | `Option<NaiveDate>` | parser | Short date / full date given (`1:23 26.11`, `31.12.2027`). One-off on that calendar day. |
+| `date` | `Option<NaiveDate>` | parser | Short date / full date given (`1:23 26.11`, `31.12.2027`). A short date (no year) recurs **every year** (parser attaches an implicit `every 1 year` repetition; a trailing `every year` is optional); a full date with explicit year is a one-off on that calendar day (unless given its own repeat interval). |
 | `time` | `Option<NaiveTime>` | parser | Clock time given anywhere (`13:23`, `5:24 PM`). Combined with `date`/`days`/`monthly_pattern`/`years`; absent for `in_offset`/`bare_hour`. |
-| `year_explicit` | `bool` | parser | `true` only when a full date spelled the year (`31.12.2027`); controls whether the year in `date` is honored or rolled forward. |
+| `year_explicit` | `bool` | parser | `true` only when a full date spelled the year (`31.12.2027`); when `false` (short date) the `date` drives a yearly recurrence (parser sets `repetition = every 1 year`, scheduler advances the year until future) rather than honoring the parsed year. |
 | `days` | `Option<HashSet<Weekday>>` | parser | Weekday-set recurrence (`13:45 mon-fri`). Fires at `time` on each listed weekday; pairs with `years` to restrict to given years. |
 | `years` | `Option<HashSet<i32>>` | parser | Standalone 4-digit year token(s) in 2000..=2100 (`13:25 2027 fri,sun`). Restricts a `days` schedule to those years. |
 | `repetition` | `Option<Repetition>` | parser | `every <n> <unit>` interval (`every 2 weeks`, `every hour`). Recurs from the start datetime / offset; reused by `scheduler` to advance `next_datetime`. |
@@ -93,7 +93,7 @@ cargo run --bin bench      # storage benchmark (1000 events)
 `test-cases.md` holds markdown tables driving `tests/table_tests.rs`. Rows alternate `USER` (parse + `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, assert `next_datetime` or `NONE`). A 4th column carries the expected reminder message: on `USER` rows it must equal the parsed `event.message` (asserted); on `SYSTEM` rows it is empty. A 5th column carries the expected canonical time expression: on `USER` rows it must equal `event.normalize_time()` (asserted; left empty when the input doesn't parse); on `SYSTEM` rows it is empty. A literal `\n` in the Input or Message column is decoded to a real newline by the harness (`unescape`), so multiline messages can be expressed in a single table cell. Add scenarios by appending `###` sections — no code changes needed.
 
 ## Datetime formats supported
-- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / relative offset / short date must lead. Minutes accept 1-2 digits, so `10:6` means `10:06` (`9:5 PM` → 21:05).
+- `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / relative offset / short date must lead. Minutes accept 1-2 digits, so `10:6` means `10:06` (`9:5 PM` → 21:05). A short date (`dd.mm`, **no** year) recurs **every year**: the parser attaches an implicit `every 1 year` repetition, so a trailing `every year` is optional/redundant and the canonical form is `HH:MM dd.mm every year` (`10:03 15.12` → `10:03 15.12 every year`). A full date with an explicit year (`31.12.2027`) stays a one-shot unless it carries its own repeat interval.
 - `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year. An optional leading `every` is absorbed, so `10:30 every fri` is identical to `10:30 fri`.
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then repeat interval.
 - `8 call Alex` → next 08:00; `24 ...` → 00:00; `25 ...` → invalid (not parsed).
