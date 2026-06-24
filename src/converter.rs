@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn day_only_maps_to_monthly_pattern() {
-        // Created 2024-10-12; day 27 -> recurring "each 27th of the month".
+        // Created 2024-10-12; day 27 -> recurring "each 27th day of the month".
         let created = created_at_from_filename("20241012_105344_580.alert").unwrap();
         let c = convert("16:33 27: concert", created, None, 42, now());
         assert_eq!(
@@ -486,13 +486,13 @@ mod tests {
             ))
         );
         assert_eq!(c.status, Status::Scheduled);
-        assert_eq!(c.event.normalize_time(), "16:33 each 27th of the month");
+        assert_eq!(c.event.normalize_time(), "16:33 each 27th day of the month");
     }
 
     #[test]
     fn period_maps_to_repetition() {
         let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
-        // "28/1:" -> each 28th of the month, every 1 day.
+        // "28/1:" -> each 28th day of the month, every 1 day.
         let c = convert("22:15 28/1: rent", created, None, 42, now());
         assert_eq!(
             c.event.monthly_pattern,
@@ -507,20 +507,20 @@ mod tests {
         );
         assert_eq!(
             c.event.normalize_time(),
-            "22:15 each 28th of the month every day"
+            "22:15 each 28th day of the month every day"
         );
         // "05/2:11:" -> day 5 of month 11 (yearly date), every 2 days.
         let c = convert("11:07 05/2:11: bday", created, None, 42, now());
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
         assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days");
-        // Minute period "11:36/90 4:" -> each 4th of the month, every 90 minutes.
+        // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
         let c = convert("11:36/90 4: pay", created, None, 42, now());
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Minutes);
         assert_eq!(
             c.event.normalize_time(),
-            "11:36 each 4th of the month every 90 minutes"
+            "11:36 each 4th day of the month every 90 minutes"
         );
     }
 
@@ -538,7 +538,7 @@ mod tests {
         assert!(c.event.next_datetime.is_some());
         assert_eq!(
             c.event.normalize_time(),
-            "22:15 each 28th of the month every day"
+            "22:15 each 28th day of the month every day"
         );
 
         // Stale activation is rolled forward using the input's period (every 1 day).
@@ -554,7 +554,7 @@ mod tests {
         assert!(c.event.next_datetime.unwrap() > now());
         assert_eq!(
             c.event.normalize_time(),
-            "22:15 each 28th of the month every day"
+            "22:15 each 28th day of the month every day"
         );
     }
 

@@ -123,7 +123,7 @@
 ### Case 7.4: Exact time and day of month + every 2 days (day-of-month has priority)
 | Current Time        | Actor  | Input / Expected Next                            | Message  | Normalized                                |
 |---------------------|--------|--------------------------------------------------|----------|-------------------------------------------|
-| 2026-06-24 19:36:00 | USER   | 22:15 every 28 of the month every 2 day call Mal | call Mal | 22:15 each 28th of the month every 2 days |
+| 2026-06-24 19:36:00 | USER   | 22:15 every 28 of the month every 2 day call Mal | call Mal | 22:15 each 28th day of the month every 2 days |
 | 2026-06-24 19:36:01 | SYSTEM | 2026-06-28 22:15:00                              |          |                                           |
 | 2026-06-28 22:15:01 | SYSTEM | 2026-06-30 22:15:00                              |          |                                           |
 | 2026-06-30 22:15:01 | SYSTEM | 2026-07-02 22:15:00                              |          |                                           |
@@ -133,10 +133,17 @@
 ### Case 7.5: Day of month only — fires monthly on the 28th, no repetition
 | Current Time        | Actor  | Input / Expected Next            | Message  | Normalized                    |
 |---------------------|--------|----------------------------------|----------|-------------------------------|
-| 2026-06-24 19:36:00 | USER   | 22:15 28th of the month call Mal | call Mal | 22:15 each 28th of the month  |
+| 2026-06-24 19:36:00 | USER   | 22:15 28th of the month call Mal | call Mal | 22:15 each 28th day of the month  |
 | 2026-06-24 19:36:01 | SYSTEM | 2026-06-28 22:15:00              |          |                               |
 | 2026-06-28 22:15:01 | SYSTEM | 2026-07-28 22:15:00              |          |                               |
 | 2026-07-28 22:15:01 | SYSTEM | 2026-08-28 22:15:00              |          |                               |
+
+### Case 7.6: Day of month with literal "day" — same as canonical form
+| Current Time        | Actor  | Input / Expected Next                | Message  | Normalized                  |
+|---------------------|--------|--------------------------------------|----------|-----------------------------|
+| 2026-06-24 19:36:00 | USER   | 22:15 28th day of the month call Mal | call Mal | 22:15 each 28th day of the month |
+| 2026-06-24 19:36:01 | SYSTEM | 2026-06-28 22:15:00                  |          |                             |
+| 2026-06-28 22:15:01 | SYSTEM | 2026-07-28 22:15:00                  |          |                             |
 
 
 ### Case 8: Every year — fires at next 1:34, does not deactivate

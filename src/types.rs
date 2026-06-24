@@ -64,7 +64,7 @@ impl EventInfo {
     /// - year restrictions → ascending comma list (`2027,2028`);
     /// - weekday sets → capitalized 3-letter days, Monday-first, contiguous runs of
     ///   ≥3 collapsed to `First-Last` (`mon-Friday,Sat` → `Mon-Sat`);
-    /// - monthly patterns → `first sunday` / `last day of the month`;
+    /// - monthly patterns → `first sunday` / `last day of the month` / `each 28th day of the month`;
     /// - repetition → `every <unit>` / `every <n> <units>`.
     ///
     /// Parts are emitted in the order [`crate::parser`] re-extracts them and joined
@@ -114,7 +114,7 @@ impl EventInfo {
                 }
                 MonthlyPattern::LastDay => "last day of the month".to_string(),
                 MonthlyPattern::DayOfMonth(d) => {
-                    format!("each {} of the month", ordinal_suffix(*d))
+                    format!("each {} day of the month", ordinal_suffix(*d))
                 }
             });
         }
@@ -602,7 +602,7 @@ mod tests {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(22, 15, 0);
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
-        assert_eq!(e.normalize_time(), "22:15 each 28th of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 28th day of the month");
         // Combined with a repeat interval (day-of-month rendered before repetition).
         e.repetition = Some(Repetition {
             interval: 2,
@@ -610,20 +610,20 @@ mod tests {
         });
         assert_eq!(
             e.normalize_time(),
-            "22:15 each 28th of the month every 2 days"
+            "22:15 each 28th day of the month every 2 days"
         );
         // Ordinal suffixes.
         e.repetition = None;
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(1));
-        assert_eq!(e.normalize_time(), "22:15 each 1st of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 1st day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(2));
-        assert_eq!(e.normalize_time(), "22:15 each 2nd of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 2nd day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(3));
-        assert_eq!(e.normalize_time(), "22:15 each 3rd of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 3rd day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(11));
-        assert_eq!(e.normalize_time(), "22:15 each 11th of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 11th day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(21));
-        assert_eq!(e.normalize_time(), "22:15 each 21st of the month");
+        assert_eq!(e.normalize_time(), "22:15 each 21st day of the month");
     }
 
     #[test]

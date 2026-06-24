@@ -48,13 +48,17 @@ static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 // Fixed day of the month: "28 of the month", "28th of the month",
-// "every 28 of the month", "each 5 of the month". The literal "of [the] month"
-// is required so it never collides with the bare-hour format (extraction also
-// runs before bare hour). An optional leading "every"/"each" is absorbed (the
-// canonical form uses "each"); an optional ordinal suffix is accepted.
+// "28th day of the month", "every 28 of the month", "each 5 of the month". The
+// literal "of [the] month" is required so it never collides with the bare-hour
+// format (extraction also runs before bare hour). An optional leading
+// "every"/"each" is absorbed; an optional ordinal suffix and an optional literal
+// "day" before "of" are accepted (the canonical form is "each <N><ord> day of
+// the month").
 static RE_DAY_OF_MONTH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:every\s+|each\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(?:the\s+)?month\b")
-        .unwrap()
+    Regex::new(
+        r"(?i)\b(?:every\s+|each\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(?:day\s+)?of\s+(?:the\s+)?month\b",
+    )
+    .unwrap()
 });
 
 static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
@@ -1006,6 +1010,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_day_of_month_day_word() {
+        // The literal "day" before "of the month" is accepted.
+        let e = parse("9:00 each 28th day of the month check").unwrap();
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(28)));
+        assert_eq!(e.message, "check");
+    }
+
+    #[test]
     fn parse_day_of_month_each_prefix() {
         let e = parse("8:00 each 5 of the month water plants").unwrap();
         assert_eq!(e.monthly_pattern, Some(MonthlyPattern::DayOfMonth(5)));
@@ -1076,8 +1088,8 @@ mod tests {
             "10:00 first sunday",
             "17:00 third friday",
             "18:00 last day of the month",
-            "22:15 each 28th of the month",
-            "22:15 each 28th of the month every 2 days",
+            "22:15 each 28th day of the month",
+            "22:15 each 28th day of the month every 2 days",
             "10:00 first friday every 10 days",
             "15:30 every 3 days",
             "01:34 every year",
