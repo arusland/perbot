@@ -1,7 +1,7 @@
 use crate::import::{self, PendingImport};
 use crate::pending::PendingMessage;
 use crate::state::EventProvider;
-use crate::telegram::{LIST_PAGE_SIZE, format_page_at, scheduled_message};
+use crate::telegram::{LIST_PAGE_SIZE, event_detail, format_page_at, scheduled_message};
 use crate::types::EventInfo;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
@@ -299,6 +299,51 @@ pub async fn handle_list_callback(
     Ok(())
 }
 
+/// Parses a `/event<id>` (or `/event<id>@<bot_username>`) command into the event id.
+///
+/// `/event<id>` has no space between the name and its argument, so teloxide's
+/// `BotCommands` derive can't parse it; it is matched manually here. Returns `None`
+/// for anything else (including the bare `/events` list command, `/event` with no id,
+/// a non-numeric id, or a mismatched `@bot` suffix).
+pub fn parse_event_command(text: &str, bot_username: &str) -> Option<i64> {
+    let token = text.trim().split_whitespace().next()?;
+    let rest = token.strip_prefix("/event")?;
+    // Strip an optional `@bot_username` suffix; reject if it names another bot.
+    let digits = match rest.split_once('@') {
+        Some((digits, bot)) if bot.eq_ignore_ascii_case(bot_username) => digits,
+        Some(_) => return None,
+        None => rest,
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<i64>().ok()
+}
+
+/// Sends the single-event detail view for `/event<id>`: the bold datetime/recurrence
+/// line, the full rich-text message, and the upcoming-launches preview. The event is
+/// loaded by id and shown only when it belongs to the requesting chat (ids are
+/// user-influenceable), otherwise the chat is told the event was not found.
+pub async fn handle_event_view(
+    bot: &Bot,
+    provider: &EventProvider,
+    chat_id: ChatId,
+    id: i64,
+) -> ResponseResult<()> {
+    match provider.get_event(id) {
+        Some(event) if event.chat_id == chat_id.0 => {
+            let now = Local::now().naive_local();
+            bot.send_message(chat_id, event_detail(&event, now))
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
+        _ => {
+            bot.send_message(chat_id, "Event not found.").await?;
+        }
+    }
+    Ok(())
+}
+
 /// Parses snooze callback data `eid:<id>:sn:<minutes>` into `(event_id, minutes)`.
 /// Returns `None` for any malformed input or a non-snooze action.
 fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
@@ -592,6 +637,21 @@ mod tests {
         assert_eq!(parse_snooze_callback("eid:42:sn:"), None);
         assert_eq!(parse_snooze_callback("eid:42:sn:abc"), None);
         assert_eq!(parse_snooze_callback("ev:1"), None);
+    }
+
+    #[test]
+    fn parse_event_command_round_trips_and_rejects() {
+        assert_eq!(parse_event_command("/event42", "perbot"), Some(42));
+        assert_eq!(parse_event_command("  /event7  ", "perbot"), Some(7));
+        assert_eq!(parse_event_command("/event42@perbot", "perbot"), Some(42));
+        assert_eq!(parse_event_command("/event42@PerBot", "perbot"), Some(42));
+
+        // The list command, missing/empty/non-numeric ids, and a foreign @bot.
+        assert_eq!(parse_event_command("/events", "perbot"), None);
+        assert_eq!(parse_event_command("/event", "perbot"), None);
+        assert_eq!(parse_event_command("/eventabc", "perbot"), None);
+        assert_eq!(parse_event_command("/event42@otherbot", "perbot"), None);
+        assert_eq!(parse_event_command("not a command", "perbot"), None);
     }
 
     #[test]

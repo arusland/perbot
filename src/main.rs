@@ -188,6 +188,13 @@ async fn message_handler(
             return Ok(());
         }
 
+        // `/event<id>` (no space before the id) opens the single-event detail view.
+        // It can't go through the `BotCommands` parser, so it is matched manually.
+        if let Some(id) = commands::parse_event_command(text, &bot_username) {
+            commands::handle_event_view(&bot, &provider, msg.chat.id, id).await?;
+            return Ok(());
+        }
+
         // Completing a pending "send me the reminder text": once a chat is waiting
         // for a body, the next non-command text is used verbatim as that body.
         let pending_event = pending_msg.lock().unwrap().remove(&msg.chat.id.0);

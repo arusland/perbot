@@ -183,12 +183,12 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
     None
 }
 
-/// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
-/// line — with `, <recurrence>` appended inside the parentheses, next to the
-/// relative time, when the event repeats — then an indented plain-text message
-/// preview (tags stripped, truncated). The preview is plain text, so it is
-/// HTML-escaped before output.
-fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+/// The bold datetime/relative line shared by the `/events` two-line row and the
+/// single-event detail view: `• <b>HH:MM dd.mm.yyyy (in <rel>[, <recurrence>])</b>`.
+/// `, <recurrence>` is appended inside the parentheses, next to the relative time,
+/// when the event repeats. Datetime/relative/recurrence parts contain no HTML
+/// specials. Returns `• <b>—</b>` for an event with no upcoming launch.
+fn event_when_line(e: &EventInfo, now: NaiveDateTime) -> String {
     let recurrence = describe_recurrence(e)
         .map(|r| format!(", {r}"))
         .unwrap_or_default();
@@ -201,8 +201,39 @@ fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime)
         )),
         None => "—".to_string(),
     };
+    format!("• <b>{when}</b>")
+}
+
+/// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
+/// line ([`event_when_line`]) ending with a tappable `/event<id>` link that opens
+/// the single-event detail view, then an indented plain-text message preview (tags
+/// stripped, truncated; HTML-escaped).
+fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
-    let _ = writeln!(out, "• <b>{when}</b>\n  {message}");
+    let _ = writeln!(
+        out,
+        "{} /event{}\n  {message}",
+        event_when_line(e, now),
+        e.id
+    );
+}
+
+/// Detailed single-event view for `/event<id>`: the same bold datetime/recurrence
+/// line as the `/events` two-line row ([`event_when_line`]), the full HTML message
+/// fragment (formatting preserved, not truncated), and the upcoming-launches preview
+/// ([`next_launches_preview`], identical to a fired reminder). The preview is empty
+/// for one-off or inactive events.
+pub fn event_detail(event: &EventInfo, now: NaiveDateTime) -> String {
+    let preview = match event.next_datetime {
+        Some(dt) => next_launches_preview(event, dt),
+        None => String::new(),
+    };
+    format!(
+        "{}\n{}{}",
+        event_when_line(event, now),
+        event.message,
+        html::escape(&preview)
+    )
 }
 
 /// Number of events shown per page in a paginated list reply.
@@ -600,12 +631,13 @@ mod tests {
         let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         // Bold datetime line and message live on separate lines; no `—` separator.
-        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b>\n"));
         assert!(!text.contains(" — "));
         // Plain text, tag-free, truncated to MESSAGE_PREVIEW_MAX chars + "...".
         assert!(text.contains("  call the office right now please and bring the doc..."));
         // One-off event: no recurrence suffix on the datetime line.
         assert!(!text.contains(", every"));
+        // The /event<id> link ends the bold datetime line (id 0 for sample events).
+        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b> /event0\n"));
     }
 
     #[test]
@@ -669,8 +701,45 @@ mod tests {
             unit: TimeUnit::Days,
         });
         let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true);
-        // Recurrence sits inside the parentheses, next to the relative time.
-        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b>\n"));
+        // Recurrence sits inside the parentheses, next to the relative time; the
+        // /event<id> link ends the line.
+        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
+    }
+
+    #[test]
+    fn event_detail_one_off_has_no_launches_block() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let e = sample_event(
+            "<b>call</b> the office and bring the documents",
+            Some(now + Duration::hours(2)),
+        );
+        let text = event_detail(&e, now);
+        // Bold when-line, then the full untruncated HTML message verbatim.
+        assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h)</b>\n"));
+        assert!(text.contains("<b>call</b> the office and bring the documents"));
+        // One-off: no upcoming-launches block.
+        assert!(!text.contains("Next launches:"));
+    }
+
+    #[test]
+    fn event_detail_recurring_shows_launches_block() {
+        use crate::types::{Repetition, TimeUnit};
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let dt = now + Duration::hours(2);
+        let mut e = sample_event("standup", Some(dt));
+        e.time = Some(dt.time());
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        let text = event_detail(&e, now);
+        assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h, every day)</b>\n"));
+        assert!(text.contains("standup"));
+        // Recurring: launches block present, listing dates after the upcoming one.
+        assert!(text.contains("Next launches:"));
+        assert!(text.contains("• 14:00 16.06.2026"));
     }
 
     #[test]
