@@ -184,20 +184,25 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
 }
 
 /// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
-/// line — with `, <recurrence>` appended when the event repeats — then an indented
-/// plain-text message preview (tags stripped, truncated). The preview is plain
-/// text, so it is HTML-escaped before output.
+/// line — with `, <recurrence>` appended inside the parentheses, next to the
+/// relative time, when the event repeats — then an indented plain-text message
+/// preview (tags stripped, truncated). The preview is plain text, so it is
+/// HTML-escaped before output.
 fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+    let recurrence = describe_recurrence(e)
+        .map(|r| format!(", {r}"))
+        .unwrap_or_default();
     let when = match e.next_datetime {
-        Some(dt) => html::escape(&format_when(now, dt)),
+        Some(dt) => html::escape(&format!(
+            "{} (in {}{})",
+            dt.format("%H:%M %d.%m.%Y"),
+            format_relative(now, dt),
+            recurrence
+        )),
         None => "—".to_string(),
     };
-    let recurrence = match describe_recurrence(e) {
-        Some(r) => format!(", {}", html::escape(&r)),
-        None => String::new(),
-    };
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
-    let _ = writeln!(out, "• <b>{when}{recurrence}</b>\n  {message}");
+    let _ = writeln!(out, "• <b>{when}</b>\n  {message}");
 }
 
 /// Number of events shown per page in a paginated list reply.
@@ -595,7 +600,7 @@ mod tests {
         let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         // Bold datetime line and message live on separate lines; no `—` separator.
-        assert!(text.contains("• <b>14:00 15.06.2026 (2h)</b>\n"));
+        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b>\n"));
         assert!(!text.contains(" — "));
         // Plain text, tag-free, truncated to MESSAGE_PREVIEW_MAX chars + "...".
         assert!(text.contains("  call the office right now please and bring the doc..."));
@@ -664,8 +669,8 @@ mod tests {
             unit: TimeUnit::Days,
         });
         let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true);
-        // Recurrence follows the relative time inside the bold datetime line.
-        assert!(text.contains("• <b>14:00 15.06.2026 (2h), every 2 days</b>\n"));
+        // Recurrence sits inside the parentheses, next to the relative time.
+        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b>\n"));
     }
 
     #[test]
