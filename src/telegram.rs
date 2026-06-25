@@ -291,10 +291,11 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
 
 /// Builds the HTML reply for a single page of an event list.
 ///
-/// `title` is the bare heading (e.g. `"Upcoming events"`); a `(page x/y)` suffix
-/// is appended only when there is more than one page. `empty` is the full message
-/// shown when there are no events. Returns the rendered text and the total number
-/// of pages, so the caller can decide whether to attach navigation buttons.
+/// `title` is the bare heading (e.g. `"Upcoming events"`), rendered as-is; the
+/// page position is surfaced by the navigation keyboard's indicator button, not in
+/// the title. `empty` is the full message shown when there are no events. Returns
+/// the rendered text and the total number of pages, so the caller can decide
+/// whether to attach navigation buttons.
 /// `page` is clamped to the valid range. When `two_line` is true (used by
 /// `/events`), each event renders as a datetime line plus an indented plain-text
 /// message preview; otherwise as the single-line HTML row.
@@ -335,16 +336,7 @@ pub fn format_page_at(
     let start = page * per_page;
     let slice = &events[start..(start + per_page).min(events.len())];
 
-    let mut out = if pages > 1 {
-        format!(
-            "<b>{} (page {}/{}):</b>\n",
-            html::escape(title),
-            page + 1,
-            pages
-        )
-    } else {
-        format!("<b>{}:</b>\n", html::escape(title))
-    };
+    let mut out = format!("<b>{}:</b>\n", html::escape(title));
     for e in slice {
         if two_line {
             write_event_row_two_line(&mut out, e, now);
@@ -607,17 +599,17 @@ mod tests {
             .map(|i| sample_event(&format!("event {i}"), Some(now + Duration::hours(i + 1))))
             .collect();
 
-        // First page: 10 rows, labelled 1/3.
+        // First page: 10 rows. Page position lives on the keyboard, not the title.
         let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", false);
         assert_eq!(pages, 3);
-        assert!(p0.starts_with("<b>Upcoming events (page 1/3):</b>\n"));
+        assert!(p0.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p0.contains("event 0"));
         assert!(p0.contains("event 9"));
         assert!(!p0.contains("event 10"));
 
-        // Last page: only 5 rows, labelled 3/3. Out-of-range page clamps to last.
+        // Last page: only 5 rows. Out-of-range page clamps to last.
         let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none", false);
-        assert!(p_last.starts_with("<b>Upcoming events (page 3/3):</b>\n"));
+        assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
         assert_eq!(p_last.lines().count(), 1 + 5);

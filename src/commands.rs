@@ -14,6 +14,11 @@ use teloxide::{
     utils::command::BotCommands,
 };
 
+/// Callback data for non-interactive buttons (e.g. the page indicator). It has
+/// no `:`-prefixed envelope and matches no list tag, so `main`'s router hands it
+/// to `handle_list_callback`, which answers the query and ignores it.
+const NOOP_DATA: &str = "noop";
+
 /// The paginated list commands. Each variant knows how to fetch its events,
 /// title its reply, and tag its inline-button callbacks (`<tag>:<page>`).
 #[derive(Clone, Copy)]
@@ -180,7 +185,9 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 ///
 /// Returns `None` when everything fits on a single page (no buttons needed).
 /// Otherwise a single row holds `◀` / `▶` buttons (each present only when there
-/// is a page to move to), carrying `<tag>:<target-page>` callback data.
+/// is a page to move to), carrying `<tag>:<target-page>` callback data, with a
+/// non-interactive `<page>/<total>` indicator button between them (callback
+/// `noop`, no handler — see `NOOP_DATA`).
 fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<InlineKeyboardMarkup> {
     if total_pages <= 1 {
         return None;
@@ -193,6 +200,10 @@ fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<Inli
             format!("{tag}:{}", page - 1),
         ));
     }
+    row.push(InlineKeyboardButton::callback(
+        format!("{}/{total_pages}", page + 1),
+        NOOP_DATA,
+    ));
     if page + 1 < total_pages {
         row.push(InlineKeyboardButton::callback(
             "Next ▶",
@@ -864,6 +875,54 @@ mod tests {
             ["eid:42:delyes", "eid:42:delno"]
         );
         assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
+    }
+
+    #[test]
+    fn list_keyboard_layout_and_indicator() {
+        use teloxide::types::InlineKeyboardButtonKind::CallbackData;
+
+        // (label, callback-data) pairs of the single keyboard row.
+        let buttons = |kb: InlineKeyboardMarkup| -> Vec<(String, String)> {
+            kb.inline_keyboard
+                .concat()
+                .iter()
+                .map(|b| match &b.kind {
+                    CallbackData(d) => (b.text.clone(), d.clone()),
+                    _ => panic!("expected callback data"),
+                })
+                .collect()
+        };
+
+        // Single page → no keyboard.
+        assert!(list_keyboard(ListKind::Events, 0, 1).is_none());
+
+        // Middle page: Prev, the indicator, then Next.
+        assert_eq!(
+            buttons(list_keyboard(ListKind::Events, 1, 3).unwrap()),
+            [
+                ("◀ Prev".to_string(), "ev:0".to_string()),
+                ("2/3".to_string(), NOOP_DATA.to_string()),
+                ("Next ▶".to_string(), "ev:2".to_string()),
+            ]
+        );
+
+        // First page: no Prev.
+        assert_eq!(
+            buttons(list_keyboard(ListKind::Events, 0, 3).unwrap()),
+            [
+                ("1/3".to_string(), NOOP_DATA.to_string()),
+                ("Next ▶".to_string(), "ev:1".to_string()),
+            ]
+        );
+
+        // Last page: no Next.
+        assert_eq!(
+            buttons(list_keyboard(ListKind::Events, 2, 3).unwrap()),
+            [
+                ("◀ Prev".to_string(), "ev:1".to_string()),
+                ("3/3".to_string(), NOOP_DATA.to_string()),
+            ]
+        );
     }
 
     #[test]
