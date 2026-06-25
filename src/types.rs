@@ -83,13 +83,13 @@ impl EventInfo {
         }
 
         // Date (never co-occurs with an offset). A short date (no explicit year)
-        // is a yearly event, marked with a trailing `yearly`.
+        // is a yearly event; the `yearly` marker is emitted last (after any
+        // repetition, see below) so it always trails the canonical string.
         if let Some(d) = self.date {
             if self.year_explicit {
                 parts.push(d.format("%d.%m.%Y").to_string());
             } else {
                 parts.push(d.format("%d.%m").to_string());
-                parts.push("yearly".to_string());
             }
         }
 
@@ -127,6 +127,13 @@ impl EventInfo {
             } else {
                 format!("every {} {}", rep.interval, rep.unit.label(true))
             });
+        }
+
+        // A short date (no explicit year) is yearly by default. Emit the marker
+        // last, so it trails any repetition (`every 2 days yearly`). This is a
+        // distinct token from the `every year` a `Years` repetition produces.
+        if self.date.is_some() && !self.year_explicit {
+            parts.push("yearly".to_string());
         }
 
         parts.join(" ")

@@ -215,6 +215,26 @@
 | 2027-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
 | 2028-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
 
+### Case 9.8: Short date with repetition — date sets the start, then every 2 days
+
+A short date with a non-year repetition is **not** yearly: the date is the start (the next
+future occurrence of that day), then `every 2 days` governs. Far-future timestamps keep the
+stored short-date year (set to the real current year at parse time) in the past, so the case
+is independent of when the suite runs.
+
+| Current Time        | Actor  | Input / Expected Next              | Message   | Normalized               |
+|---------------------|--------|------------------------------------|-----------|--------------------------|
+| 2099-10-01 09:00:00 | USER   | 11:07 05.11 every 2 days take meds | take meds | 11:07 05.11 every 2 days yearly |
+| 2099-10-01 09:00:00 | SYSTEM | 2099-11-05 11:07:00                |           |                          |
+| 2099-11-05 11:07:01 | SYSTEM | 2099-11-07 11:07:00                |           |                          |
+| 2099-11-07 11:07:01 | SYSTEM | 2099-11-09 11:07:00                |           |                          |
+
+### Case 9.9: Short date with repetition — first and last only
+| Current Time        | Actor  | Input / Expected Next              | Message   | Normalized               |
+|---------------------|--------|------------------------------------|-----------|--------------------------|
+| 2099-10-01 09:00:00 | USER   | 11:07 05.11 every 2 days take meds | take meds | 11:07 05.11 every 2 days yearly |
+| 2099-11-07 11:07:01 | SYSTEM | 2099-11-09 11:07:00                |           |                          |
+
 ### Case 10: every month - fires at next 20:00, does not deactivate
 
 | Current Time        | Actor  | Input / Expected Next          | Message    | Normalized        |

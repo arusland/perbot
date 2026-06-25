@@ -352,10 +352,12 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
     }
 
-    // A short date (day.month, no year) is inherently a yearly event. The date
-    // itself drives the yearly wrap in `scheduler`, so absorb a redundant
-    // explicit "every year"/"yearly" and drop any Years repetition. An explicit
-    // year keeps its repetition.
+    // A short date (day.month, no year) is a yearly event *by default*. The date
+    // itself drives the yearly wrap in `scheduler`, so absorb a redundant explicit
+    // "every year"/"yearly" and drop any Years repetition. A non-year repetition
+    // (e.g. "every 2 days") is kept and governs the recurrence — the short date
+    // becomes the start anchor instead of a yearly wrap. An explicit year keeps
+    // its repetition.
     if date.is_some() && !year_explicit {
         if matches!(&repetition, Some(r) if r.unit == TimeUnit::Years) {
             repetition = None;
@@ -800,6 +802,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_short_date_with_repetition_keeps_repetition() {
+        // A non-year repetition on a short date is kept and governs the recurrence:
+        // the date is the start anchor. The short date is still yearly by default,
+        // so the canonical form keeps the trailing "yearly".
+        let e = parse("11:07 05.11 every 2 days take meds").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(11, 7, 0));
+        assert_eq!(e.date, NaiveDate::from_ymd_opt(Local::now().year(), 11, 5));
+        assert!(!e.year_explicit);
+        let rep = e.repetition.as_ref().unwrap();
+        assert_eq!(rep.interval, 2);
+        assert_eq!(rep.unit, TimeUnit::Days);
+        assert_eq!(e.message, "take meds");
+        assert_eq!(e.normalize_time(), "11:07 05.11 every 2 days yearly");
+    }
+
     // --- Bare hour tests ---
 
     #[test]
@@ -1119,6 +1137,7 @@ mod tests {
             "11:26 12.10.2026",
             "11:26 12.10.2026 every 2 weeks",
             "01:23 26.11 yearly",
+            "11:07 05.11 every 2 days yearly",
             "10:03 15.12.2027 every year",
             "10:25 Mon-Fri",
             "01:25 Mon-Sat",

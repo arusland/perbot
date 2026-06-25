@@ -184,20 +184,28 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
         (Some(t), Some(d)) => {
             let dt = d.and_time(t);
             if dt > now {
+                // First fire: on the stored date (the next future occurrence for a
+                // future short date, or the explicit date).
                 Some(dt)
-            } else if event.year_explicit {
-                // Explicit year: one-shot unless a repeat interval is set
-                if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref()) {
-                    let mut next = base;
-                    while next <= now {
-                        next = advance_by(next, rep.interval, rep.unit)?;
-                    }
-                    Some(next)
-                } else {
-                    None
+            } else if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref())
+            {
+                // Already scheduled once and repeating (explicit year *or* short
+                // date): advance from the previous fire by the repeat interval. For
+                // a short date this means the repetition — not the yearly wrap —
+                // governs subsequent fires.
+                let mut next = base;
+                while next <= now {
+                    next = advance_by(next, rep.interval, rep.unit)?;
                 }
+                Some(next)
+            } else if event.year_explicit {
+                // Explicit year, no repetition: one-shot, already fired.
+                None
             } else {
-                // Short date in the past — advance one year at a time until future.
+                // Short date, not yet fired (or with no repetition): the first fire
+                // is the next future occurrence of this day — advance one year at a
+                // time until future. A non-year repetition (handled above) then
+                // takes over on later fires; otherwise it repeats yearly.
                 let mut next = NaiveDate::from_ymd_opt(d.year() + 1, d.month(), d.day())?;
                 while next.and_time(t) <= now {
                     next = NaiveDate::from_ymd_opt(next.year() + 1, d.month(), d.day())?;
@@ -545,6 +553,38 @@ mod tests {
         // Interval resumes from the anchor.
         event = calc_next_at(event, at(2026, 7, 28, 22, 15, 1));
         assert_eq!(event.next_datetime, Some(at(2026, 7, 30, 22, 15, 0)));
+    }
+
+    #[test]
+    fn play_short_date_with_repetition() {
+        // A short date (no explicit year) with a non-year repetition: the date is
+        // the start (next future occurrence), then the interval governs. Mirrors
+        // test-cases.md Case 9.8. Far-future `now` keeps the stored short-date year
+        // (set to the real current year by the parser) safely in the past.
+        let at = |y, m, d, h, mi, s| {
+            NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+                NaiveTime::from_hms_opt(h, mi, s).unwrap(),
+            )
+        };
+
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(11, 7, 0);
+        event.date = NaiveDate::from_ymd_opt(2026, 11, 5);
+        event.year_explicit = false;
+        event.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+
+        // First scheduling: the next future Nov 5 at 11:07.
+        event = calc_next_at(event, at(2099, 10, 1, 9, 0, 0));
+        assert_eq!(event.next_datetime, Some(at(2099, 11, 5, 11, 7, 0)));
+        // After it fires, the repetition takes over: +2 days (not a yearly wrap).
+        event = calc_next_at(event, at(2099, 11, 5, 11, 7, 1));
+        assert_eq!(event.next_datetime, Some(at(2099, 11, 7, 11, 7, 0)));
+        event = calc_next_at(event, at(2099, 11, 7, 11, 7, 1));
+        assert_eq!(event.next_datetime, Some(at(2099, 11, 9, 11, 7, 0)));
     }
 
     #[test]

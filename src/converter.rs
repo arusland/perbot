@@ -509,11 +509,11 @@ mod tests {
             c.event.normalize_time(),
             "22:15 each 28th day of the month every day"
         );
-        // "05/2:11:" -> day 5 of month 11 (yearly date), every 2 days.
+        // "05/2:11:" -> day 5 of month 11 (start anchor), every 2 days.
         let c = convert("11:07 05/2:11: bday", created, None, 42, now());
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
-        assert_eq!(c.event.normalize_time(), "11:07 05.11 yearly every 2 days");
+        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days yearly");
         // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
         let c = convert("11:36/90 4: pay", created, None, 42, now());
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
@@ -522,6 +522,39 @@ mod tests {
             c.event.normalize_time(),
             "11:36 each 4th day of the month every 90 minutes"
         );
+    }
+
+    #[test]
+    fn colon_date_without_period_is_yearly() {
+        let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
+        // Legacy colon date "05:11:" with no period -> day 5 of month 11, recurs yearly.
+        let c = convert("11:07 05:11: bday", created, None, 42, now());
+        assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
+        assert_eq!(c.event.time, NaiveTime::from_hms_opt(11, 7, 0));
+        assert!(!c.event.year_explicit);
+        assert!(c.event.repetition.is_none());
+        assert_eq!(c.event.message, "bday");
+        assert_eq!(c.event.normalize_time(), "11:07 05.11 yearly");
+    }
+
+    #[test]
+    fn colon_date_with_day_period_repeats_by_interval() {
+        let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
+        // Legacy colon date "05/2:11:" -> day 5 of month 11 as the start anchor,
+        // then every 2 days (the period governs, so it is not a yearly event).
+        let c = convert("11:07 05/2:11: bday", created, None, 42, now());
+        assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
+        assert_eq!(c.event.time, NaiveTime::from_hms_opt(11, 7, 0));
+        assert!(!c.event.year_explicit);
+        assert_eq!(
+            c.event.repetition,
+            Some(Repetition {
+                interval: 2,
+                unit: TimeUnit::Days
+            })
+        );
+        assert_eq!(c.event.message, "bday");
+        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days yearly");
     }
 
     #[test]
