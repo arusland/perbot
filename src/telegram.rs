@@ -63,7 +63,9 @@ pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInf
     )
 }
 
-/// Short relative time until `dt` from `now`, e.g. `13 mins`, `1h`, `2d`, `1w`.
+/// Short relative time until `dt` from `now`, e.g. `13 mins`, `1h`, `2d`, `1w`,
+/// `1.4y`, `2y`. Past ~52 weeks the value is shown in years to one decimal place,
+/// collapsing to a bare integer (`1y`, `2y`) on a whole year.
 fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     let secs = (dt - now).num_seconds();
     if secs <= 0 {
@@ -84,7 +86,18 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
     if days < 7 {
         return format!("{}d", days);
     }
-    format!("{}w", days / 7)
+    let weeks = days / 7;
+    if weeks < 52 {
+        return format!("{}w", weeks);
+    }
+    // >= ~1 year: show years to one decimal, dropping a trailing ".0".
+    // tenths-of-a-year via integer rounding (+182 ≈ half of 365).
+    let tenths = (days * 10 + 182) / 365;
+    if tenths % 10 == 0 {
+        format!("{}y", tenths / 10)
+    } else {
+        format!("{}.{}y", tenths / 10, tenths % 10)
+    }
 }
 
 /// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
@@ -830,5 +843,10 @@ mod tests {
         assert_eq!(at(now, Duration::days(2)), "2d");
         assert_eq!(at(now, Duration::days(7)), "1w");
         assert_eq!(at(now, Duration::days(21)), "3w");
+        assert_eq!(at(now, Duration::days(51 * 7)), "51w"); // just under a year
+        assert_eq!(at(now, Duration::days(52 * 7)), "1y"); // 364 days
+        assert_eq!(at(now, Duration::days(511)), "1.4y");
+        assert_eq!(at(now, Duration::days(693)), "1.9y");
+        assert_eq!(at(now, Duration::days(104 * 7)), "2y"); // 728 days
     }
 }
