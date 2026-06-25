@@ -323,6 +323,56 @@ impl EventStorage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Replaces every parsed field of an event (time/recurrence + message) plus the
+    /// recomputed `active`/`next_datetime`. Identity columns (`chat_id`, `msg_id`,
+    /// `created_at`, `legacy`, `snoozed`) are left untouched. Used by the `/event<id>`
+    /// edit flow. Returns `true` when a row was updated.
+    pub fn update_event(&self, event: &EventInfo) -> Result<bool> {
+        let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
+        let time_str = event.time.map(|t| t.format("%H:%M:%S").to_string());
+        let next_str = event
+            .next_datetime
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        let days_str = event.days.as_ref().map(serialize_days);
+        let (repeat_interval, repeat_unit) = match &event.repetition {
+            Some(rep) => (Some(rep.interval), Some(rep.unit.label(true).to_string())),
+            None => (None, None),
+        };
+        let (in_offset_val, in_offset_unit) = match event.in_offset {
+            Some((v, u)) => (Some(v), Some(u.label(true).to_string())),
+            None => (None, None),
+        };
+        let monthly_str = event
+            .monthly_pattern
+            .as_ref()
+            .map(serialize_monthly_pattern);
+        let years_str = event.years.as_ref().map(serialize_years);
+
+        let rows_affected = self.conn.execute(
+            "UPDATE events SET date = ?1, time = ?2, year_explicit = ?3, message = ?4, active = ?5, next_datetime = ?6, days = ?7, repeat_interval = ?8, repeat_unit = ?9, in_offset = ?10, in_offset_unit = ?11, bare_hour = ?12, monthly_pattern = ?13, years = ?14
+             WHERE id = ?15",
+            params![
+                date_str,
+                time_str,
+                event.year_explicit as i32,
+                event.message,
+                event.active as i32,
+                next_str,
+                days_str,
+                repeat_interval,
+                repeat_unit,
+                in_offset_val,
+                in_offset_unit,
+                event.bare_hour,
+                monthly_str,
+                years_str,
+                event.id,
+            ],
+        )?;
+
+        Ok(rows_affected > 0)
+    }
+
     /// Updates `active` and `next_datetime` for an event after `calc_next` is called.
     pub fn update_schedule(
         &self,
@@ -739,6 +789,46 @@ mod tests {
 
         storage.delete(id).unwrap();
         assert!(storage.get_event(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_event_replaces_fields_keeps_identity() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+        let mut event = make_event("original message");
+        event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
+
+        let id = storage.insert_event(&event).unwrap();
+        let original = storage.get_event(id).unwrap().unwrap();
+
+        // Build the replacement: a new clock time + weekday recurrence and a new
+        // message, with the identity fields carried over (as the edit flow does).
+        let mut updated = original.clone();
+        updated.message = "updated message".to_string();
+        updated.date = None;
+        updated.year_explicit = false;
+        updated.time = Some(NaiveTime::from_hms_opt(9, 30, 0).unwrap());
+        updated.days = Some(HashSet::from([Weekday::Mon, Weekday::Fri]));
+        updated.next_datetime = Some(NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2030, 1, 4).unwrap(),
+            NaiveTime::from_hms_opt(9, 30, 0).unwrap(),
+        ));
+
+        assert!(storage.update_event(&updated).unwrap());
+
+        let stored = storage.get_event(id).unwrap().unwrap();
+        assert_eq!(stored.message, "updated message");
+        assert_eq!(stored.time, updated.time);
+        assert_eq!(stored.days, updated.days);
+        assert_eq!(stored.date, None);
+        assert!(!stored.year_explicit);
+        assert_eq!(stored.next_datetime, updated.next_datetime);
+        // Identity fields are untouched by update_event.
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.chat_id, original.chat_id);
+        assert_eq!(stored.msg_id, original.msg_id);
+        assert_eq!(stored.created_at, original.created_at);
     }
 
     #[test]

@@ -22,8 +22,27 @@ pub fn new_pending() -> PendingMessage {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// Per-chat events being edited, keyed by chat id; the value is the id of the
+/// event whose time and message the next message will replace. Set when the user
+/// taps Edit on the `/event<id>` view and cleared when the edit completes or is
+/// cancelled. In-memory only, like [`PendingMessage`].
+pub type PendingEdit = Arc<Mutex<HashMap<i64, i64>>>;
+
+pub fn new_pending_edit() -> PendingEdit {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 /// Prompt shown after a time-only message, asking for the reminder text.
 pub const ASK_TEXT: &str = "🕒 Got the time. Now send the reminder text:";
+
+/// Prompt shown when the user taps Edit, asking for the replacement input.
+pub const EDIT_ASK_TEXT: &str = "✏️ Send the new time and message:";
+
+/// Re-prompt when an edit reply carried a time but no reminder text.
+pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too:";
+
+/// Re-prompt when an edit reply couldn't be parsed into a time.
+pub const EDIT_NEED_TIME: &str = "Couldn't read a time. Send the new time and message:";
 
 /// Callback data carried by the Cancel button (routed by the `pm:` prefix).
 pub const CANCEL_DATA: &str = "pm:cancel";

@@ -1,7 +1,9 @@
 use crate::import::{self, PendingImport};
-use crate::pending::PendingMessage;
+use crate::pending::{self, PendingEdit, PendingMessage};
 use crate::state::EventProvider;
-use crate::telegram::{LIST_PAGE_SIZE, event_detail, format_page_at, scheduled_message};
+use crate::telegram::{
+    LIST_PAGE_SIZE, edit_prompt, event_detail, format_page_at, scheduled_message,
+};
 use crate::types::EventInfo;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
@@ -335,7 +337,7 @@ pub async fn handle_event_view(
             let now = Local::now().naive_local();
             bot.send_message(chat_id, event_detail(&event, now))
                 .parse_mode(ParseMode::Html)
-                .reply_markup(delete_keyboard(id))
+                .reply_markup(event_actions_keyboard(id))
                 .await?;
         }
         _ => {
@@ -345,13 +347,23 @@ pub async fn handle_event_view(
     Ok(())
 }
 
-/// The single `🗑 Delete` button shown under the `/event<id>` detail view.
-/// Tapping it (callback `eid:<id>:del`) swaps the keyboard for the confirmation
-/// row built by [`delete_confirm_keyboard`].
-fn delete_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+/// The action buttons shown under the `/event<id>` detail view: `✏️ Edit`
+/// (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete` (callback
+/// `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
+fn event_actions_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
+        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del")),
+    ]])
+}
+
+/// The single Cancel button shown while the chat is editing an event (callback
+/// `eid:<id>:edno`, drops the pending edit). Public so `main`'s edit-completion
+/// re-prompts can reuse it.
+pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "🗑 Delete",
-        format!("eid:{event_id}:del"),
+        "Cancel",
+        format!("eid:{event_id}:edno"),
     )]])
 }
 
@@ -382,20 +394,22 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
 }
 
 /// Dispatches an event-specific callback (`eid:<id>:<action>`) to the matching
-/// handler: snooze (`sn:<minutes>`) or the delete flow (`del` → confirm prompt,
-/// `delyes` → delete, `delno` → restore the Delete button). Unknown actions are
+/// handler: snooze (`sn:<minutes>`), the delete flow (`del` → confirm prompt,
+/// `delyes` → delete, `delno` → restore the action buttons), or the edit flow
+/// (`ed` → start editing, `edno` → cancel editing). Unknown actions are
 /// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
     bot: &Bot,
     provider: &EventProvider,
+    pending_edit: &PendingEdit,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
-        Some((id, action)) if action == "del" => handle_delete_prompt(bot, id, q).await,
-        Some((id, action)) if action == "delyes" => {
-            handle_delete_confirm(bot, provider, id, q).await
-        }
-        Some((id, action)) if action == "delno" => handle_delete_cancel(bot, id, q).await,
+        Some((id, "del")) => handle_delete_prompt(bot, id, q).await,
+        Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, q).await,
+        Some((id, "delno")) => handle_delete_cancel(bot, id, q).await,
+        Some((id, "ed")) => handle_edit_prompt(bot, provider, pending_edit, id, q).await,
+        Some((_, "edno")) => handle_edit_cancel(bot, pending_edit, q).await,
         Some((_, action)) if action.starts_with("sn:") => {
             handle_snooze_callback(bot, provider, q).await
         }
@@ -404,6 +418,65 @@ pub async fn handle_event_callback(
             Ok(())
         }
     }
+}
+
+/// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
+/// the chat the button was pressed in (callback ids are user-influenceable),
+/// records the chat as editing that event, and prompts for the replacement input
+/// with the event's current input as a copyable `<code>` block ([`edit_prompt`])
+/// and a Cancel button. Replies "Event not found." for a missing or foreign id.
+async fn handle_edit_prompt(
+    bot: &Bot,
+    provider: &EventProvider,
+    pending_edit: &PendingEdit,
+    id: i64,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    let Some(message) = q.regular_message() else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+
+    let event = provider.get_event(id).filter(|e| e.chat_id == chat_id.0);
+    bot.answer_callback_query(q.id).await?;
+    if let Some(event) = event {
+        pending_edit.lock().unwrap().insert(chat_id.0, id);
+        bot.send_message(chat_id, edit_prompt(pending::EDIT_ASK_TEXT, &event))
+            .parse_mode(ParseMode::Html)
+            .reply_markup(edit_cancel_keyboard(id))
+            .await?;
+    } else {
+        bot.send_message(chat_id, "Event not found.").await?;
+    }
+    Ok(())
+}
+
+/// Handles the Cancel press while editing (`eid:<id>:edno`): drops the chat's
+/// pending edit and edits the prompt to "Cancelled." (clearing the keyboard).
+async fn handle_edit_cancel(
+    bot: &Bot,
+    pending_edit: &PendingEdit,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    bot.answer_callback_query(q.id.clone()).await?;
+
+    let Some(message) = q.regular_message() else {
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    pending_edit.lock().unwrap().remove(&chat_id.0);
+
+    if let Err(e) = bot
+        .edit_message_text(chat_id, message.id, "Cancelled.")
+        .await
+    {
+        log::warn!(
+            "Failed to edit cancelled edit prompt for chat {}: {e}",
+            chat_id.0
+        );
+    }
+    Ok(())
 }
 
 /// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
@@ -423,12 +496,12 @@ async fn handle_delete_prompt(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseR
 }
 
 /// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
-/// `🗑 Delete` keyboard, leaving the detail text untouched.
+/// Edit/Delete action buttons, leaving the detail text untouched.
 async fn handle_delete_cancel(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
     if let Some(message) = q.regular_message() {
         if let Err(e) = bot
             .edit_message_reply_markup(message.chat.id, message.id)
-            .reply_markup(delete_keyboard(id))
+            .reply_markup(event_actions_keyboard(id))
             .await
         {
             log::warn!("Failed to restore delete button for event {id}: {e}");
@@ -768,25 +841,29 @@ mod tests {
     }
 
     #[test]
-    fn delete_keyboards_embed_event_id_and_actions() {
+    fn event_keyboards_embed_event_id_and_actions() {
         use teloxide::types::InlineKeyboardButtonKind::CallbackData;
 
-        let buttons: Vec<_> = delete_keyboard(42).inline_keyboard.concat();
-        assert_eq!(buttons.len(), 1);
-        let CallbackData(data) = &buttons[0].kind else {
-            panic!("expected callback data");
+        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
+            kb.inline_keyboard
+                .concat()
+                .iter()
+                .map(|b| match &b.kind {
+                    CallbackData(d) => d.clone(),
+                    _ => panic!("expected callback data"),
+                })
+                .collect()
         };
-        assert_eq!(data, "eid:42:del");
 
-        let confirm: Vec<_> = delete_confirm_keyboard(42).inline_keyboard.concat();
-        let datas: Vec<&str> = confirm
-            .iter()
-            .map(|b| match &b.kind {
-                CallbackData(d) => d.as_str(),
-                _ => panic!("expected callback data"),
-            })
-            .collect();
-        assert_eq!(datas, vec!["eid:42:delyes", "eid:42:delno"]);
+        assert_eq!(
+            datas(event_actions_keyboard(42)),
+            ["eid:42:ed", "eid:42:del"]
+        );
+        assert_eq!(
+            datas(delete_confirm_keyboard(42)),
+            ["eid:42:delyes", "eid:42:delno"]
+        );
+        assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
     }
 
     #[test]

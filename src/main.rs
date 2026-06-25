@@ -2,10 +2,10 @@ use anyhow::Context as _;
 use perbot::commands::{self, CmdContext, Command};
 use perbot::import::{self, PendingImport};
 use perbot::parser;
-use perbot::pending::{self, PendingMessage};
+use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{extract_chat_info, scheduled_message};
+use perbot::telegram::{edit_prompt, extract_chat_info, scheduled_message};
 use perbot::types::TgMessage;
 use teloxide::{
     prelude::*,
@@ -92,6 +92,9 @@ async fn main() -> anyhow::Result<()> {
     // Per-chat events awaiting a reminder body after a time-only message.
     let pending_msg: PendingMessage = pending::new_pending();
 
+    // Per-chat events being edited after tapping Edit on the `/event<id>` view.
+    let pending_edit: PendingEdit = pending::new_pending_edit();
+
     // Dispatcher with two branches: text/document messages and inline-button
     // callbacks (used by paginated `/events`). Shared deps are injected via
     // `dptree::deps!`.
@@ -105,7 +108,8 @@ async fn main() -> anyhow::Result<()> {
             admin_id,
             bot_username,
             pending_import,
-            pending_msg
+            pending_msg,
+            pending_edit
         ])
         .enable_ctrlc_handler()
         .build()
@@ -122,13 +126,14 @@ async fn callback_handler(
     q: CallbackQuery,
     provider: EventProvider,
     pending_msg: PendingMessage,
+    pending_edit: PendingEdit,
 ) -> ResponseResult<()> {
-    // `eid:<id>:…` is the event-specific envelope (snooze / delete); `pm:` cancels
-    // a pending "send me the reminder text" prompt; everything else is list
+    // `eid:<id>:…` is the event-specific envelope (snooze / delete / edit); `pm:`
+    // cancels a pending "send me the reminder text" prompt; everything else is list
     // pagination (`<tag>:<page>`).
     match q.data.as_deref() {
         Some(d) if d.starts_with("eid:") => {
-            commands::handle_event_callback(&bot, &provider, q).await
+            commands::handle_event_callback(&bot, &provider, &pending_edit, q).await
         }
         Some(d) if d.starts_with("pm:") => {
             commands::handle_cancel_pending(&bot, &pending_msg, q).await
@@ -139,6 +144,8 @@ async fn callback_handler(
 
 /// Handles a single incoming message: stores chat/message info, dispatches
 /// commands, parses event text, or acknowledges other media types.
+// Dependencies are injected individually by dptree, so the arg count is expected.
+#[allow(clippy::too_many_arguments)]
 async fn message_handler(
     bot: Bot,
     msg: Message,
@@ -147,6 +154,7 @@ async fn message_handler(
     bot_username: String,
     pending_import: PendingImport,
     pending_msg: PendingMessage,
+    pending_edit: PendingEdit,
 ) -> ResponseResult<()> {
     // Save/update chat info
     let chat_info = extract_chat_info(&msg.chat);
@@ -192,6 +200,59 @@ async fn message_handler(
         // It can't go through the `BotCommands` parser, so it is matched manually.
         if let Some(id) = commands::parse_event_command(text, &bot_username) {
             commands::handle_event_view(&bot, &provider, msg.chat.id, id).await?;
+            return Ok(());
+        }
+
+        // Completing a pending edit (the chat tapped Edit on an `/event<id>` view):
+        // the next message replaces the event's time and message. A time-only or
+        // unparsable reply re-prompts instead of applying.
+        let editing = pending_edit.lock().unwrap().get(&msg.chat.id.0).copied();
+        if let Some(event_id) = editing {
+            // Re-load the event once and verify it still belongs to this chat; a
+            // pending edit can outlive the event (deleted meanwhile).
+            let Some(old) = provider
+                .get_event(event_id)
+                .filter(|e| e.chat_id == msg.chat.id.0)
+            else {
+                pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+                bot.send_message(msg.chat.id, "Event not found.").await?;
+                return Ok(());
+            };
+
+            if let Some((mut event, spans)) = parser::parse_full(text) {
+                let entities = msg.parse_entities().unwrap_or_default();
+                event.id = old.id;
+                event.chat_id = old.chat_id;
+                event.created_at = old.created_at;
+                event.msg_id = msg_id;
+                event.legacy = old.legacy;
+                event.snoozed = old.snoozed;
+                event.message = perbot::richtext::render_html(text, &spans, &entities);
+
+                let stored = provider.update_event_and_get(event);
+                pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+                let reply = if let Some(dt) = stored.next_datetime {
+                    let now = chrono::Local::now().naive_local();
+                    scheduled_message(now, dt, &stored)
+                } else {
+                    format!("<b>{}</b>", html::escape(text))
+                };
+                bot.send_message(msg.chat.id, reply)
+                    .parse_mode(ParseMode::Html)
+                    .await?;
+            } else {
+                // A time-only or unparsable reply: re-prompt (keeping the pending
+                // edit) with the copyable current input still attached.
+                let lead = if parser::parse_time_only(text).is_some() {
+                    pending::EDIT_NEED_TEXT
+                } else {
+                    pending::EDIT_NEED_TIME
+                };
+                bot.send_message(msg.chat.id, edit_prompt(lead, &old))
+                    .parse_mode(ParseMode::Html)
+                    .reply_markup(commands::edit_cancel_keyboard(event_id))
+                    .await?;
+            }
             return Ok(());
         }
 

@@ -232,6 +232,40 @@ impl EventProvider {
         }
     }
 
+    /// Replaces an existing event's time/recurrence + message: recalculates the
+    /// schedule, persists the full row via `update_event`, reloads the next-event
+    /// cache (the edited event may be or have been the cached next), and returns the
+    /// event as stored. Used by the `/event<id>` edit flow.
+    pub fn update_event_and_get(&self, event: EventInfo) -> EventInfo {
+        self.update_event_and_get_at(event, Local::now().naive_local())
+    }
+
+    /// Like [`update_event_and_get`] but with an explicit `now` (for tests).
+    pub fn update_event_and_get_at(&self, event: EventInfo, now: NaiveDateTime) -> EventInfo {
+        let mut inner = self.inner.lock().unwrap();
+        let id = event.id;
+        let calculated = scheduler::calc_next_at(event, now);
+        if let Err(e) = inner.storage.update_event(&calculated) {
+            log::error!("Failed to update event {}: {}", id, e);
+            return calculated;
+        }
+
+        // Reload to update the next event cache
+        Self::load_next_event(&mut inner);
+
+        match inner.storage.get_event(id) {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                log::error!("Event {} not found after update", id);
+                calculated
+            }
+            Err(e) => {
+                log::error!("Failed to get event {}: {}", id, e);
+                calculated
+            }
+        }
+    }
+
     /// Inserts an event exactly as supplied, without running the scheduler.
     ///
     /// Used by the legacy importer, where `next_datetime`/`active` are already

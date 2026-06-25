@@ -113,12 +113,11 @@ fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
 /// truncated with a trailing `...`.
 const MESSAGE_PREVIEW_MAX: usize = 50;
 
-/// Plain-text, newline-free preview of an HTML message fragment, truncated to
-/// `max` characters (chars, not bytes) with a trailing `...` when longer.
-/// Strips HTML tags, unescapes the three specials `teloxide::utils::html::escape`
-/// emits (`&amp; &lt; &gt;`), and collapses all whitespace (incl. newlines) to
-/// single spaces. The result is plain text; callers targeting HTML must escape it.
-fn message_preview(html_fragment: &str, max: usize) -> String {
+/// Plain-text, newline-free rendering of an HTML message fragment: strips HTML
+/// tags, unescapes the three specials `teloxide::utils::html::escape` emits
+/// (`&amp; &lt; &gt;`), and collapses all whitespace (incl. newlines) to single
+/// spaces. The result is plain text; callers targeting HTML must escape it.
+fn html_to_plain(html_fragment: &str) -> String {
     // Strip tags: drop everything between '<' and the next '>'.
     let mut stripped = String::with_capacity(html_fragment.len());
     let mut in_tag = false;
@@ -137,7 +136,14 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
         .replace("&gt;", ">")
         .replace("&amp;", "&");
     // Collapse all whitespace (incl. newlines) to single spaces; trim ends.
-    let collapsed = unescaped.split_whitespace().collect::<Vec<_>>().join(" ");
+    unescaped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Plain-text, newline-free preview of an HTML message fragment, truncated to
+/// `max` characters (chars, not bytes) with a trailing `...` when longer.
+/// The result is plain text; callers targeting HTML must escape it.
+fn message_preview(html_fragment: &str, max: usize) -> String {
+    let collapsed = html_to_plain(html_fragment);
     // Truncate by char count for UTF-8 safety.
     if collapsed.chars().count() > max {
         let head: String = collapsed.chars().take(max).collect();
@@ -145,6 +151,31 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
     } else {
         collapsed
     }
+}
+
+/// Reconstructs the re-parseable plain-text input for an event: its canonical time
+/// expression ([`EventInfo::normalize_time`]) followed by the plain-text message.
+/// Parsing the result yields the same event, so it can be offered as a copyable
+/// starting point for editing. Plain text; callers targeting HTML must escape it.
+pub fn event_source_input(event: &EventInfo) -> String {
+    let time = event.normalize_time();
+    let message = html_to_plain(&event.message);
+    if message.is_empty() {
+        time
+    } else {
+        format!("{time} {message}")
+    }
+}
+
+/// Builds the HTML edit prompt: the `lead` line followed by the event's current
+/// input wrapped in a `<code>` block, which Telegram clients copy on tap. Both
+/// parts are HTML-escaped.
+pub fn edit_prompt(lead: &str, event: &EventInfo) -> String {
+    format!(
+        "{}\n\n<code>{}</code>",
+        html::escape(lead),
+        html::escape(&event_source_input(event))
+    )
 }
 
 /// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
@@ -617,6 +648,50 @@ mod tests {
         let out = message_preview(msg, 20);
         assert_eq!(out.chars().count(), 23); // 20 + "..."
         assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn event_source_input_reconstructs_reparseable_text() {
+        use crate::parser;
+
+        // Clock time + message.
+        let mut e = sample_event("call the office", None);
+        e.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
+        assert_eq!(event_source_input(&e), "13:30 call the office");
+        // Round-trips: parsing yields the same time/message.
+        let parsed = parser::parse(&event_source_input(&e)).unwrap();
+        assert_eq!(parsed.time, e.time);
+        assert_eq!(parsed.message, "call the office");
+
+        // Recurrence (weekday set) is included via normalize_time.
+        let mut r = sample_event("standup", None);
+        r.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        r.days = Some(std::collections::HashSet::from([
+            chrono::Weekday::Mon,
+            chrono::Weekday::Tue,
+            chrono::Weekday::Wed,
+            chrono::Weekday::Thu,
+            chrono::Weekday::Fri,
+        ]));
+        assert_eq!(event_source_input(&r), "09:00 Mon-Fri standup");
+
+        // HTML formatting in the message is reduced to plain text.
+        let mut b = sample_event("<b>call</b> her", None);
+        b.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        assert_eq!(event_source_input(&b), "08:00 call her");
+    }
+
+    #[test]
+    fn edit_prompt_wraps_input_in_code_and_escapes() {
+        let mut e = sample_event("a &amp; b &lt;c&gt;", None);
+        e.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        let prompt = edit_prompt("Edit:", &e);
+        // The copyable block is a <code> span...
+        assert!(prompt.contains("<code>"));
+        assert!(prompt.contains("</code>"));
+        // ...holding the plain input with HTML specials re-escaped for HTML output.
+        assert!(prompt.contains("<code>10:00 a &amp; b &lt;c&gt;</code>"));
+        assert!(prompt.starts_with("Edit:\n\n"));
     }
 
     #[test]
