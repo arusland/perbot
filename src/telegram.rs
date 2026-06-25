@@ -15,9 +15,9 @@ const MAX_NEXT_PREVIEW: usize = 3;
 /// plus a trailing `• ...` when more remain. Returns "" for one-off events
 /// (no future occurrence). `after` is the baseline (the launch being confirmed
 /// or fired), used as both the search baseline and the relative-time origin, so
-/// the listed launches are strictly after it. Output is plain text; callers
-/// targeting HTML escape it with `teloxide::utils::html::escape` (the bullets and
-/// datetimes contain no HTML specials, so escaping is a no-op in practice).
+/// the listed launches are strictly after it. Output is an HTML fragment: the
+/// `<b>Next launches:</b>` header is bold, the bullets and datetimes are plain
+/// (no HTML specials), so callers embed it verbatim into their HTML output.
 pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String {
     let mut launches: Vec<NaiveDateTime> = Vec::new();
     let mut current = event.clone();
@@ -36,7 +36,7 @@ pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String 
     if launches.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\nNext launches:");
+    let mut out = String::from("\n\n<b>Next launches:</b>");
     for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
         out.push_str(&format!("\n• {}", format_when(after, *dt)));
     }
@@ -59,7 +59,7 @@ pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInf
         "Scheduled message for <b>{}</b>\nMessage: {}{}",
         html::escape(&format_when(now, dt)),
         event.message,
-        html::escape(&preview)
+        preview
     )
 }
 
@@ -276,7 +276,7 @@ pub fn event_detail(event: &EventInfo, now: NaiveDateTime) -> String {
         "{}\n{}{}",
         event_when_line(event, now),
         event.message,
-        html::escape(&preview)
+        preview
     )
 }
 
@@ -479,7 +479,7 @@ mod tests {
         assert!(text.starts_with("Scheduled message for <b>10:00 22.06.2026 (1h)</b>"));
         assert!(text.contains("Message: standup"));
         // Preview lists launches strictly after the confirmed datetime.
-        assert!(text.contains("Next launches:"));
+        assert!(text.contains("<b>Next launches:</b>"));
         assert!(text.contains("• 10:00 23.06.2026"));
         assert!(text.contains("• ..."));
     }
@@ -510,7 +510,7 @@ mod tests {
         });
 
         let preview = next_launches_preview(&event, fire);
-        assert!(preview.starts_with("\n\nNext launches:"));
+        assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
         assert!(preview.contains("• 10:00 23.06.2026"));
         assert!(preview.contains("• 10:00 24.06.2026"));
@@ -533,7 +533,7 @@ mod tests {
         event.years = Some(HashSet::from([2027]));
 
         let preview = next_launches_preview(&event, fire);
-        assert!(preview.starts_with("\n\nNext launches:"));
+        assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         assert!(preview.contains("• 23:00 31.12.2027"));
         assert!(!preview.contains("• ..."));
         assert_eq!(preview.matches('•').count(), 1);
@@ -818,7 +818,7 @@ mod tests {
         assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h, every day)</b>\n"));
         assert!(text.contains("standup"));
         // Recurring: launches block present, listing dates after the upcoming one.
-        assert!(text.contains("Next launches:"));
+        assert!(text.contains("<b>Next launches:</b>"));
         assert!(text.contains("• 14:00 16.06.2026"));
     }
 

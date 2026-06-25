@@ -371,15 +371,15 @@ impl EventProvider {
                     let messages: Vec<TgMessage> = events
                         .iter()
                         .map(|e| {
-                            // `e.message` is already an HTML fragment; the preview
-                            // and hint are plain text, so escape them for HTML.
+                            // `e.message` and the preview are HTML fragments; the
+                            // hint is plain text, so escape only the hint for HTML.
                             let preview = crate::telegram::next_launches_preview(e, dt);
                             TgMessage {
                                 chat_id: e.chat_id,
                                 text: format!(
                                     "{}{}\n\n{}",
                                     e.message,
-                                    html::escape(&preview),
+                                    preview,
                                     html::escape(SNOOZE_HINT)
                                 ),
                                 reply_markup: Some(snooze_keyboard(e.id)),
