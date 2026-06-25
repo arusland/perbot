@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(next.time(), NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         assert!(!c.event.year_explicit);
         assert!(c.event.legacy);
-        assert_eq!(c.event.normalize_time(), "10:00 26.09");
+        assert_eq!(c.event.normalize_time(), "10:00 26.09 yearly");
     }
 
     #[test]
@@ -513,7 +513,7 @@ mod tests {
         let c = convert("11:07 05/2:11: bday", created, None, 42, now());
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
-        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days");
+        assert_eq!(c.event.normalize_time(), "11:07 05.11 yearly every 2 days");
         // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
         let c = convert("11:36/90 4: pay", created, None, 42, now());
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));

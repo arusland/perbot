@@ -82,14 +82,15 @@ impl EventInfo {
             parts.push(format!("{:02}:00", h % 24));
         }
 
-        // Date (never co-occurs with an offset).
+        // Date (never co-occurs with an offset). A short date (no explicit year)
+        // is a yearly event, marked with a trailing `yearly`.
         if let Some(d) = self.date {
-            let fmt = if self.year_explicit {
-                "%d.%m.%Y"
+            if self.year_explicit {
+                parts.push(d.format("%d.%m.%Y").to_string());
             } else {
-                "%d.%m"
-            };
-            parts.push(d.format(fmt).to_string());
+                parts.push(d.format("%d.%m").to_string());
+                parts.push("yearly".to_string());
+            }
         }
 
         // Year restrictions (only present when there is no explicit date).
@@ -541,7 +542,7 @@ mod tests {
         e.date = NaiveDate::from_ymd_opt(2026, 11, 26);
         e.year_explicit = false;
         e.time = NaiveTime::from_hms_opt(1, 23, 0);
-        assert_eq!(e.normalize_time(), "01:23 26.11");
+        assert_eq!(e.normalize_time(), "01:23 26.11 yearly");
     }
 
     #[test]

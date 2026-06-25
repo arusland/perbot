@@ -31,6 +31,10 @@ static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
+// Standalone "yearly" token, absorbed on short dates (the canonical suffix
+// emitted by `EventInfo::normalize_time` for a yearly short-date event).
+static RE_YEARLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\byearly\b").unwrap());
+
 // An optional leading "in" is absorbed so "in 8 min" is identical to "8 min"
 // (and matches the canonical form emitted by `EventInfo::normalize_time`).
 static RE_IN_OFFSET: LazyLock<Regex> = LazyLock::new(|| {
@@ -348,15 +352,17 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
     }
 
-    // A short date (no explicit year) recurs every year; an explicit "every
-    // year" suffix is redundant and already handled above. Skip when the user
-    // gave their own repeat interval or a weekday set (which carries its own
-    // recurrence).
-    if date.is_some() && !year_explicit && repetition.is_none() && days.is_none() {
-        repetition = Some(Repetition {
-            interval: 1,
-            unit: TimeUnit::Years,
-        });
+    // A short date (day.month, no year) is inherently a yearly event. The date
+    // itself drives the yearly wrap in `scheduler`, so absorb a redundant
+    // explicit "every year"/"yearly" and drop any Years repetition. An explicit
+    // year keeps its repetition.
+    if date.is_some() && !year_explicit {
+        if matches!(&repetition, Some(r) if r.unit == TimeUnit::Years) {
+            repetition = None;
+        }
+        if let Some(m) = RE_YEARLY.find(&rem.text) {
+            rem.delete(m.start()..m.end());
+        }
     }
 
     // Derive the plain message from the same normalization `richtext` uses for
@@ -537,42 +543,6 @@ mod tests {
         assert_eq!(d.month(), 11);
         assert!(!e.year_explicit);
         assert_eq!(e.message, "birthday reminder");
-    }
-
-    #[test]
-    fn parse_short_date_implies_yearly() {
-        // A short date (no explicit year) recurs every year.
-        let e = parse("10:03 15.12 Poly's bday").unwrap();
-        assert_eq!(e.time, NaiveTime::from_hms_opt(10, 3, 0));
-        let d = e.date.unwrap();
-        assert_eq!(d.day(), 15);
-        assert_eq!(d.month(), 12);
-        assert!(!e.year_explicit);
-        assert_eq!(
-            e.repetition,
-            Some(Repetition {
-                interval: 1,
-                unit: TimeUnit::Years
-            })
-        );
-        assert_eq!(e.message, "Poly's bday");
-        assert_eq!(e.normalize_time(), "10:03 15.12 every year");
-    }
-
-    #[test]
-    fn parse_short_date_explicit_every_year_not_duplicated() {
-        // An explicit "every year" suffix is redundant — same single repetition.
-        let e = parse("10:03 15.12 Every yeaR Poly's bday").unwrap();
-        assert_eq!(
-            e.repetition,
-            Some(Repetition {
-                interval: 1,
-                unit: TimeUnit::Years
-            })
-        );
-        assert!(!e.year_explicit);
-        assert_eq!(e.message, "Poly's bday");
-        assert_eq!(e.normalize_time(), "10:03 15.12 every year");
     }
 
     #[test]
@@ -800,12 +770,34 @@ mod tests {
 
     #[test]
     fn parse_every_year() {
-        let e = parse("12:00 01.01 every year happy new year").unwrap();
-        assert_eq!(e.time, NaiveTime::from_hms_opt(12, 0, 0));
-        let rep = e.repetition.unwrap();
+        // "every year" repetition without a date (e.g. "1:06 every year ...").
+        let e = parse("1:06 every year happy new year").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(1, 6, 0));
+        assert!(e.date.is_none());
+        let rep = e.repetition.as_ref().unwrap();
         assert_eq!(rep.interval, 1);
         assert_eq!(rep.unit, TimeUnit::Years);
         assert_eq!(e.message, "happy new year");
+        assert_eq!(e.normalize_time(), "01:06 every year");
+    }
+
+    #[test]
+    fn parse_short_date_absorbs_redundant_every_year() {
+        // A short date is inherently yearly, so an explicit "every year"/"yearly"
+        // is redundant: the repetition is dropped and the word absorbed.
+        for input in [
+            "12:00 01.01 every year happy new year",
+            "12:00 01.01 yearly happy new year",
+            "12:00 01.01 happy new year",
+        ] {
+            let e = parse(input).unwrap();
+            assert_eq!(e.time, NaiveTime::from_hms_opt(12, 0, 0));
+            assert_eq!(e.date, NaiveDate::from_ymd_opt(Local::now().year(), 1, 1));
+            assert!(!e.year_explicit);
+            assert!(e.repetition.is_none(), "{input}");
+            assert_eq!(e.message, "happy new year");
+            assert_eq!(e.normalize_time(), "12:00 01.01 yearly");
+        }
     }
 
     // --- Bare hour tests ---
@@ -1126,7 +1118,8 @@ mod tests {
             "in 20 hours every 2 weeks",
             "11:26 12.10.2026",
             "11:26 12.10.2026 every 2 weeks",
-            "01:23 26.11 every year",
+            "01:23 26.11 yearly",
+            "10:03 15.12.2027 every year",
             "10:25 Mon-Fri",
             "01:25 Mon-Sat",
             "13:25 Mon-Wed,Fri",

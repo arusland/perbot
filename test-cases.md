@@ -178,7 +178,7 @@
 ### Case 9.3: Birthday every year
 | Current Time        | Actor  | Input / Expected Next          | Message        | Normalized       |
 |---------------------|--------|--------------------------------|----------------|------------------|
-| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Poly's bday        | Poly's bday    | 10:03 15.12 every year |
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Poly's bday        | Poly's bday    | 10:03 15.12 yearly |
 | 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
 | 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
 | 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
@@ -186,10 +186,34 @@
 ### Case 9.4: Birthday every year with optional "every year"
 | Current Time        | Actor  | Input / Expected Next               | Message        | Normalized       |
 |---------------------|--------|-------------------------------------|----------------|------------------|
-| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Every yeaR Poly's bday  | Poly's bday    | 10:03 15.12 every year |
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Every yeaR Poly's bday  | Poly's bday    | 10:03 15.12 yearly |
 | 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
 | 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
 | 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
+
+### Case 9.5: Birthday every with explicit year
+| Current Time        | Actor  | Input / Expected Next                     | Message        | Normalized       |
+|---------------------|--------|-------------------------------------------|----------------|------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12.2027 every year Poly's bday   | Poly's bday    | 10:03 15.12.2027 every year |
+| 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
+| 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
+| 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
+
+### Case 9.6: Birthday fires once
+| Current Time        | Actor  | Input / Expected Next          | Message        | Normalized       |
+|---------------------|--------|--------------------------------|----------------|------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12.2027 Poly's bday   | Poly's bday    | 10:03 15.12.2027 |
+| 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
+| 2027-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
+| 2028-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
+
+### Case 9.7: Birthday never fires
+| Current Time        | Actor  | Input / Expected Next          | Message        | Normalized       |
+|---------------------|--------|--------------------------------|----------------|------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12.2026 Poly's bday   | Poly's bday    | 10:03 15.12.2026 |
+| 2026-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
+| 2027-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
+| 2028-12-15 10:03:01 | SYSTEM | NONE                           |                |                  |
 
 ### Case 10: every month - fires at next 20:00, does not deactivate
 
