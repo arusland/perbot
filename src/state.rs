@@ -244,6 +244,22 @@ impl EventProvider {
         Ok(id)
     }
 
+    /// Deletes an event by id and reloads the cached next event (the deleted
+    /// event may have been the cached `next_event`). Returns `true` when a row
+    /// was removed; logs and returns `false` on error.
+    pub fn delete(&self, id: i64) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let deleted = match inner.storage.delete(id) {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                log::error!("Failed to delete event {}: {}", id, e);
+                false
+            }
+        };
+        Self::load_next_event(&mut inner);
+        deleted
+    }
+
     /// Recalculates all given events and reloads the next event from DB.
     fn update_and_reload(&self, events: Vec<EventInfo>) {
         self.update_at_and_reload(events, Local::now().naive_local());

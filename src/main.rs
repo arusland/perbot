@@ -123,12 +123,12 @@ async fn callback_handler(
     provider: EventProvider,
     pending_msg: PendingMessage,
 ) -> ResponseResult<()> {
-    // `eid:<id>:…` is the event-specific envelope (snooze today); `pm:` cancels a
-    // pending "send me the reminder text" prompt; everything else is list
+    // `eid:<id>:…` is the event-specific envelope (snooze / delete); `pm:` cancels
+    // a pending "send me the reminder text" prompt; everything else is list
     // pagination (`<tag>:<page>`).
     match q.data.as_deref() {
         Some(d) if d.starts_with("eid:") => {
-            commands::handle_snooze_callback(&bot, &provider, q).await
+            commands::handle_event_callback(&bot, &provider, q).await
         }
         Some(d) if d.starts_with("pm:") => {
             commands::handle_cancel_pending(&bot, &pending_msg, q).await

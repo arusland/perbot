@@ -335,6 +335,7 @@ pub async fn handle_event_view(
             let now = Local::now().naive_local();
             bot.send_message(chat_id, event_detail(&event, now))
                 .parse_mode(ParseMode::Html)
+                .reply_markup(delete_keyboard(id))
                 .await?;
         }
         _ => {
@@ -344,13 +345,128 @@ pub async fn handle_event_view(
     Ok(())
 }
 
+/// The single `🗑 Delete` button shown under the `/event<id>` detail view.
+/// Tapping it (callback `eid:<id>:del`) swaps the keyboard for the confirmation
+/// row built by [`delete_confirm_keyboard`].
+fn delete_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+        "🗑 Delete",
+        format!("eid:{event_id}:del"),
+    )]])
+}
+
+/// The confirmation row shown after the Delete button is tapped: a confirm
+/// (`eid:<id>:delyes`) and a cancel (`eid:<id>:delno`) button.
+fn delete_confirm_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("✅ Yes, delete", format!("eid:{event_id}:delyes")),
+        InlineKeyboardButton::callback("❌ Cancel", format!("eid:{event_id}:delno")),
+    ]])
+}
+
+/// Decodes the event-specific callback envelope `eid:<id>:<action>` into the
+/// event id and the action remainder (e.g. `sn:30`, `del`, `delyes`). Returns
+/// `None` for anything not shaped like the envelope.
+fn parse_event_callback(data: &str) -> Option<(i64, &str)> {
+    let rest = data.strip_prefix("eid:")?;
+    let (id, action) = rest.split_once(':')?;
+    Some((id.parse::<i64>().ok()?, action))
+}
+
 /// Parses snooze callback data `eid:<id>:sn:<minutes>` into `(event_id, minutes)`.
 /// Returns `None` for any malformed input or a non-snooze action.
 fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
-    let rest = data.strip_prefix("eid:")?;
-    let (id, action) = rest.split_once(':')?;
+    let (id, action) = parse_event_callback(data)?;
     let minutes = action.strip_prefix("sn:")?;
-    Some((id.parse::<i64>().ok()?, minutes.parse::<i64>().ok()?))
+    Some((id, minutes.parse::<i64>().ok()?))
+}
+
+/// Dispatches an event-specific callback (`eid:<id>:<action>`) to the matching
+/// handler: snooze (`sn:<minutes>`) or the delete flow (`del` → confirm prompt,
+/// `delyes` → delete, `delno` → restore the Delete button). Unknown actions are
+/// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
+pub async fn handle_event_callback(
+    bot: &Bot,
+    provider: &EventProvider,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    match q.data.as_deref().and_then(parse_event_callback) {
+        Some((id, action)) if action == "del" => handle_delete_prompt(bot, id, q).await,
+        Some((id, action)) if action == "delyes" => {
+            handle_delete_confirm(bot, provider, id, q).await
+        }
+        Some((id, action)) if action == "delno" => handle_delete_cancel(bot, id, q).await,
+        Some((_, action)) if action.starts_with("sn:") => {
+            handle_snooze_callback(bot, provider, q).await
+        }
+        _ => {
+            bot.answer_callback_query(q.id).await?;
+            Ok(())
+        }
+    }
+}
+
+/// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
+/// the confirm/cancel row, leaving the detail text untouched.
+async fn handle_delete_prompt(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+    if let Some(message) = q.regular_message() {
+        if let Err(e) = bot
+            .edit_message_reply_markup(message.chat.id, message.id)
+            .reply_markup(delete_confirm_keyboard(id))
+            .await
+        {
+            log::warn!("Failed to show delete confirmation for event {id}: {e}");
+        }
+    }
+    bot.answer_callback_query(q.id).await?;
+    Ok(())
+}
+
+/// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
+/// `🗑 Delete` keyboard, leaving the detail text untouched.
+async fn handle_delete_cancel(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+    if let Some(message) = q.regular_message() {
+        if let Err(e) = bot
+            .edit_message_reply_markup(message.chat.id, message.id)
+            .reply_markup(delete_keyboard(id))
+            .await
+        {
+            log::warn!("Failed to restore delete button for event {id}: {e}");
+        }
+    }
+    bot.answer_callback_query(q.id).await?;
+    Ok(())
+}
+
+/// Handles the `✅ Yes, delete` press (`eid:<id>:delyes`): access-checks the event
+/// against the chat the button was pressed in (callback ids are
+/// user-influenceable), deletes it, and edits the message to a confirmation
+/// (clearing the keyboard). Replies "Event not found." for a missing or foreign id.
+async fn handle_delete_confirm(
+    bot: &Bot,
+    provider: &EventProvider,
+    id: i64,
+    q: CallbackQuery,
+) -> ResponseResult<()> {
+    let Some(message) = q.regular_message() else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    let message_id = message.id;
+
+    let owned = matches!(provider.get_event(id), Some(event) if event.chat_id == chat_id.0);
+    let text = if owned && provider.delete(id) {
+        "Event deleted."
+    } else {
+        "Event not found."
+    };
+
+    bot.answer_callback_query(q.id).await?;
+    if let Err(e) = bot.edit_message_text(chat_id, message_id, text).await {
+        log::warn!("Failed to edit deleted-event message for event {id}: {e}");
+    }
+    Ok(())
 }
 
 /// Builds the one-off event a snooze creates: an explicit-year reminder scheduled
@@ -637,6 +753,40 @@ mod tests {
         assert_eq!(parse_snooze_callback("eid:42:sn:"), None);
         assert_eq!(parse_snooze_callback("eid:42:sn:abc"), None);
         assert_eq!(parse_snooze_callback("ev:1"), None);
+    }
+
+    #[test]
+    fn parse_event_callback_splits_id_and_action() {
+        assert_eq!(parse_event_callback("eid:42:sn:30"), Some((42, "sn:30")));
+        assert_eq!(parse_event_callback("eid:-7:del"), Some((-7, "del")));
+        assert_eq!(parse_event_callback("eid:5:delyes"), Some((5, "delyes")));
+
+        // Missing prefix, non-numeric id, no action separator.
+        assert_eq!(parse_event_callback("ev:1:del"), None);
+        assert_eq!(parse_event_callback("eid:x:del"), None);
+        assert_eq!(parse_event_callback("eid:42"), None);
+    }
+
+    #[test]
+    fn delete_keyboards_embed_event_id_and_actions() {
+        use teloxide::types::InlineKeyboardButtonKind::CallbackData;
+
+        let buttons: Vec<_> = delete_keyboard(42).inline_keyboard.concat();
+        assert_eq!(buttons.len(), 1);
+        let CallbackData(data) = &buttons[0].kind else {
+            panic!("expected callback data");
+        };
+        assert_eq!(data, "eid:42:del");
+
+        let confirm: Vec<_> = delete_confirm_keyboard(42).inline_keyboard.concat();
+        let datas: Vec<&str> = confirm
+            .iter()
+            .map(|b| match &b.kind {
+                CallbackData(d) => d.as_str(),
+                _ => panic!("expected callback data"),
+            })
+            .collect();
+        assert_eq!(datas, vec!["eid:42:delyes", "eid:42:delno"]);
     }
 
     #[test]
