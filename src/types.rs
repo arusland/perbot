@@ -1,3 +1,4 @@
+use crate::locale::LocaleProvider;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use std::collections::HashSet;
 use teloxide::types::InlineKeyboardMarkup;
@@ -70,14 +71,18 @@ impl EventInfo {
     /// Parts are emitted in the order [`crate::parser`] re-extracts them and joined
     /// with single spaces. Returns `""` for a value with no time component (which
     /// the parser never produces).
-    pub fn normalize_time(&self) -> String {
+    pub fn normalize_time(&self, loc: &dyn LocaleProvider) -> String {
         let mut parts: Vec<String> = Vec::new();
 
         // Anchor: offset / clock time / bare hour (mutually exclusive).
         if let Some((n, unit)) = self.in_offset {
-            parts.push(format!("in {n} {}", unit.label(n != 1)));
+            parts.push(format!(
+                "{} {n} {}",
+                loc.offset_prefix(),
+                loc.unit_label(unit, n != 1)
+            ));
         } else if let Some(t) = self.time {
-            parts.push(t.format("%H:%M").to_string());
+            parts.push(loc.format_time(t));
         } else if let Some(h) = self.bare_hour {
             parts.push(format!("{:02}:00", h % 24));
         }
@@ -87,9 +92,9 @@ impl EventInfo {
         // repetition, see below) so it always trails the canonical string.
         if let Some(d) = self.date {
             if self.year_explicit {
-                parts.push(d.format("%d.%m.%Y").to_string());
+                parts.push(loc.format_date_year(d));
             } else {
-                parts.push(d.format("%d.%m").to_string());
+                parts.push(loc.format_date(d));
             }
         }
 
@@ -107,15 +112,15 @@ impl EventInfo {
 
         // Day recurrence: weekday set or monthly pattern (mutually exclusive).
         if let Some(days) = &self.days {
-            parts.push(format_weekday_set(days));
+            parts.push(format_weekday_set(days, loc));
         } else if let Some(pattern) = &self.monthly_pattern {
             parts.push(match pattern {
                 MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                    format!("{} {}", ordinal_word(*ord), weekday_full(*wd))
+                    format!("{} {}", loc.ordinal_word(*ord), loc.weekday_full(*wd))
                 }
-                MonthlyPattern::LastDay => "last day of the month".to_string(),
+                MonthlyPattern::LastDay => loc.last_day_phrase().to_string(),
                 MonthlyPattern::DayOfMonth(d) => {
-                    format!("each {} day of the month", ordinal_suffix(*d))
+                    loc.day_of_month_canonical(&loc.ordinal_suffix(*d))
                 }
             });
         }
@@ -123,9 +128,14 @@ impl EventInfo {
         // Repetition interval.
         if let Some(rep) = &self.repetition {
             parts.push(if rep.interval == 1 {
-                format!("every {}", rep.unit.label(false))
+                format!("{} {}", loc.every_word(), loc.unit_label(rep.unit, false))
             } else {
-                format!("every {} {}", rep.interval, rep.unit.label(true))
+                format!(
+                    "{} {} {}",
+                    loc.every_word(),
+                    rep.interval,
+                    loc.unit_label(rep.unit, true)
+                )
             });
         }
 
@@ -133,7 +143,7 @@ impl EventInfo {
         // last, so it trails any repetition (`every 2 days yearly`). This is a
         // distinct token from the `every year` a `Years` repetition produces.
         if self.date.is_some() && !self.year_explicit {
-            parts.push("yearly".to_string());
+            parts.push(loc.yearly_marker().to_string());
         }
 
         parts.join(" ")
@@ -145,7 +155,7 @@ impl EventInfo {
 /// into `First-Last` ranges and shorter runs / isolated days listed individually,
 /// all joined with `,`. E.g. `{Mon..Sat}` → `"Mon-Sat"`, `{Mon,Tue,Wed,Fri}` →
 /// `"Mon-Wed,Fri"`, `{Thu,Sun}` → `"Thu,Sun"`.
-fn format_weekday_set(days: &HashSet<Weekday>) -> String {
+fn format_weekday_set(days: &HashSet<Weekday>, loc: &dyn LocaleProvider) -> String {
     let mut idx: Vec<u32> = days.iter().map(|d| d.num_days_from_monday()).collect();
     idx.sort_unstable();
 
@@ -158,13 +168,16 @@ fn format_weekday_set(days: &HashSet<Weekday>) -> String {
             j += 1;
         }
         let run_len = j - i + 1;
-        let first = day_to_str_cap(weekday_from_monday(idx[i]));
+        let first = loc.weekday_abbrev_cap(weekday_from_monday(idx[i]));
         if run_len >= 3 {
-            let last = day_to_str_cap(weekday_from_monday(idx[j]));
+            let last = loc.weekday_abbrev_cap(weekday_from_monday(idx[j]));
             groups.push(format!("{first}-{last}"));
         } else {
             for k in i..=j {
-                groups.push(day_to_str_cap(weekday_from_monday(idx[k])).to_string());
+                groups.push(
+                    loc.weekday_abbrev_cap(weekday_from_monday(idx[k]))
+                        .to_string(),
+                );
             }
         }
         i = j + 1;
@@ -398,61 +411,10 @@ pub fn day_to_str(d: Weekday) -> &'static str {
     }
 }
 
-/// Capitalized three-letter weekday abbreviation (`"Mon"`…`"Sun"`), used by
-/// [`EventInfo::normalize_time`] to render weekday sets.
-pub(crate) fn day_to_str_cap(d: Weekday) -> &'static str {
-    match d {
-        Weekday::Mon => "Mon",
-        Weekday::Tue => "Tue",
-        Weekday::Wed => "Wed",
-        Weekday::Thu => "Thu",
-        Weekday::Fri => "Fri",
-        Weekday::Sat => "Sat",
-        Weekday::Sun => "Sun",
-    }
-}
-
-/// Lower-case full weekday name (`"monday"`…`"sunday"`).
-pub(crate) fn weekday_full(d: Weekday) -> &'static str {
-    match d {
-        Weekday::Mon => "Monday",
-        Weekday::Tue => "Tuesday",
-        Weekday::Wed => "Wednesday",
-        Weekday::Thu => "Thursday",
-        Weekday::Fri => "Friday",
-        Weekday::Sat => "Saturday",
-        Weekday::Sun => "Sunday",
-    }
-}
-
-/// English ordinal numeral (`1` → `"1st"`, `2` → `"2nd"`, `3` → `"3rd"`,
-/// `4`…`20` → `"th"`, `21` → `"21st"`, …), used by day-of-month patterns.
-pub(crate) fn ordinal_suffix(n: u32) -> String {
-    let suffix = match (n % 10, n % 100) {
-        (1, 11) | (2, 12) | (3, 13) => "th",
-        (1, _) => "st",
-        (2, _) => "nd",
-        (3, _) => "rd",
-        _ => "th",
-    };
-    format!("{n}{suffix}")
-}
-
-/// Ordinal word used in monthly patterns (`"first"`…`"last"`).
-pub(crate) fn ordinal_word(o: Ordinal) -> &'static str {
-    match o {
-        Ordinal::First => "first",
-        Ordinal::Second => "second",
-        Ordinal::Third => "third",
-        Ordinal::Fourth => "fourth",
-        Ordinal::Fifth => "fifth",
-        Ordinal::Last => "last",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::EN;
 
     /// A blank `EventInfo` with every time/recurrence field cleared; tests set
     /// only the fields they exercise.
@@ -490,52 +452,52 @@ mod tests {
     fn normalize_clock_time_zero_pads() {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(12, 2, 0);
-        assert_eq!(e.normalize_time(), "12:02");
+        assert_eq!(e.normalize_time(&EN), "12:02");
         e.time = NaiveTime::from_hms_opt(1, 25, 0);
-        assert_eq!(e.normalize_time(), "01:25");
+        assert_eq!(e.normalize_time(&EN), "01:25");
         // 5:24 PM is stored as 17:24, rendered 24h.
         e.time = NaiveTime::from_hms_opt(17, 24, 0);
-        assert_eq!(e.normalize_time(), "17:24");
+        assert_eq!(e.normalize_time(&EN), "17:24");
     }
 
     #[test]
     fn normalize_bare_hour_as_clock_time() {
         let mut e = blank();
         e.bare_hour = Some(8);
-        assert_eq!(e.normalize_time(), "08:00");
+        assert_eq!(e.normalize_time(&EN), "08:00");
         e.bare_hour = Some(24);
-        assert_eq!(e.normalize_time(), "00:00");
+        assert_eq!(e.normalize_time(&EN), "00:00");
         e.bare_hour = Some(0);
-        assert_eq!(e.normalize_time(), "00:00");
+        assert_eq!(e.normalize_time(&EN), "00:00");
         e.bare_hour = Some(21);
         e.repetition = Some(Repetition {
             interval: 2,
             unit: TimeUnit::Days,
         });
-        assert_eq!(e.normalize_time(), "21:00 every 2 days");
+        assert_eq!(e.normalize_time(&EN), "21:00 every 2 days");
     }
 
     #[test]
     fn normalize_offset_plural_and_singular() {
         let mut e = blank();
         e.in_offset = Some((8, TimeUnit::Minutes));
-        assert_eq!(e.normalize_time(), "in 8 minutes");
+        assert_eq!(e.normalize_time(&EN), "in 8 minutes");
         e.in_offset = Some((1, TimeUnit::Minutes));
-        assert_eq!(e.normalize_time(), "in 1 minute");
+        assert_eq!(e.normalize_time(&EN), "in 1 minute");
         e.in_offset = Some((3, TimeUnit::Hours));
-        assert_eq!(e.normalize_time(), "in 3 hours");
+        assert_eq!(e.normalize_time(&EN), "in 3 hours");
         // The user's example: "8 min every 2 hour test" → "in 8 minutes every 2 hours".
         e.in_offset = Some((8, TimeUnit::Minutes));
         e.repetition = Some(Repetition {
             interval: 2,
             unit: TimeUnit::Hours,
         });
-        assert_eq!(e.normalize_time(), "in 8 minutes every 2 hours");
+        assert_eq!(e.normalize_time(&EN), "in 8 minutes every 2 hours");
         e.repetition = Some(Repetition {
             interval: 1,
             unit: TimeUnit::Hours,
         });
-        assert_eq!(e.normalize_time(), "in 8 minutes every hour");
+        assert_eq!(e.normalize_time(&EN), "in 8 minutes every hour");
     }
 
     #[test]
@@ -544,12 +506,12 @@ mod tests {
         e.time = NaiveTime::from_hms_opt(11, 26, 0);
         e.date = NaiveDate::from_ymd_opt(2026, 10, 12);
         e.year_explicit = true;
-        assert_eq!(e.normalize_time(), "11:26 12.10.2026");
+        assert_eq!(e.normalize_time(&EN), "11:26 12.10.2026");
         // Short date drops the year.
         e.date = NaiveDate::from_ymd_opt(2026, 11, 26);
         e.year_explicit = false;
         e.time = NaiveTime::from_hms_opt(1, 23, 0);
-        assert_eq!(e.normalize_time(), "01:23 26.11 yearly");
+        assert_eq!(e.normalize_time(&EN), "01:23 26.11 yearly");
     }
 
     #[test]
@@ -558,7 +520,7 @@ mod tests {
         e.time = NaiveTime::from_hms_opt(13, 25, 0);
         e.years = Some([2028, 2027].into_iter().collect());
         e.days = Some(day_set(&[Weekday::Sun, Weekday::Fri]));
-        assert_eq!(e.normalize_time(), "13:25 2027,2028 Fri,Sun");
+        assert_eq!(e.normalize_time(&EN), "13:25 2027,2028 Fri,Sun");
     }
 
     #[test]
@@ -574,7 +536,7 @@ mod tests {
             Weekday::Fri,
             Weekday::Sat,
         ]));
-        assert_eq!(e.normalize_time(), "01:25 Mon-Sat");
+        assert_eq!(e.normalize_time(&EN), "01:25 Mon-Sat");
         // A non-contiguous mix: a ≥3 run plus an isolated day.
         e.days = Some(day_set(&[
             Weekday::Mon,
@@ -582,13 +544,13 @@ mod tests {
             Weekday::Wed,
             Weekday::Fri,
         ]));
-        assert_eq!(e.normalize_time(), "01:25 Mon-Wed,Fri");
+        assert_eq!(e.normalize_time(&EN), "01:25 Mon-Wed,Fri");
         // A 2-day run stays a comma list (range needs ≥3).
         e.days = Some(day_set(&[Weekday::Thu, Weekday::Sun]));
-        assert_eq!(e.normalize_time(), "01:25 Thu,Sun");
+        assert_eq!(e.normalize_time(&EN), "01:25 Thu,Sun");
         // Single day.
         e.days = Some(day_set(&[Weekday::Fri]));
-        assert_eq!(e.normalize_time(), "01:25 Fri");
+        assert_eq!(e.normalize_time(&EN), "01:25 Fri");
     }
 
     #[test]
@@ -596,13 +558,13 @@ mod tests {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(10, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
-        assert_eq!(e.normalize_time(), "10:00 first Sunday");
+        assert_eq!(e.normalize_time(&EN), "10:00 first Sunday");
         e.time = NaiveTime::from_hms_opt(17, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Third, Weekday::Fri));
-        assert_eq!(e.normalize_time(), "17:00 third Friday");
+        assert_eq!(e.normalize_time(&EN), "17:00 third Friday");
         e.time = NaiveTime::from_hms_opt(18, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
-        assert_eq!(e.normalize_time(), "18:00 last day of the month");
+        assert_eq!(e.normalize_time(&EN), "18:00 last day of the month");
     }
 
     #[test]
@@ -610,28 +572,28 @@ mod tests {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(22, 15, 0);
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
-        assert_eq!(e.normalize_time(), "22:15 each 28th day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 28th day of the month");
         // Combined with a repeat interval (day-of-month rendered before repetition).
         e.repetition = Some(Repetition {
             interval: 2,
             unit: TimeUnit::Days,
         });
         assert_eq!(
-            e.normalize_time(),
+            e.normalize_time(&EN),
             "22:15 each 28th day of the month every 2 days"
         );
         // Ordinal suffixes.
         e.repetition = None;
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(1));
-        assert_eq!(e.normalize_time(), "22:15 each 1st day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 1st day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(2));
-        assert_eq!(e.normalize_time(), "22:15 each 2nd day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 2nd day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(3));
-        assert_eq!(e.normalize_time(), "22:15 each 3rd day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 3rd day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(11));
-        assert_eq!(e.normalize_time(), "22:15 each 11th day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 11th day of the month");
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(21));
-        assert_eq!(e.normalize_time(), "22:15 each 21st day of the month");
+        assert_eq!(e.normalize_time(&EN), "22:15 each 21st day of the month");
     }
 
     #[test]
@@ -642,12 +604,12 @@ mod tests {
             interval: 3,
             unit: TimeUnit::Days,
         });
-        assert_eq!(e.normalize_time(), "15:30 every 3 days");
+        assert_eq!(e.normalize_time(&EN), "15:30 every 3 days");
         e.repetition = Some(Repetition {
             interval: 1,
             unit: TimeUnit::Years,
         });
         e.time = NaiveTime::from_hms_opt(1, 34, 0);
-        assert_eq!(e.normalize_time(), "01:34 every year");
+        assert_eq!(e.normalize_time(&EN), "01:34 every year");
     }
 }

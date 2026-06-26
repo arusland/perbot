@@ -373,7 +373,8 @@ impl EventProvider {
                         .map(|e| {
                             // `e.message` and the preview are HTML fragments; the
                             // hint is plain text, so escape only the hint for HTML.
-                            let preview = crate::telegram::next_launches_preview(e, dt);
+                            let loc = crate::locale::for_chat(e.chat_id);
+                            let preview = crate::telegram::next_launches_preview(e, dt, loc);
                             TgMessage {
                                 chat_id: e.chat_id,
                                 text: format!(

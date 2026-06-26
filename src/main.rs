@@ -175,6 +175,8 @@ async fn message_handler(
     }
 
     let reply_text = if let Some(text) = msg.text() {
+        // Resolve the chat's locale once; every parse/format below threads it.
+        let loc = perbot::locale::for_chat(msg.chat.id.0);
         // Store every incoming user message
         let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
             Ok(id) => id,
@@ -219,7 +221,7 @@ async fn message_handler(
                 return Ok(());
             };
 
-            if let Some((mut event, spans)) = parser::parse_full(text) {
+            if let Some((mut event, spans)) = parser::parse_full(text, loc) {
                 let entities = msg.parse_entities().unwrap_or_default();
                 event.id = old.id;
                 event.chat_id = old.chat_id;
@@ -233,7 +235,7 @@ async fn message_handler(
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
                 let reply = if let Some(dt) = stored.next_datetime {
                     let now = chrono::Local::now().naive_local();
-                    scheduled_message(now, dt, &stored)
+                    scheduled_message(now, dt, &stored, loc)
                 } else {
                     format!("<b>{}</b>", html::escape(text))
                 };
@@ -243,12 +245,12 @@ async fn message_handler(
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the copyable current input still attached.
-                let lead = if parser::parse_time_only(text).is_some() {
+                let lead = if parser::parse_time_only(text, loc).is_some() {
                     pending::EDIT_NEED_TEXT
                 } else {
                     pending::EDIT_NEED_TIME
                 };
-                bot.send_message(msg.chat.id, edit_prompt(lead, &old))
+                bot.send_message(msg.chat.id, edit_prompt(lead, &old, loc))
                     .parse_mode(ParseMode::Html)
                     .reply_markup(commands::edit_cancel_keyboard(event_id))
                     .await?;
@@ -279,7 +281,7 @@ async fn message_handler(
             let stored = provider.insert_event_and_get(event);
             let reply = if let Some(dt) = stored.next_datetime {
                 let now = chrono::Local::now().naive_local();
-                scheduled_message(now, dt, &stored)
+                scheduled_message(now, dt, &stored, loc)
             } else {
                 format!("<b>{}</b>", html::escape(text))
             };
@@ -289,7 +291,7 @@ async fn message_handler(
             return Ok(());
         }
 
-        if let Some((mut event, spans)) = parser::parse_full(text) {
+        if let Some((mut event, spans)) = parser::parse_full(text, loc) {
             event.chat_id = msg.chat.id.0;
             event.msg_id = msg_id;
             // Preserve the user's formatting: render the surviving message body
@@ -301,11 +303,11 @@ async fn message_handler(
 
             if let Some(dt) = stored.next_datetime {
                 let now = chrono::Local::now().naive_local();
-                scheduled_message(now, dt, &stored)
+                scheduled_message(now, dt, &stored, loc)
             } else {
                 format!("<b>{}</b>", html::escape(text))
             }
-        } else if let Some(event) = parser::parse_time_only(text) {
+        } else if let Some(event) = parser::parse_time_only(text, loc) {
             // A time was given but no reminder body: hold the parsed event and ask
             // for the text, offering a Cancel button.
             pending_msg.lock().unwrap().insert(msg.chat.id.0, event);

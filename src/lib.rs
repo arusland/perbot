@@ -2,6 +2,7 @@ pub mod commands;
 pub mod converter;
 pub mod error;
 pub mod import;
+pub mod locale;
 pub mod logger;
 pub mod parser;
 pub mod pending;

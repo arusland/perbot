@@ -1,91 +1,16 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveTime, Weekday};
-use regex::Regex;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::LazyLock;
 
-use crate::types::{
-    EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, day_from_str, parse_days,
-    unit_from_str,
-};
+use crate::locale::LocaleProvider;
+use crate::types::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit};
 
-// NOTE: the time regexes are intentionally *not* anchored to the start of the
-// message. A clock time is matched wherever it appears (e.g. "call office at
-// 5:30" extracts 5:30), unlike the relative offset, bare hour, and short date
-// which must lead the message. 12h is tried before 24h so "5:24 PM" is not
-// partially consumed as "5:24". Minutes accept 1-2 digits so "10:6" means
-// "10:06" ("9:5 PM" -> 21:05).
-static RE_TIME_12H: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(\d{1,2}):(\d{1,2})\s*(AM|PM)").unwrap());
-
-static RE_TIME_24H: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d{1,2}):(\d{1,2})").unwrap());
-
-static RE_DATE_FULL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\d{1,2})\.(\d{1,2})\.(\d{4})").unwrap());
-
-static RE_DATE_SHORT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\d{1,2})\.(\d{1,2})(?:[^\.\d]|$)").unwrap());
-
-static RE_EVERY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bevery\s+(?:(\d+)\s+)?(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b")
-        .unwrap()
-});
-
-// Standalone "yearly" token, absorbed on short dates (the canonical suffix
-// emitted by `EventInfo::normalize_time` for a yearly short-date event).
-static RE_YEARLY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\byearly\b").unwrap());
-
-// An optional leading "in" is absorbed so "in 8 min" is identical to "8 min"
-// (and matches the canonical form emitted by `EventInfo::normalize_time`).
-static RE_IN_OFFSET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:in\s+)?(\d+)\s+(min(?:ute)?s?|hours?|days?|weeks?|months?|years?)\b")
-        .unwrap()
-});
-
-static RE_BARE_HOUR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,2})\s").unwrap());
-
-// An optional leading "every" is absorbed so "every fri" is treated exactly
-// like "fri" (a weekly recurrence on that weekday set), consuming the word so it
-// does not leak into the message or get misread by RE_EVERY.
-static RE_DAYS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:every\s+)?((?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)(?:\s*[-,]\s*(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?))*)\b").unwrap()
-});
-
-// Fixed day of the month: "28 of the month", "28th of the month",
-// "28th day of the month", "every 28 of the month", "each 5 of the month". The
-// literal "of [the] month" is required so it never collides with the bare-hour
-// format (extraction also runs before bare hour). An optional leading
-// "every"/"each" is absorbed; an optional ordinal suffix and an optional literal
-// "day" before "of" are accepted (the canonical form is "each <N><ord> day of
-// the month").
-static RE_DAY_OF_MONTH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?:every\s+|each\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+(?:day\s+)?of\s+(?:the\s+)?month\b",
-    )
-    .unwrap()
-});
-
-static RE_MONTHLY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b").unwrap()
-});
-
-// Matches any standalone 4-digit token (or comma list) anywhere in the message;
-// only values in 2000..=2100 are kept (see `parse`). This is greedy by design —
-// "buy 2025 tickets" is treated as a year restriction.
-static RE_YEARS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap());
-
-fn ordinal_from_str(s: &str) -> Option<Ordinal> {
-    match s.to_ascii_lowercase().as_str() {
-        "first" | "1st" => Some(Ordinal::First),
-        "second" | "2nd" => Some(Ordinal::Second),
-        "third" | "3rd" => Some(Ordinal::Third),
-        "fourth" | "4th" => Some(Ordinal::Fourth),
-        "fifth" | "5th" => Some(Ordinal::Fifth),
-        "last" => Some(Ordinal::Last),
-        _ => None,
-    }
-}
+// The time-expression regexes and word maps live behind the active
+// `LocaleProvider` (see `crate::locale`): a clock time is matched wherever it
+// appears, while the relative offset, bare hour and short date must lead. 12h is
+// tried before 24h so "5:24 PM" is not partially consumed as "5:24". An optional
+// leading "in"/"every"/"each" and a trailing "yearly" are absorbed so loose
+// spellings collapse to the canonical form emitted by `EventInfo::normalize_time`.
 
 /// The working message text plus the byte ranges of the *original* input that
 /// survive token extraction, kept in lockstep so callers can map message
@@ -148,8 +73,8 @@ impl Remaining {
 /// [`EventInfo`] whose `message` is the leftover text. Returns `None` when no
 /// time component is found or nothing is left for the message body. The
 /// DB-tracking fields are left at their defaults (zero/false/None).
-pub fn parse(input: &str) -> Option<EventInfo> {
-    parse_full(input).map(|(event, _)| event)
+pub fn parse(input: &str, loc: &dyn LocaleProvider) -> Option<EventInfo> {
+    parse_full(input, loc).map(|(event, _)| event)
 }
 
 /// Like [`parse`] but also returns the byte ranges of `input` that compose the
@@ -160,8 +85,8 @@ pub fn parse(input: &str) -> Option<EventInfo> {
 /// Returns `None` when no time component is found or when the message body is
 /// empty (a time was given but no reminder text). To detect the latter case on
 /// its own, use [`parse_time_only`].
-pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
-    let (event, spans) = parse_components(input)?;
+pub fn parse_full(input: &str, loc: &dyn LocaleProvider) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    let (event, spans) = parse_components(input, loc)?;
     if event.message.is_empty() {
         return None;
     }
@@ -173,8 +98,8 @@ pub fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 /// `None` when there is no time component or when a body was supplied (in which
 /// case [`parse_full`] handles it). Used by the interactive "send me the reminder
 /// text" flow.
-pub fn parse_time_only(input: &str) -> Option<EventInfo> {
-    let (event, _) = parse_components(input)?;
+pub fn parse_time_only(input: &str, loc: &dyn LocaleProvider) -> Option<EventInfo> {
+    let (event, _) = parse_components(input, loc)?;
     if event.message.is_empty() {
         Some(event)
     } else {
@@ -185,7 +110,11 @@ pub fn parse_time_only(input: &str) -> Option<EventInfo> {
 /// Extracts the time/date components and leftover message body. Returns `None`
 /// only when no time component is found; the returned `message` may be empty (the
 /// callers [`parse_full`] / [`parse_time_only`] decide how to treat that).
-fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
+fn parse_components(
+    input: &str,
+    loc: &dyn LocaleProvider,
+) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    let g = loc.grammar();
     let mut rem = Remaining::new(input);
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
@@ -197,9 +126,9 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
     let mut monthly_pattern: Option<MonthlyPattern> = None;
 
     // Relative offset: "N unit" e.g. "8 min call her", "2 hours reminder" (checked first)
-    if let Some(caps) = RE_IN_OFFSET.captures(&rem.text)
+    if let Some(caps) = g.in_offset.captures(&rem.text)
         && let Ok(n) = caps[1].parse::<u32>()
-        && let Some(unit) = unit_from_str(&caps[2])
+        && let Some(unit) = loc.unit_from_str(&caps[2])
     {
         let end = caps.get(0).unwrap().end();
         in_offset = Some((n, unit));
@@ -208,7 +137,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
     if in_offset.is_none() {
         // 12h time (must be checked before 24h to avoid partial match)
-        if let Some(caps) = RE_TIME_12H.captures(&rem.text) {
+        if let Some(caps) = g.time_12h.captures(&rem.text) {
             let mut hour: u32 = caps[1].parse().ok()?;
             let minute: u32 = caps[2].parse().ok()?;
             let ampm = caps[3].to_ascii_uppercase();
@@ -227,7 +156,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
             time = Some(NaiveTime::from_hms_opt(hour, minute, 0)?);
             rem.delete(start..end);
-        } else if let Some(caps) = RE_TIME_24H.captures(&rem.text) {
+        } else if let Some(caps) = g.time_24h.captures(&rem.text) {
             let hour: u32 = caps[1].parse().ok()?;
             let minute: u32 = caps[2].parse().ok()?;
             let m = caps.get(0).unwrap();
@@ -240,7 +169,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         // Day of the month: "every 28 of the month", "28th of the month".
         // Checked before the bare hour so "<N> of the month" always wins the
         // overlap (e.g. "5 of the month" is day-5, not hour-5).
-        if let Some(caps) = RE_DAY_OF_MONTH.captures(&rem.text)
+        if let Some(caps) = g.day_of_month.captures(&rem.text)
             && let Ok(day) = caps[1].parse::<u32>()
             && (1..=31).contains(&day)
         {
@@ -253,7 +182,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         // Bare hour: "8 call Alex" -> bare_hour=8, "0 call Sacha" -> bare_hour=0
         if time.is_none()
             && monthly_pattern.is_none()
-            && let Some(caps) = RE_BARE_HOUR.captures(&rem.text)
+            && let Some(caps) = g.bare_hour.captures(&rem.text)
             && let Ok(n) = caps[1].parse::<u32>()
             && n <= 24
         {
@@ -263,7 +192,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         }
 
         // Full date (must be checked before short date)
-        if let Some(caps) = RE_DATE_FULL.captures(&rem.text) {
+        if let Some(caps) = g.date_full.captures(&rem.text) {
             let day: u32 = caps[1].parse().ok()?;
             let month: u32 = caps[2].parse().ok()?;
             let year: i32 = caps[3].parse().ok()?;
@@ -273,7 +202,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
             date = Some(NaiveDate::from_ymd_opt(year, month, day)?);
             year_explicit = true;
             rem.delete(start..end);
-        } else if let Some(caps) = RE_DATE_SHORT.captures(&rem.text) {
+        } else if let Some(caps) = g.date_short.captures(&rem.text) {
             let day: u32 = caps[1].parse().ok()?;
             let month: u32 = caps[2].parse().ok()?;
             let year = Local::now().year();
@@ -286,7 +215,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
         // Years: "2027", "2027,2028" — only when no full date was already parsed
         if date.is_none()
-            && let Some(m) = RE_YEARS.find(&rem.text)
+            && let Some(m) = g.years.find(&rem.text)
         {
             let (mstart, mend) = (m.start(), m.end());
             let year_set: HashSet<i32> = m
@@ -303,8 +232,8 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
         // Monthly pattern: "first sunday", "last monday", "last day of the month"
         if monthly_pattern.is_none()
-            && let Some(caps) = RE_MONTHLY.captures(&rem.text)
-            && let Some(ord) = ordinal_from_str(&caps[1])
+            && let Some(caps) = g.monthly.captures(&rem.text)
+            && let Some(ord) = loc.ordinal_from_str(&caps[1])
         {
             let target = caps[2].to_ascii_lowercase();
             let m = caps.get(0).unwrap();
@@ -316,7 +245,8 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
                     None
                 }
             } else {
-                day_from_str(&target).map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
+                loc.day_from_str(&target)
+                    .map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
             };
 
             if pattern.is_some() {
@@ -327,8 +257,8 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
         // Days of week (skip if monthly pattern already matched)
         if monthly_pattern.is_none()
-            && let Some(caps) = RE_DAYS.captures(&rem.text)
-            && let Some(parsed) = parse_days(&caps[1])
+            && let Some(caps) = g.days.captures(&rem.text)
+            && let Some(parsed) = loc.parse_days(&caps[1])
         {
             let m = caps.get(0).unwrap();
             let (start, end) = (m.start(), m.end());
@@ -339,12 +269,12 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 
     // Repetition: "every N unit" or "every unit" (checked for both offset and time modes)
     let mut repetition: Option<Repetition> = None;
-    if let Some(caps) = RE_EVERY.captures(&rem.text) {
+    if let Some(caps) = g.every.captures(&rem.text) {
         let interval: u32 = caps
             .get(1)
             .map(|m| m.as_str().parse().unwrap_or(1))
             .unwrap_or(1);
-        if let Some(unit) = unit_from_str(&caps[2]) {
+        if let Some(unit) = loc.unit_from_str(&caps[2]) {
             let m = caps.get(0).unwrap();
             let (start, end) = (m.start(), m.end());
             repetition = Some(Repetition { interval, unit });
@@ -362,7 +292,7 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
         if matches!(&repetition, Some(r) if r.unit == TimeUnit::Years) {
             repetition = None;
         }
-        if let Some(m) = RE_YEARLY.find(&rem.text) {
+        if let Some(m) = g.yearly.find(&rem.text) {
             rem.delete(m.start()..m.end());
         }
     }
@@ -409,7 +339,21 @@ fn parse_components(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::EN;
+    use crate::types::parse_days;
     use chrono::Datelike;
+
+    // Thin English-locale wrappers so the many parse call sites stay terse; they
+    // shadow the `super::*` glob imports of the same names.
+    fn parse(input: &str) -> Option<EventInfo> {
+        super::parse(input, &EN)
+    }
+    fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
+        super::parse_full(input, &EN)
+    }
+    fn parse_time_only(input: &str) -> Option<EventInfo> {
+        super::parse_time_only(input, &EN)
+    }
 
     /// Concatenates the surviving spans back out of the original input.
     fn concat_spans(input: &str, spans: &[Range<usize>]) -> String {
@@ -780,7 +724,7 @@ mod tests {
         assert_eq!(rep.interval, 1);
         assert_eq!(rep.unit, TimeUnit::Years);
         assert_eq!(e.message, "happy new year");
-        assert_eq!(e.normalize_time(), "01:06 every year");
+        assert_eq!(e.normalize_time(&EN), "01:06 every year");
     }
 
     #[test]
@@ -798,7 +742,7 @@ mod tests {
             assert!(!e.year_explicit);
             assert!(e.repetition.is_none(), "{input}");
             assert_eq!(e.message, "happy new year");
-            assert_eq!(e.normalize_time(), "12:00 01.01 yearly");
+            assert_eq!(e.normalize_time(&EN), "12:00 01.01 yearly");
         }
     }
 
@@ -815,7 +759,7 @@ mod tests {
         assert_eq!(rep.interval, 2);
         assert_eq!(rep.unit, TimeUnit::Days);
         assert_eq!(e.message, "take meds");
-        assert_eq!(e.normalize_time(), "11:07 05.11 every 2 days yearly");
+        assert_eq!(e.normalize_time(&EN), "11:07 05.11 every 2 days yearly");
     }
 
     // --- Bare hour tests ---
@@ -1157,7 +1101,7 @@ mod tests {
             let event = parse(&format!("{s} reminder"))
                 .unwrap_or_else(|| panic!("canonical string {s:?} should parse"));
             assert_eq!(
-                event.normalize_time(),
+                event.normalize_time(&EN),
                 s,
                 "normalize_time should round-trip {s:?}"
             );

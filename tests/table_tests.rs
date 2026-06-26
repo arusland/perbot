@@ -256,7 +256,7 @@ fn run_table(table_idx: usize, table: &Table) {
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
             "USER" => {
-                current_id = parser::parse(&row.value).map(|mut event| {
+                current_id = parser::parse(&row.value, &perbot::locale::EN).map(|mut event| {
                     if let Some(expected) = &row.message
                         && &event.message != expected
                     {
@@ -269,7 +269,7 @@ fn run_table(table_idx: usize, table: &Table) {
                         );
                     }
                     if let Some(expected) = &row.normalized {
-                        let actual = event.normalize_time();
+                        let actual = event.normalize_time(&perbot::locale::EN);
                         if &actual != expected {
                             fail_at(
                                 table_idx,

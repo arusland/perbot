@@ -146,6 +146,7 @@ pub(crate) fn normalize(input: &str, spans: &[Range<usize>]) -> (String, Vec<Out
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::EN;
     use crate::parser;
 
     /// Builds entity refs over `input` from raw (UTF-16) entities.
@@ -158,7 +159,7 @@ mod tests {
     #[test]
     fn bold_in_body_is_preserved() {
         let input = "13:30 call the office";
-        let (_event, spans) = parser::parse_full(input).unwrap();
+        let (_event, spans) = parser::parse_full(input, &EN).unwrap();
         // "call" starts at UTF-16 offset 6, length 4.
         let ents = refs(input, vec![MessageEntity::bold(6, 4)]);
         assert_eq!(render_html(input, &spans, &ents), "<b>call</b> the office");
@@ -169,7 +170,7 @@ mod tests {
         // Bold spans the whole line including the leading "13:30 "; only the
         // surviving "call the office" stays bold.
         let input = "13:30 call the office";
-        let (_event, spans) = parser::parse_full(input).unwrap();
+        let (_event, spans) = parser::parse_full(input, &EN).unwrap();
         let ents = refs(input, vec![MessageEntity::bold(0, 21)]);
         assert_eq!(render_html(input, &spans, &ents), "<b>call the office</b>");
     }
@@ -178,7 +179,7 @@ mod tests {
     fn special_chars_inside_a_formatted_run_are_escaped() {
         // "a<b" is bold; the `<` must be escaped *inside* the tags.
         let input = "9:00 a<b";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         assert_eq!(event.message, "a<b");
         // "a<b" starts at UTF-16 offset 5, length 3.
         let ents = refs(input, vec![MessageEntity::bold(5, 3)]);
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn output_text_equals_normalized_message() {
         let input = "13:30 call   the office";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         // With no entities the fragment is exactly the (escaped) plain message.
         assert_eq!(render_html(input, &spans, &[]), event.message);
         assert_eq!(event.message, "call the office");
@@ -205,7 +206,7 @@ mod tests {
     #[test]
     fn newline_in_body_is_preserved() {
         let input = "13:30 buy milk\ncall mom";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         assert_eq!(event.message, "buy milk\ncall mom");
         // No entities: the fragment matches the (escaped) multiline message.
         assert_eq!(render_html(input, &spans, &[]), event.message);
@@ -215,7 +216,7 @@ mod tests {
     fn blank_line_is_preserved_verbatim() {
         // A run with two newlines (a blank line) survives as two `\n`.
         let input = "13:30 line one\n\nline three";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         assert_eq!(event.message, "line one\n\nline three");
         assert_eq!(render_html(input, &spans, &[]), event.message);
     }
@@ -224,7 +225,7 @@ mod tests {
     fn horizontal_whitespace_within_line_still_collapses() {
         // Tabs/spaces around a newline are dropped; intra-line runs collapse.
         let input = "13:30 a  b\t \nc   d";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         assert_eq!(event.message, "a b\nc d");
         assert_eq!(render_html(input, &spans, &[]), event.message);
     }
@@ -234,7 +235,7 @@ mod tests {
         // Bold covers "milk\ncall" across the line break; the entity maps onto
         // both words and the preserved newline as one run.
         let input = "13:30 buy milk\ncall mom";
-        let (event, spans) = parser::parse_full(input).unwrap();
+        let (event, spans) = parser::parse_full(input, &EN).unwrap();
         assert_eq!(event.message, "buy milk\ncall mom");
         // "milk\ncall" starts at UTF-16 offset 4, length 9 (milk=4, \n=1, call=4).
         let ents = refs(input, vec![MessageEntity::bold(10, 9)]);

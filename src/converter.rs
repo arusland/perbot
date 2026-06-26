@@ -387,6 +387,7 @@ fn summarize(event: &EventInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::EN;
 
     fn now() -> NaiveDateTime {
         // Fixed "today" matching the project's reference date.
@@ -434,7 +435,7 @@ mod tests {
         assert_eq!(next.time(), NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         assert!(!c.event.year_explicit);
         assert!(c.event.legacy);
-        assert_eq!(c.event.normalize_time(), "10:00 26.09 yearly");
+        assert_eq!(c.event.normalize_time(&EN), "10:00 26.09 yearly");
     }
 
     #[test]
@@ -445,7 +446,7 @@ mod tests {
         assert!(!c.event.active);
         assert!(c.event.year_explicit);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 4, 9));
-        assert_eq!(c.event.normalize_time(), "08:22 09.04.2026");
+        assert_eq!(c.event.normalize_time(&EN), "08:22 09.04.2026");
     }
 
     #[test]
@@ -457,7 +458,7 @@ mod tests {
             c.event.next_datetime.unwrap().date(),
             NaiveDate::from_ymd_opt(2026, 6, 20).unwrap()
         );
-        assert_eq!(c.event.normalize_time(), "18:50 20.06.2026");
+        assert_eq!(c.event.normalize_time(&EN), "18:50 20.06.2026");
     }
 
     #[test]
@@ -470,7 +471,7 @@ mod tests {
         assert!(days.contains(&Weekday::Mon) && days.contains(&Weekday::Fri));
         assert!(!days.contains(&Weekday::Sat));
         assert!(c.event.date.is_none());
-        assert_eq!(c.event.normalize_time(), "17:00 Mon-Fri");
+        assert_eq!(c.event.normalize_time(&EN), "17:00 Mon-Fri");
     }
 
     #[test]
@@ -486,7 +487,10 @@ mod tests {
             ))
         );
         assert_eq!(c.status, Status::Scheduled);
-        assert_eq!(c.event.normalize_time(), "16:33 each 27th day of the month");
+        assert_eq!(
+            c.event.normalize_time(&EN),
+            "16:33 each 27th day of the month"
+        );
     }
 
     #[test]
@@ -506,20 +510,23 @@ mod tests {
             })
         );
         assert_eq!(
-            c.event.normalize_time(),
+            c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
         );
         // "05/2:11:" -> day 5 of month 11 (start anchor), every 2 days.
         let c = convert("11:07 05/2:11: bday", created, None, 42, now());
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
-        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days yearly");
+        assert_eq!(
+            c.event.normalize_time(&EN),
+            "11:07 05.11 every 2 days yearly"
+        );
         // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
         let c = convert("11:36/90 4: pay", created, None, 42, now());
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Minutes);
         assert_eq!(
-            c.event.normalize_time(),
+            c.event.normalize_time(&EN),
             "11:36 each 4th day of the month every 90 minutes"
         );
     }
@@ -534,7 +541,7 @@ mod tests {
         assert!(!c.event.year_explicit);
         assert!(c.event.repetition.is_none());
         assert_eq!(c.event.message, "bday");
-        assert_eq!(c.event.normalize_time(), "11:07 05.11 yearly");
+        assert_eq!(c.event.normalize_time(&EN), "11:07 05.11 yearly");
     }
 
     #[test]
@@ -554,7 +561,10 @@ mod tests {
             })
         );
         assert_eq!(c.event.message, "bday");
-        assert_eq!(c.event.normalize_time(), "11:07 05.11 every 2 days yearly");
+        assert_eq!(
+            c.event.normalize_time(&EN),
+            "11:07 05.11 every 2 days yearly"
+        );
     }
 
     #[test]
@@ -570,7 +580,7 @@ mod tests {
         assert_eq!(c.status, Status::Scheduled);
         assert!(c.event.next_datetime.is_some());
         assert_eq!(
-            c.event.normalize_time(),
+            c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
         );
 
@@ -586,7 +596,7 @@ mod tests {
         assert!(c.recalculated);
         assert!(c.event.next_datetime.unwrap() > now());
         assert_eq!(
-            c.event.normalize_time(),
+            c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
         );
     }

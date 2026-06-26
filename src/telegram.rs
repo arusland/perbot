@@ -1,7 +1,6 @@
+use crate::locale::LocaleProvider;
 use crate::scheduler;
-use crate::types::{
-    ChatInfo, ChatType, EventInfo, MonthlyPattern, ordinal_suffix, ordinal_word, weekday_full,
-};
+use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern};
 use chrono::{Local, NaiveDateTime, Weekday};
 use std::fmt::Write as _;
 use teloxide::utils::html;
@@ -18,7 +17,11 @@ const MAX_NEXT_PREVIEW: usize = 3;
 /// the listed launches are strictly after it. Output is an HTML fragment: the
 /// `<b>Next launches:</b>` header is bold, the bullets and datetimes are plain
 /// (no HTML specials), so callers embed it verbatim into their HTML output.
-pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String {
+pub fn next_launches_preview(
+    event: &EventInfo,
+    after: NaiveDateTime,
+    loc: &dyn LocaleProvider,
+) -> String {
     let mut launches: Vec<NaiveDateTime> = Vec::new();
     let mut current = event.clone();
     let mut cursor = after;
@@ -36,9 +39,9 @@ pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String 
     if launches.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\n<b>Next launches:</b>");
+    let mut out = format!("\n\n<b>{}</b>", loc.next_launches_header());
     for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
-        out.push_str(&format!("\n• {}", format_when(after, *dt)));
+        out.push_str(&format!("\n• {}", format_when(after, *dt, loc)));
     }
     if launches.len() > MAX_NEXT_PREVIEW {
         out.push_str("\n• ...");
@@ -53,70 +56,44 @@ pub fn next_launches_preview(event: &EventInfo, after: NaiveDateTime) -> String 
 /// (the user's formatting preserved), so it is embedded verbatim. For recurring
 /// events a "Next launches" preview is appended; one-off events (empty preview)
 /// render as just the title plus the message line.
-pub fn scheduled_message(now: NaiveDateTime, dt: NaiveDateTime, event: &EventInfo) -> String {
-    let preview = next_launches_preview(event, dt);
+pub fn scheduled_message(
+    now: NaiveDateTime,
+    dt: NaiveDateTime,
+    event: &EventInfo,
+    loc: &dyn LocaleProvider,
+) -> String {
+    let preview = next_launches_preview(event, dt, loc);
     format!(
         "Scheduled message for <b>{}</b>\nMessage: {}{}",
-        html::escape(&format_when(now, dt)),
+        html::escape(&format_when(now, dt, loc)),
         event.message,
         preview
     )
 }
 
-/// Short relative time until `dt` from `now`, e.g. `13 mins`, `1h`, `2d`, `1w`,
-/// `1.4y`, `2y`. Past ~52 weeks the value is shown in years to one decimal place,
-/// collapsing to a bare integer (`1y`, `2y`) on a whole year.
-fn format_relative(now: NaiveDateTime, dt: NaiveDateTime) -> String {
-    let secs = (dt - now).num_seconds();
-    if secs <= 0 {
-        return "soon".to_string();
-    }
-    let mins = secs / 60;
-    if mins < 1 {
-        return "soon".to_string();
-    }
-    if mins < 60 {
-        return format!("{} min{}", mins, if mins == 1 { "" } else { "s" });
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{}h", hours);
-    }
-    let days = hours / 24;
-    if days < 7 {
-        return format!("{}d", days);
-    }
-    let weeks = days / 7;
-    if weeks < 52 {
-        return format!("{}w", weeks);
-    }
-    // >= ~1 year: show years to one decimal, dropping a trailing ".0".
-    // tenths-of-a-year via integer rounding (+182 ≈ half of 365).
-    let tenths = (days * 10 + 182) / 365;
-    if tenths % 10 == 0 {
-        format!("{}y", tenths / 10)
-    } else {
-        format!("{}.{}y", tenths / 10, tenths % 10)
-    }
+/// Short relative time until `dt` from `now`, delegated to the locale (e.g.
+/// `13 mins`, `1h`, `2d`, `1.4y`).
+fn format_relative(now: NaiveDateTime, dt: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+    loc.format_relative((dt - now).num_seconds())
 }
 
 /// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
 /// `14:00 23.06.2026 (1d)`. Unescaped — for the fired-reminder preview. List
 /// replies use `write_event_row` (HTML) instead.
-pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime) -> String {
+pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
     format!(
         "{} ({})",
-        dt.format("%H:%M %d.%m.%Y"),
-        format_relative(now, dt)
+        loc.format_datetime(dt),
+        format_relative(now, dt, loc)
     )
 }
 
 /// Appends a single HTML event row (`• datetime (relative) — message`). The
 /// datetime/relative parts contain no HTML specials; `e.message` is already an
 /// HTML fragment, so it is embedded verbatim.
-fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) {
     let when = match e.next_datetime {
-        Some(dt) => html::escape(&format_when(now, dt)),
+        Some(dt) => html::escape(&format_when(now, dt, loc)),
         None => "—".to_string(),
     };
     let _ = writeln!(out, "• {} — {}", when, e.message);
@@ -170,8 +147,8 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
 /// expression ([`EventInfo::normalize_time`]) followed by the plain-text message.
 /// Parsing the result yields the same event, so it can be offered as a copyable
 /// starting point for editing. Plain text; callers targeting HTML must escape it.
-pub fn event_source_input(event: &EventInfo) -> String {
-    let time = event.normalize_time();
+pub fn event_source_input(event: &EventInfo, loc: &dyn LocaleProvider) -> String {
+    let time = event.normalize_time(loc);
     let message = html_to_plain(&event.message);
     if message.is_empty() {
         time
@@ -183,11 +160,11 @@ pub fn event_source_input(event: &EventInfo) -> String {
 /// Builds the HTML edit prompt: the `lead` line followed by the event's current
 /// input wrapped in a `<code>` block, which Telegram clients copy on tap. Both
 /// parts are HTML-escaped.
-pub fn edit_prompt(lead: &str, event: &EventInfo) -> String {
+pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> String {
     format!(
         "{}\n\n<code>{}</code>",
         html::escape(lead),
-        html::escape(&event_source_input(event))
+        html::escape(&event_source_input(event, loc))
     )
 }
 
@@ -196,13 +173,14 @@ pub fn edit_prompt(lead: &str, event: &EventInfo) -> String {
 /// `None` for one-off events (no recurrence). The recurrence-bearing fields are
 /// mutually exclusive, checked in priority order. Output is plain text with no
 /// HTML specials.
-fn describe_recurrence(e: &EventInfo) -> Option<String> {
+fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String> {
+    let every = loc.every_word();
     if let Some(rep) = &e.repetition {
-        let unit = rep.unit.label(rep.interval != 1);
+        let unit = loc.unit_label(rep.unit, rep.interval != 1);
         return Some(if rep.interval == 1 {
-            format!("every {unit}")
+            format!("{every} {unit}")
         } else {
-            format!("every {} {unit}", rep.interval)
+            format!("{every} {} {unit}", rep.interval)
         });
     }
     if let Some(days) = &e.days {
@@ -210,18 +188,22 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
         list.sort_by_key(|d| d.num_days_from_monday());
         let names = list
             .iter()
-            .map(|d| weekday_full(*d))
+            .map(|d| loc.weekday_full(*d))
             .collect::<Vec<_>>()
             .join(", ");
-        return Some(format!("every {names}"));
+        return Some(format!("{every} {names}"));
     }
     if let Some(pattern) = &e.monthly_pattern {
         return Some(match pattern {
             MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                format!("every {} {}", ordinal_word(*ord), weekday_full(*wd))
+                format!(
+                    "{every} {} {}",
+                    loc.ordinal_word(*ord),
+                    loc.weekday_full(*wd)
+                )
             }
-            MonthlyPattern::LastDay => "last day of the month".to_string(),
-            MonthlyPattern::DayOfMonth(d) => format!("{} day of the month", ordinal_suffix(*d)),
+            MonthlyPattern::LastDay => loc.last_day_phrase().to_string(),
+            MonthlyPattern::DayOfMonth(d) => loc.day_of_month_recurrence(&loc.ordinal_suffix(*d)),
         });
     }
     None
@@ -232,15 +214,15 @@ fn describe_recurrence(e: &EventInfo) -> Option<String> {
 /// `, <recurrence>` is appended inside the parentheses, next to the relative time,
 /// when the event repeats. Datetime/relative/recurrence parts contain no HTML
 /// specials. Returns `• <b>—</b>` for an event with no upcoming launch.
-fn event_when_line(e: &EventInfo, now: NaiveDateTime) -> String {
-    let recurrence = describe_recurrence(e)
+fn event_when_line(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+    let recurrence = describe_recurrence(e, loc)
         .map(|r| format!(", {r}"))
         .unwrap_or_default();
     let when = match e.next_datetime {
         Some(dt) => html::escape(&format!(
             "{} (in {}{})",
-            dt.format("%H:%M %d.%m.%Y"),
-            format_relative(now, dt),
+            loc.format_datetime(dt),
+            format_relative(now, dt, loc),
             recurrence
         )),
         None => "—".to_string(),
@@ -252,12 +234,17 @@ fn event_when_line(e: &EventInfo, now: NaiveDateTime) -> String {
 /// line ([`event_when_line`]) ending with a tappable `/event<id>` link that opens
 /// the single-event detail view, then an indented plain-text message preview (tags
 /// stripped, truncated; HTML-escaped).
-fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime) {
+fn write_event_row_two_line(
+    out: &mut String,
+    e: &EventInfo,
+    now: NaiveDateTime,
+    loc: &dyn LocaleProvider,
+) {
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
     let _ = writeln!(
         out,
         "{} /event{}\n  {message}",
-        event_when_line(e, now),
+        event_when_line(e, now, loc),
         e.id
     );
 }
@@ -267,14 +254,14 @@ fn write_event_row_two_line(out: &mut String, e: &EventInfo, now: NaiveDateTime)
 /// fragment (formatting preserved, not truncated), and the upcoming-launches preview
 /// ([`next_launches_preview`], identical to a fired reminder). The preview is empty
 /// for one-off or inactive events.
-pub fn event_detail(event: &EventInfo, now: NaiveDateTime) -> String {
+pub fn event_detail(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
     let preview = match event.next_datetime {
-        Some(dt) => next_launches_preview(event, dt),
+        Some(dt) => next_launches_preview(event, dt, loc),
         None => String::new(),
     };
     format!(
         "{}\n{}{}",
-        event_when_line(event, now),
+        event_when_line(event, now, loc),
         event.message,
         preview
     )
@@ -306,6 +293,7 @@ pub fn format_page(
     title: &str,
     empty: &str,
     two_line: bool,
+    loc: &dyn LocaleProvider,
 ) -> (String, usize) {
     format_page_at(
         events,
@@ -315,10 +303,12 @@ pub fn format_page(
         title,
         empty,
         two_line,
+        loc,
     )
 }
 
 /// Like [`format_page`] but with an explicit `now` for relative-time tests.
+#[allow(clippy::too_many_arguments)]
 pub fn format_page_at(
     events: &[EventInfo],
     now: NaiveDateTime,
@@ -327,6 +317,7 @@ pub fn format_page_at(
     title: &str,
     empty: &str,
     two_line: bool,
+    loc: &dyn LocaleProvider,
 ) -> (String, usize) {
     let pages = total_pages(events.len(), per_page);
     if events.is_empty() {
@@ -339,9 +330,9 @@ pub fn format_page_at(
     let mut out = format!("<b>{}:</b>\n", html::escape(title));
     for e in slice {
         if two_line {
-            write_event_row_two_line(&mut out, e, now);
+            write_event_row_two_line(&mut out, e, now, loc);
         } else {
-            write_event_row(&mut out, e, now);
+            write_event_row(&mut out, e, now, loc);
         }
     }
     (out, pages)
@@ -387,11 +378,12 @@ pub fn extract_chat_info(chat: &teloxide::types::Chat) -> ChatInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::EN;
     use crate::types::EventInfo;
     use chrono::{Duration, NaiveDate, NaiveTime};
 
     fn at(now: NaiveDateTime, d: Duration) -> String {
-        format_relative(now, now + d)
+        format_relative(now, now + d, &EN)
     }
 
     fn sample_event(message: &str, next: Option<NaiveDateTime>) -> EventInfo {
@@ -434,7 +426,7 @@ mod tests {
         // with the relative time (1d) appended.
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
-            scheduled_message(now, dt, &event),
+            scheduled_message(now, dt, &event, &EN),
             "Scheduled message for <b>13:05 31.12.2027 (1d)</b>\nMessage: ring in the new year"
         );
     }
@@ -452,7 +444,7 @@ mod tests {
         // `message` is already an HTML fragment; it is embedded as-is.
         let event = sample_event("<b>call</b> the office", Some(dt));
         assert_eq!(
-            scheduled_message(now, dt, &event),
+            scheduled_message(now, dt, &event, &EN),
             "Scheduled message for <b>10:00 22.06.2026 (1h)</b>\nMessage: <b>call</b> the office"
         );
     }
@@ -475,7 +467,7 @@ mod tests {
             unit: TimeUnit::Days,
         });
 
-        let text = scheduled_message(now, dt, &event);
+        let text = scheduled_message(now, dt, &event, &EN);
         assert!(text.starts_with("Scheduled message for <b>10:00 22.06.2026 (1h)</b>"));
         assert!(text.contains("Message: standup"));
         // Preview lists launches strictly after the confirmed datetime.
@@ -492,7 +484,7 @@ mod tests {
         );
         let mut event = sample_event("call mom", Some(fire));
         event.time = NaiveTime::from_hms_opt(10, 0, 0);
-        assert_eq!(next_launches_preview(&event, fire), "");
+        assert_eq!(next_launches_preview(&event, fire, &EN), "");
     }
 
     #[test]
@@ -509,7 +501,7 @@ mod tests {
             unit: TimeUnit::Days,
         });
 
-        let preview = next_launches_preview(&event, fire);
+        let preview = next_launches_preview(&event, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
         assert!(preview.contains("• 10:00 23.06.2026"));
@@ -532,7 +524,7 @@ mod tests {
         event.time = NaiveTime::from_hms_opt(23, 0, 0);
         event.years = Some(HashSet::from([2027]));
 
-        let preview = next_launches_preview(&event, fire);
+        let preview = next_launches_preview(&event, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         assert!(preview.contains("• 23:00 31.12.2027"));
         assert!(!preview.contains("• ..."));
@@ -557,6 +549,7 @@ mod tests {
             "Upcoming events",
             "No upcoming events.",
             false,
+            &EN,
         );
         assert_eq!(text, "No upcoming events.");
         assert_eq!(pages, 1);
@@ -572,7 +565,8 @@ mod tests {
             // HTML specials).
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
-        let (text, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", false);
+        let (text, pages) =
+            format_page_at(&events, now, 0, 10, "Upcoming events", "none", false, &EN);
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         assert!(text.contains("14:00 15.06.2026 (2h)"));
@@ -585,7 +579,7 @@ mod tests {
         let now =
             NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
-        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none", false);
+        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none", false, &EN);
         assert!(text.starts_with("<b>Today's events:</b>\n"));
         assert!(text.contains("10:00 16.06.2026 (1h)"));
         assert!(text.contains("standup"));
@@ -600,7 +594,8 @@ mod tests {
             .collect();
 
         // First page: 10 rows. Page position lives on the keyboard, not the title.
-        let (p0, pages) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", false);
+        let (p0, pages) =
+            format_page_at(&events, now, 0, 10, "Upcoming events", "none", false, &EN);
         assert_eq!(pages, 3);
         assert!(p0.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p0.contains("event 0"));
@@ -608,7 +603,8 @@ mod tests {
         assert!(!p0.contains("event 10"));
 
         // Last page: only 5 rows. Out-of-range page clamps to last.
-        let (p_last, _) = format_page_at(&events, now, 9, 10, "Upcoming events", "none", false);
+        let (p_last, _) =
+            format_page_at(&events, now, 9, 10, "Upcoming events", "none", false, &EN);
         assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
@@ -662,9 +658,9 @@ mod tests {
         // Clock time + message.
         let mut e = sample_event("call the office", None);
         e.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
-        assert_eq!(event_source_input(&e), "13:30 call the office");
+        assert_eq!(event_source_input(&e, &EN), "13:30 call the office");
         // Round-trips: parsing yields the same time/message.
-        let parsed = parser::parse(&event_source_input(&e)).unwrap();
+        let parsed = parser::parse(&event_source_input(&e, &EN), &EN).unwrap();
         assert_eq!(parsed.time, e.time);
         assert_eq!(parsed.message, "call the office");
 
@@ -678,19 +674,19 @@ mod tests {
             chrono::Weekday::Thu,
             chrono::Weekday::Fri,
         ]));
-        assert_eq!(event_source_input(&r), "09:00 Mon-Fri standup");
+        assert_eq!(event_source_input(&r, &EN), "09:00 Mon-Fri standup");
 
         // HTML formatting in the message is reduced to plain text.
         let mut b = sample_event("<b>call</b> her", None);
         b.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
-        assert_eq!(event_source_input(&b), "08:00 call her");
+        assert_eq!(event_source_input(&b, &EN), "08:00 call her");
     }
 
     #[test]
     fn edit_prompt_wraps_input_in_code_and_escapes() {
         let mut e = sample_event("a &amp; b &lt;c&gt;", None);
         e.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
-        let prompt = edit_prompt("Edit:", &e);
+        let prompt = edit_prompt("Edit:", &e, &EN);
         // The copyable block is a <code> span...
         assert!(prompt.contains("<code>"));
         assert!(prompt.contains("</code>"));
@@ -708,7 +704,7 @@ mod tests {
             "<b>call</b> the office right now please and bring the documents",
             Some(now + Duration::hours(2)),
         )];
-        let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true);
+        let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true, &EN);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         // Bold datetime line and message live on separate lines; no `—` separator.
         assert!(!text.contains(" — "));
@@ -727,27 +723,33 @@ mod tests {
 
         let mut e = sample_event("x", None);
         // One-off → no recurrence.
-        assert_eq!(describe_recurrence(&e), None);
+        assert_eq!(describe_recurrence(&e, &EN), None);
 
         // Interval repetition: plural and singular (n == 1).
         e.repetition = Some(Repetition {
             interval: 2,
             unit: TimeUnit::Days,
         });
-        assert_eq!(describe_recurrence(&e).as_deref(), Some("every 2 days"));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every 2 days")
+        );
         e.repetition = Some(Repetition {
             interval: 1,
             unit: TimeUnit::Hours,
         });
-        assert_eq!(describe_recurrence(&e).as_deref(), Some("every hour"));
+        assert_eq!(describe_recurrence(&e, &EN).as_deref(), Some("every hour"));
         e.repetition = None;
 
         // Single weekday, then a sorted multi-day set (Mon before Fri).
         e.days = Some(HashSet::from([Weekday::Fri]));
-        assert_eq!(describe_recurrence(&e).as_deref(), Some("every Friday"));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every Friday")
+        );
         e.days = Some(HashSet::from([Weekday::Fri, Weekday::Mon]));
         assert_eq!(
-            describe_recurrence(&e).as_deref(),
+            describe_recurrence(&e, &EN).as_deref(),
             Some("every Monday, Friday")
         );
         e.days = None;
@@ -755,17 +757,17 @@ mod tests {
         // Monthly patterns.
         e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
         assert_eq!(
-            describe_recurrence(&e).as_deref(),
+            describe_recurrence(&e, &EN).as_deref(),
             Some("every first Sunday")
         );
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(
-            describe_recurrence(&e).as_deref(),
+            describe_recurrence(&e, &EN).as_deref(),
             Some("last day of the month")
         );
         e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
         assert_eq!(
-            describe_recurrence(&e).as_deref(),
+            describe_recurrence(&e, &EN).as_deref(),
             Some("28th day of the month")
         );
     }
@@ -780,7 +782,7 @@ mod tests {
             interval: 2,
             unit: TimeUnit::Days,
         });
-        let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true);
+        let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true, &EN);
         // Recurrence sits inside the parentheses, next to the relative time; the
         // /event<id> link ends the line.
         assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
@@ -794,7 +796,7 @@ mod tests {
             "<b>call</b> the office and bring the documents",
             Some(now + Duration::hours(2)),
         );
-        let text = event_detail(&e, now);
+        let text = event_detail(&e, now, &EN);
         // Bold when-line, then the full untruncated HTML message verbatim.
         assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h)</b>\n"));
         assert!(text.contains("<b>call</b> the office and bring the documents"));
@@ -814,7 +816,7 @@ mod tests {
             interval: 1,
             unit: TimeUnit::Days,
         });
-        let text = event_detail(&e, now);
+        let text = event_detail(&e, now, &EN);
         assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h, every day)</b>\n"));
         assert!(text.contains("standup"));
         // Recurring: launches block present, listing dates after the upcoming one.

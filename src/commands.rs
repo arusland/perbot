@@ -217,6 +217,7 @@ fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<Inli
 /// when the list spans more than one page.
 async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()> {
     let events = kind.fetch(ctx.provider, ctx.chat_id.0);
+    let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
         Local::now().naive_local(),
@@ -225,6 +226,7 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
         kind.title(),
         kind.empty(),
         matches!(kind, ListKind::Events),
+        loc,
     );
 
     let mut req = ctx
@@ -284,6 +286,7 @@ pub async fn handle_list_callback(
     let message_id = message.id;
 
     let events = kind.fetch(provider, chat_id.0);
+    let loc = crate::locale::for_chat(chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
         Local::now().naive_local(),
@@ -292,6 +295,7 @@ pub async fn handle_list_callback(
         kind.title(),
         kind.empty(),
         matches!(kind, ListKind::Events),
+        loc,
     );
     let page = page.min(total_pages.saturating_sub(1));
 
@@ -346,7 +350,8 @@ pub async fn handle_event_view(
     match provider.get_event(id) {
         Some(event) if event.chat_id == chat_id.0 => {
             let now = Local::now().naive_local();
-            bot.send_message(chat_id, event_detail(&event, now))
+            let loc = crate::locale::for_chat(chat_id.0);
+            bot.send_message(chat_id, event_detail(&event, now, loc))
                 .parse_mode(ParseMode::Html)
                 .reply_markup(event_actions_keyboard(id))
                 .await?;
@@ -453,7 +458,8 @@ async fn handle_edit_prompt(
     bot.answer_callback_query(q.id).await?;
     if let Some(event) = event {
         pending_edit.lock().unwrap().insert(chat_id.0, id);
-        bot.send_message(chat_id, edit_prompt(pending::EDIT_ASK_TEXT, &event))
+        let loc = crate::locale::for_chat(chat_id.0);
+        bot.send_message(chat_id, edit_prompt(pending::EDIT_ASK_TEXT, &event, loc))
             .parse_mode(ParseMode::Html)
             .reply_markup(edit_cancel_keyboard(id))
             .await?;
@@ -653,7 +659,8 @@ pub async fn handle_snooze_callback(
     }
 
     bot.answer_callback_query(q.id).await?;
-    bot.send_message(chat_id, scheduled_message(now, next, &event))
+    let loc = crate::locale::for_chat(chat_id.0);
+    bot.send_message(chat_id, scheduled_message(now, next, &event, loc))
         .parse_mode(ParseMode::Html)
         .await?;
     Ok(())
