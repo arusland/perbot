@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     // callbacks (used by paginated `/events`). Shared deps are injected via
     // `dptree::deps!`.
     let handler = dptree::entry()
-        .branch(Update::filter_message().endpoint(message_handler))
+        .branch(Update::filter_message().endpoint(message_handler_safe))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
 
     Dispatcher::builder(bot, handler)
@@ -140,6 +140,64 @@ async fn callback_handler(
         }
         _ => commands::handle_list_callback(&bot, &provider, q).await,
     }
+}
+
+/// Wraps `message_handler` so a failure can never bubble up to the dispatcher's
+/// default error path. On error it logs the chat/message context, tells the user
+/// "Something goes wrong!", and forwards the error detail to the admin.
+// Dependencies are injected individually by dptree, so the arg count is expected.
+#[allow(clippy::too_many_arguments)]
+async fn message_handler_safe(
+    bot: Bot,
+    msg: Message,
+    provider: EventProvider,
+    admin_id: ChatId,
+    bot_username: String,
+    pending_import: PendingImport,
+    pending_msg: PendingMessage,
+    pending_edit: PendingEdit,
+) -> ResponseResult<()> {
+    // `message_handler` consumes its arguments, so capture the reporting context
+    // (and a bot handle for the follow-up sends) before handing them over.
+    let bot_for_err = bot.clone();
+    let chat_id = msg.chat.id;
+    let chat_info = extract_chat_info(&msg.chat);
+    let msg_text = msg.text().map(str::to_owned);
+
+    if let Err(e) = message_handler(
+        bot,
+        msg,
+        provider,
+        admin_id,
+        bot_username,
+        pending_import,
+        pending_msg,
+        pending_edit,
+    )
+    .await
+    {
+        log::error!(
+            "message_handler failed (chat {:?}, msg {:?}): {}",
+            chat_info,
+            msg_text,
+            e
+        );
+
+        // Best-effort notifications: ignore secondary send errors so reporting a
+        // failure can't itself re-trigger the dispatcher's error path.
+        let _ = bot_for_err
+            .send_message(chat_id, "⚠️<b>Something goes wrong!</b>")
+            .await;
+        let _ = bot_for_err
+            .send_message(
+                admin_id,
+                format!("<b>Error:</b> {}", html::escape(&e.to_string())),
+            )
+            .parse_mode(ParseMode::Html)
+            .await;
+    }
+
+    Ok(())
 }
 
 /// Handles a single incoming message: stores chat/message info, dispatches
