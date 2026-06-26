@@ -44,6 +44,11 @@ pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too:";
 /// Re-prompt when an edit reply couldn't be parsed into a time.
 pub const EDIT_NEED_TIME: &str = "Couldn't read a time. Send the new time and message:";
 
+/// Warning shown when a submitted reminder body exceeded Telegram's length limit
+/// and was shortened to fit (see [`crate::telegram::clamp_message`]).
+pub const MESSAGE_TRUNCATED: &str =
+    "⚠️ Your message was too long and has been shortened to fit Telegram's limit.";
+
 /// Callback data carried by the Cancel button (routed by the `pm:` prefix).
 pub const CANCEL_DATA: &str = "pm:cancel";
 

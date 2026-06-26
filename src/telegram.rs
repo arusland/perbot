@@ -143,6 +143,53 @@ fn message_preview(html_fragment: &str, max: usize) -> String {
     }
 }
 
+/// Telegram's hard message limit, in UTF-16 code units, measured on the rendered
+/// text (after entities parsing — HTML tags don't count toward it).
+pub const TELEGRAM_MAX_LEN: usize = 4096;
+
+/// Headroom reserved below [`TELEGRAM_MAX_LEN`] for the bits the bot appends to a
+/// user's body when it fires a reminder: the `Next launches:` preview (up to a
+/// few launch lines + header) and the snooze hint, plus the one-off
+/// confirmation's labels. The realistic worst case is ~150 units; 300 is a safe
+/// margin so a clamped body never makes an outbound message exceed the limit.
+const FIRED_EXTRAS_RESERVE: usize = 300;
+
+/// Maximum rendered length (UTF-16 code units) of a user-supplied reminder body,
+/// leaving [`FIRED_EXTRAS_RESERVE`] for the appended preview/hint.
+pub const MESSAGE_MAX_LEN: usize = TELEGRAM_MAX_LEN - FIRED_EXTRAS_RESERVE;
+
+/// Rendered length Telegram counts for an HTML fragment: its plain text (tags
+/// stripped, specials unescaped) measured in UTF-16 code units — the same unit
+/// the Bot API uses for the 4096-char limit.
+pub fn rendered_len(html_fragment: &str) -> usize {
+    html_to_plain(html_fragment).encode_utf16().count()
+}
+
+/// Clamps an HTML message fragment to [`MESSAGE_MAX_LEN`] rendered UTF-16 units.
+/// Returns `(fragment, false)` unchanged when it already fits; otherwise returns
+/// `(escaped_truncated_plain_text, true)`. Over-limit truncation falls back to
+/// the plain (un-formatted) text re-escaped, which is always valid HTML — losing
+/// formatting only in this rare case, where the caller warns the user anyway.
+pub fn clamp_message(html_fragment: &str) -> (String, bool) {
+    if rendered_len(html_fragment) <= MESSAGE_MAX_LEN {
+        return (html_fragment.to_owned(), false);
+    }
+    let plain = html_to_plain(html_fragment);
+    // Truncate by whole chars, accumulating UTF-16 widths so a surrogate pair is
+    // never split and the head never exceeds the cap.
+    let mut head = String::with_capacity(plain.len());
+    let mut units = 0usize;
+    for c in plain.chars() {
+        let w = c.len_utf16();
+        if units + w > MESSAGE_MAX_LEN {
+            break;
+        }
+        head.push(c);
+        units += w;
+    }
+    (html::escape(&head), true)
+}
+
 /// Reconstructs the re-parseable plain-text input for an event: its canonical time
 /// expression ([`EventInfo::normalize_time`]) followed by the plain-text message.
 /// Parsing the result yields the same event, so it can be offered as a copyable
@@ -384,6 +431,45 @@ mod tests {
 
     fn at(now: NaiveDateTime, d: Duration) -> String {
         format_relative(now, now + d, &EN)
+    }
+
+    #[test]
+    fn rendered_len_ignores_tags_and_counts_utf16() {
+        // Tags don't count; only the two rendered letters do.
+        assert_eq!(rendered_len("<b>hi</b>"), 2);
+        // An astral-plane emoji is one char but two UTF-16 code units.
+        assert_eq!(rendered_len("😀"), 2);
+        // Escaped specials render back to a single visible char.
+        assert_eq!(rendered_len("a &amp; b"), 5);
+    }
+
+    #[test]
+    fn clamp_message_leaves_short_fragment_unchanged() {
+        let (out, truncated) = clamp_message("<b>hi</b> there");
+        assert_eq!(out, "<b>hi</b> there");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn clamp_message_truncates_over_limit_to_valid_html() {
+        let long = "a".repeat(MESSAGE_MAX_LEN + 50);
+        let (out, truncated) = clamp_message(&long);
+        assert!(truncated);
+        assert_eq!(rendered_len(&out), MESSAGE_MAX_LEN);
+        // Escaped plain text carries no dangling tag.
+        assert!(!out.contains('<'));
+    }
+
+    #[test]
+    fn clamp_message_never_splits_a_surrogate_pair() {
+        // A run of astral-plane emoji (2 UTF-16 units each) overruns the cap;
+        // the head must stop on a whole-emoji boundary and never exceed it.
+        let long = "😀".repeat(MESSAGE_MAX_LEN);
+        let (out, truncated) = clamp_message(&long);
+        assert!(truncated);
+        assert!(rendered_len(&out) <= MESSAGE_MAX_LEN);
+        // MESSAGE_MAX_LEN is even, so an exact fill of 2-unit chars lands on it.
+        assert_eq!(rendered_len(&out), MESSAGE_MAX_LEN);
     }
 
     fn sample_event(message: &str, next: Option<NaiveDateTime>) -> EventInfo {

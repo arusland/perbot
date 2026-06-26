@@ -5,7 +5,7 @@ use perbot::parser;
 use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{edit_prompt, extract_chat_info, scheduled_message};
+use perbot::telegram::{clamp_message, edit_prompt, extract_chat_info, scheduled_message};
 use perbot::tgbot::TgBot;
 use perbot::types::TgMessage;
 use teloxide::{prelude::*, types::BotCommandScope, utils::command::BotCommands, utils::html};
@@ -280,10 +280,16 @@ async fn message_handler(
                 event.msg_id = msg_id;
                 event.legacy = old.legacy;
                 event.snoozed = old.snoozed;
-                event.message = perbot::richtext::render_html(text, &spans, &entities);
+                let rendered = perbot::richtext::render_html(text, &spans, &entities);
+                let (clamped, truncated) = clamp_message(&rendered);
+                event.message = clamped;
 
                 let stored = provider.update_event_and_get(event);
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+                if truncated {
+                    bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                        .await?;
+                }
                 let reply = if let Some(dt) = stored.next_datetime {
                     let now = chrono::Local::now().naive_local();
                     scheduled_message(now, dt, &stored, loc)
@@ -331,8 +337,13 @@ async fn message_handler(
             }
             event.chat_id = msg.chat.id.0;
             event.msg_id = msg_id;
-            event.message = body;
+            let (clamped, truncated) = clamp_message(&body);
+            event.message = clamped;
             let stored = provider.insert_event_and_get(event);
+            if truncated {
+                bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                    .await?;
+            }
             let reply = if let Some(dt) = stored.next_datetime {
                 let now = chrono::Local::now().naive_local();
                 scheduled_message(now, dt, &stored, loc)
@@ -349,9 +360,15 @@ async fn message_handler(
             // Preserve the user's formatting: render the surviving message body
             // as an HTML fragment, re-mapping the message's entities onto it.
             let entities = msg.parse_entities().unwrap_or_default();
-            event.message = perbot::richtext::render_html(text, &spans, &entities);
+            let rendered = perbot::richtext::render_html(text, &spans, &entities);
+            let (clamped, truncated) = clamp_message(&rendered);
+            event.message = clamped;
 
             let stored = provider.insert_event_and_get(event);
+            if truncated {
+                bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                    .await?;
+            }
 
             if let Some(dt) = stored.next_datetime {
                 let now = chrono::Local::now().naive_local();
