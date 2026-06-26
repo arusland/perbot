@@ -100,7 +100,7 @@
 
 | Current Time        | Actor  | Input / Expected Next          | Message    | Normalized         |
 |---------------------|--------|--------------------------------|------------|--------------------|
-| 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  | run backup | 15:30 every 3 days |
+| 2026-02-20 10:00:00 | USER   | 15:30 every 3 day(s) run backup  | run backup | 15:30 every 3 days |
 | 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 15:30:00            |            |                    |
 | 2026-02-20 15:30:01 | SYSTEM | 2026-02-23 15:30:00            |            |                    |
 | 2026-02-23 15:30:01 | SYSTEM | 2026-02-26 15:30:00            |            |                    |
@@ -121,9 +121,9 @@
 | 2026-02-21 19:37:01 | SYSTEM | 2026-02-21 19:44:00            |            |                       |
 
 ### Case 7.4: Exact time and day of month + every 2 days (day-of-month has priority)
-| Current Time        | Actor  | Input / Expected Next                            | Message  | Normalized                                |
-|---------------------|--------|--------------------------------------------------|----------|-------------------------------------------|
-| 2026-06-24 19:36:00 | USER   | 22:15 every 28 of the month every 2 day call Mal | call Mal | 22:15 each 28th day of the month every 2 days |
+| Current Time        | Actor  | Input / Expected Next                              | Message  | Normalized                                |
+|---------------------|--------|----------------------------------------------------|----------|-------------------------------------------|
+| 2026-06-24 19:36:00 | USER   | 22:15 every 28 of (the) month every 2 day call Mal | call Mal | 22:15 each 28th day of the month every 2 days |
 | 2026-06-24 19:36:01 | SYSTEM | 2026-06-28 22:15:00                              |          |                                           |
 | 2026-06-28 22:15:01 | SYSTEM | 2026-06-30 22:15:00                              |          |                                           |
 | 2026-06-30 22:15:01 | SYSTEM | 2026-07-02 22:15:00                              |          |                                           |
@@ -176,17 +176,9 @@
 | 2028-01-01 01:06:01 | SYSTEM | 2029-01-01 01:06:00            |                |                  |
 
 ### Case 9.3: Birthday every year
-| Current Time        | Actor  | Input / Expected Next          | Message        | Normalized       |
-|---------------------|--------|--------------------------------|----------------|------------------|
-| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Poly's bday        | Poly's bday    | 10:03 15.12 yearly |
-| 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
-| 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
-| 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
-
-### Case 9.4: Birthday every year with optional "every year"
-| Current Time        | Actor  | Input / Expected Next               | Message        | Normalized       |
-|---------------------|--------|-------------------------------------|----------------|------------------|
-| 2026-12-15 10:03:01 | USER   | 10:03 15.12 Every yeaR Poly's bday  | Poly's bday    | 10:03 15.12 yearly |
+| Current Time        | Actor  | Input / Expected Next                | Message        | Normalized         |
+|---------------------|--------|--------------------------------------|----------------|--------------------|
+| 2026-12-15 10:03:01 | USER   | 10:03 15.12 (Every yeaR) Poly's bday | Poly's bday    | 10:03 15.12 yearly |
 | 2026-12-15 10:03:01 | SYSTEM | 2027-12-15 10:03:00            |                |                  |
 | 2027-12-15 10:03:01 | SYSTEM | 2028-12-15 10:03:00            |                |                  |
 | 2028-12-15 10:03:01 | SYSTEM | 2029-12-15 10:03:00            |                |                  |
@@ -434,7 +426,7 @@ is independent of when the suite runs.
 
 | Current Time        | Actor  | Input / Expected Next | Message  | Normalized   |
 |---------------------|--------|-----------------------|----------|--------------|
-| 2026-02-20 10:00:00 | USER   | 8 min call her        | call her | in 8 minutes |
+| 2026-02-20 10:00:00 | USER   | (in) 8 min call her   | call her | in 8 minutes |
 | 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:08:00   |          |              |
 | 2026-02-20 10:08:01 | SYSTEM | NONE                  |          |              |
 
@@ -443,6 +435,7 @@ is independent of when the suite runs.
 |---------------------|--------|-----------------------|----------|--------------|
 | 2026-02-20 10:00:00 | USER   | 8 min call her        | call her | in 8 minutes |
 | 2026-02-20 10:08:01 | SYSTEM | NONE                  |          |              |
+
 
 ### Case 24: In-offset hours — one-shot, fires 3 hours after creation
 

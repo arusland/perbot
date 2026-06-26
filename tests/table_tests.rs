@@ -4,6 +4,7 @@ use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
 use perbot::types::{ChatInfo, ChatType};
 
+#[derive(Clone)]
 struct TableRow {
     ts: NaiveDateTime,
     actor: String,
@@ -17,9 +18,105 @@ struct TableRow {
     original: String,
 }
 
+#[derive(Clone)]
 struct Table {
     name: String,
     rows: Vec<TableRow>,
+}
+
+/// Expands a single cell containing optional `(...)` groups into every concrete
+/// variant. `(in) 8 min call her` yields `["in 8 min call her", "8 min call her"]`:
+/// the "include" branch keeps the inner text (parens dropped), the "exclude"
+/// branch removes the whole group and collapses the leftover whitespace. Multiple
+/// groups expand via the cartesian product (recursion on the remainder); a cell
+/// with no `(...)` yields a single, unchanged variant.
+fn expand_optionals(value: &str) -> Vec<String> {
+    let Some(open) = value.find('(') else {
+        return vec![value.to_string()];
+    };
+    let Some(rel_close) = value[open..].find(')') else {
+        return vec![value.to_string()];
+    };
+    let close = open + rel_close;
+
+    let before = &value[..open];
+    let inner = &value[open + 1..close];
+    let after = &value[close + 1..];
+
+    let include = format!("{before}{inner}{after}");
+    // Drop the group entirely, then squeeze the seam (e.g. "X  Y" -> "X Y") and trim.
+    let exclude = format!("{before}{after}")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut out = Vec::new();
+    for variant in [include, exclude] {
+        out.extend(expand_optionals(&variant));
+    }
+    out
+}
+
+/// Expands a table whose rows may contain optional `(...)` groups into one table
+/// per combination of choices. Each variant clones the rows with the concrete
+/// value substituted and gets a disambiguating name suffix so a failure panic
+/// identifies which expansion broke. A table with no optional groups is returned
+/// unchanged.
+fn expand_table(table: &Table) -> Vec<Table> {
+    // Per-row variants; rows without `(...)` contribute exactly one.
+    let per_row: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .map(|row| expand_optionals(&row.value))
+        .collect();
+
+    let has_optional = per_row.iter().any(|v| v.len() > 1);
+    if !has_optional {
+        return vec![table.clone()];
+    }
+
+    // Cartesian product across rows.
+    let mut combos: Vec<Vec<String>> = vec![Vec::new()];
+    for variants in &per_row {
+        let mut next = Vec::new();
+        for combo in &combos {
+            for variant in variants {
+                let mut extended = combo.clone();
+                extended.push(variant.clone());
+                next.push(extended);
+            }
+        }
+        combos = next;
+    }
+
+    combos
+        .into_iter()
+        .map(|combo| {
+            let rows: Vec<TableRow> = table
+                .rows
+                .iter()
+                .zip(combo.iter())
+                .map(|(row, value)| {
+                    let mut row = row.clone();
+                    row.original = row.original.replacen(&row.value, value, 1);
+                    row.value = value.clone();
+                    row
+                })
+                .collect();
+            // Label the variant by the USER input(s) that actually differ.
+            let label = rows
+                .iter()
+                .zip(per_row.iter())
+                .filter(|(_, variants)| variants.len() > 1)
+                .map(|(row, _)| row.value.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Table {
+                name: format!("{} (variant: {:?})", table.name, label),
+                rows,
+            }
+        })
+        .collect()
 }
 
 /// Parse all markdown tables from the given content.
@@ -296,7 +393,10 @@ fn fail_at(table_idx: usize, table: &Table, step: usize, msg: &str, actual: &str
 #[test]
 fn test_table_driven() {
     let content = include_str!("../test-cases.md");
-    let tables = parse_tables(content);
+    let tables: Vec<Table> = parse_tables(content)
+        .iter()
+        .flat_map(expand_table)
+        .collect();
     assert!(
         !tables.is_empty(),
         "No tables found in test-cases.md — check the format"
