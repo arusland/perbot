@@ -4,13 +4,13 @@ use crate::state::EventProvider;
 use crate::telegram::{
     LIST_PAGE_SIZE, edit_prompt, event_detail, format_page_at, scheduled_message,
 };
+use crate::tgbot::TgBot;
 use crate::types::EventInfo;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
 use teloxide::{
-    net::Download,
     prelude::*,
-    types::{FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, ParseMode},
+    types::{FileId, InlineKeyboardButton, InlineKeyboardMarkup},
     utils::command::BotCommands,
 };
 
@@ -139,7 +139,7 @@ pub enum Command {
 
 /// Shared dependencies passed to every command handler.
 pub struct CmdContext<'a> {
-    pub bot: &'a Bot,
+    pub bot: &'a TgBot,
     pub chat_id: ChatId,
     pub provider: &'a EventProvider,
     pub admin_id: ChatId,
@@ -177,7 +177,7 @@ async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
              /exit — shut the bot down",
         );
     }
-    ctx.bot.send_message(ctx.chat_id, help).await?;
+    ctx.bot.send_text(ctx.chat_id, help, None).await?;
     Ok(())
 }
 
@@ -229,14 +229,15 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
         loc,
     );
 
-    let mut req = ctx
+    if let Err(e) = ctx
         .bot
-        .send_message(ctx.chat_id, &text)
-        .parse_mode(ParseMode::Html);
-    if let Some(kb) = list_keyboard(kind, 0, total_pages) {
-        req = req.reply_markup(kb);
-    }
-    if let Err(e) = req.await {
+        .send_html(
+            ctx.chat_id,
+            text.as_str(),
+            list_keyboard(kind, 0, total_pages),
+        )
+        .await
+    {
         // A single page shouldn't exceed Telegram's 4096-char limit, but keep the
         // safety net: log with context and warn the admin instead of bubbling up.
         log::error!(
@@ -253,7 +254,7 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
             events.len(),
             text.chars().count(),
         );
-        if let Err(warn_err) = ctx.bot.send_message(ctx.admin_id, warning).await {
+        if let Err(warn_err) = ctx.bot.send_text(ctx.admin_id, warning, None).await {
             log::error!("Failed to warn admin about send failure: {warn_err}");
         }
     }
@@ -264,12 +265,12 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
 /// `<tag>:<page>` callback data, re-queries that list's events, renders the
 /// requested page, and edits the message in place.
 pub async fn handle_list_callback(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
     // Always answer to clear the client's loading spinner.
-    bot.answer_callback_query(q.id.clone()).await?;
+    bot.answer_callback(q.id.clone(), None).await?;
 
     let Some((kind, page)) = q.data.as_deref().and_then(|d| {
         let (tag, page) = d.split_once(':')?;
@@ -299,13 +300,15 @@ pub async fn handle_list_callback(
     );
     let page = page.min(total_pages.saturating_sub(1));
 
-    let mut req = bot
-        .edit_message_text(chat_id, message_id, &text)
-        .parse_mode(ParseMode::Html);
-    if let Some(kb) = list_keyboard(kind, page, total_pages) {
-        req = req.reply_markup(kb);
-    }
-    if let Err(e) = req.await {
+    if let Err(e) = bot
+        .edit_html(
+            chat_id,
+            message_id,
+            text.as_str(),
+            list_keyboard(kind, page, total_pages),
+        )
+        .await
+    {
         // "message is not modified" (e.g. double-tap) is benign; just log others.
         log::warn!(
             "Failed to edit /{} page for chat {}: {e}",
@@ -342,7 +345,7 @@ pub fn parse_event_command(text: &str, bot_username: &str) -> Option<i64> {
 /// loaded by id and shown only when it belongs to the requesting chat (ids are
 /// user-influenceable), otherwise the chat is told the event was not found.
 pub async fn handle_event_view(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     chat_id: ChatId,
     id: i64,
@@ -351,13 +354,15 @@ pub async fn handle_event_view(
         Some(event) if event.chat_id == chat_id.0 => {
             let now = Local::now().naive_local();
             let loc = crate::locale::for_chat(chat_id.0);
-            bot.send_message(chat_id, event_detail(&event, now, loc))
-                .parse_mode(ParseMode::Html)
-                .reply_markup(event_actions_keyboard(id))
-                .await?;
+            bot.send_html(
+                chat_id,
+                event_detail(&event, now, loc),
+                Some(event_actions_keyboard(id)),
+            )
+            .await?;
         }
         _ => {
-            bot.send_message(chat_id, "Event not found.").await?;
+            bot.send_text(chat_id, "Event not found.", None).await?;
         }
     }
     Ok(())
@@ -415,7 +420,7 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
 /// (`ed` → start editing, `edno` → cancel editing). Unknown actions are
 /// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     pending_edit: &PendingEdit,
     q: CallbackQuery,
@@ -430,7 +435,7 @@ pub async fn handle_event_callback(
             handle_snooze_callback(bot, provider, q).await
         }
         _ => {
-            bot.answer_callback_query(q.id).await?;
+            bot.answer_callback(q.id, None).await?;
             Ok(())
         }
     }
@@ -442,29 +447,31 @@ pub async fn handle_event_callback(
 /// with the event's current input as a copyable `<code>` block ([`edit_prompt`])
 /// and a Cancel button. Replies "Event not found." for a missing or foreign id.
 async fn handle_edit_prompt(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     pending_edit: &PendingEdit,
     id: i64,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
     let Some(message) = q.regular_message() else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(q.id, None).await?;
         return Ok(());
     };
     let chat_id = message.chat.id;
 
     let event = provider.get_event(id).filter(|e| e.chat_id == chat_id.0);
-    bot.answer_callback_query(q.id).await?;
+    bot.answer_callback(q.id, None).await?;
     if let Some(event) = event {
         pending_edit.lock().unwrap().insert(chat_id.0, id);
         let loc = crate::locale::for_chat(chat_id.0);
-        bot.send_message(chat_id, edit_prompt(pending::EDIT_ASK_TEXT, &event, loc))
-            .parse_mode(ParseMode::Html)
-            .reply_markup(edit_cancel_keyboard(id))
-            .await?;
+        bot.send_html(
+            chat_id,
+            edit_prompt(pending::EDIT_ASK_TEXT, &event, loc),
+            Some(edit_cancel_keyboard(id)),
+        )
+        .await?;
     } else {
-        bot.send_message(chat_id, "Event not found.").await?;
+        bot.send_text(chat_id, "Event not found.", None).await?;
     }
     Ok(())
 }
@@ -472,11 +479,11 @@ async fn handle_edit_prompt(
 /// Handles the Cancel press while editing (`eid:<id>:edno`): drops the chat's
 /// pending edit and edits the prompt to "Cancelled." (clearing the keyboard).
 async fn handle_edit_cancel(
-    bot: &Bot,
+    bot: &TgBot,
     pending_edit: &PendingEdit,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
-    bot.answer_callback_query(q.id.clone()).await?;
+    bot.answer_callback(q.id.clone(), None).await?;
 
     let Some(message) = q.regular_message() else {
         return Ok(());
@@ -484,10 +491,7 @@ async fn handle_edit_cancel(
     let chat_id = message.chat.id;
     pending_edit.lock().unwrap().remove(&chat_id.0);
 
-    if let Err(e) = bot
-        .edit_message_text(chat_id, message.id, "Cancelled.")
-        .await
-    {
+    if let Err(e) = bot.edit_text(chat_id, message.id, "Cancelled.").await {
         log::warn!(
             "Failed to edit cancelled edit prompt for chat {}: {e}",
             chat_id.0
@@ -498,33 +502,31 @@ async fn handle_edit_cancel(
 
 /// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
 /// the confirm/cancel row, leaving the detail text untouched.
-async fn handle_delete_prompt(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
     if let Some(message) = q.regular_message() {
         if let Err(e) = bot
-            .edit_message_reply_markup(message.chat.id, message.id)
-            .reply_markup(delete_confirm_keyboard(id))
+            .edit_markup(message.chat.id, message.id, delete_confirm_keyboard(id))
             .await
         {
             log::warn!("Failed to show delete confirmation for event {id}: {e}");
         }
     }
-    bot.answer_callback_query(q.id).await?;
+    bot.answer_callback(q.id, None).await?;
     Ok(())
 }
 
 /// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
 /// Edit/Delete action buttons, leaving the detail text untouched.
-async fn handle_delete_cancel(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+async fn handle_delete_cancel(bot: &TgBot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
     if let Some(message) = q.regular_message() {
         if let Err(e) = bot
-            .edit_message_reply_markup(message.chat.id, message.id)
-            .reply_markup(event_actions_keyboard(id))
+            .edit_markup(message.chat.id, message.id, event_actions_keyboard(id))
             .await
         {
             log::warn!("Failed to restore delete button for event {id}: {e}");
         }
     }
-    bot.answer_callback_query(q.id).await?;
+    bot.answer_callback(q.id, None).await?;
     Ok(())
 }
 
@@ -533,13 +535,13 @@ async fn handle_delete_cancel(bot: &Bot, id: i64, q: CallbackQuery) -> ResponseR
 /// user-influenceable), deletes it, and edits the message to a confirmation
 /// (clearing the keyboard). Replies "Event not found." for a missing or foreign id.
 async fn handle_delete_confirm(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     id: i64,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
     let Some(message) = q.regular_message() else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(q.id, None).await?;
         return Ok(());
     };
     let chat_id = message.chat.id;
@@ -552,8 +554,8 @@ async fn handle_delete_confirm(
         "Event not found."
     };
 
-    bot.answer_callback_query(q.id).await?;
-    if let Err(e) = bot.edit_message_text(chat_id, message_id, text).await {
+    bot.answer_callback(q.id, None).await?;
+    if let Err(e) = bot.edit_text(chat_id, message_id, text).await {
         log::warn!("Failed to edit deleted-event message for event {id}: {e}");
     }
     Ok(())
@@ -602,19 +604,18 @@ fn snoozed_event(
 /// attacker-influenceable, the loaded event is only honored when it belongs to the
 /// chat the button was pressed in.
 pub async fn handle_snooze_callback(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
     let parsed = q.data.as_deref().and_then(parse_snooze_callback);
     let Some((event_id, minutes)) = parsed else {
-        bot.answer_callback_query(q.id).await?;
+        bot.answer_callback(q.id, None).await?;
         return Ok(());
     };
 
     let Some(message) = q.regular_message() else {
-        bot.answer_callback_query(q.id)
-            .text("Can't snooze this reminder.")
+        bot.answer_callback(q.id, Some("Can't snooze this reminder.".to_owned()))
             .await?;
         return Ok(());
     };
@@ -626,8 +627,7 @@ pub async fn handle_snooze_callback(
     let title = match provider.get_event(event_id) {
         Some(event) if event.chat_id == chat_id.0 => event.message,
         _ => {
-            bot.answer_callback_query(q.id)
-                .text("Can't snooze this reminder.")
+            bot.answer_callback(q.id, Some("Can't snooze this reminder.".to_owned()))
                 .await?;
             return Ok(());
         }
@@ -642,8 +642,7 @@ pub async fn handle_snooze_callback(
         Ok(id) => id,
         Err(e) => {
             log::error!("Failed to save snooze message for chat {}: {e}", chat_id.0);
-            bot.answer_callback_query(q.id)
-                .text("Failed to snooze.")
+            bot.answer_callback(q.id, Some("Failed to snooze.".to_owned()))
                 .await?;
             return Ok(());
         }
@@ -652,16 +651,14 @@ pub async fn handle_snooze_callback(
     let event = snoozed_event(chat_id.0, msg_id, title, next);
     if let Err(e) = provider.insert_prebuilt_event(&event) {
         log::error!("Failed to insert snoozed event for chat {}: {e}", chat_id.0);
-        bot.answer_callback_query(q.id)
-            .text("Failed to snooze.")
+        bot.answer_callback(q.id, Some("Failed to snooze.".to_owned()))
             .await?;
         return Ok(());
     }
 
-    bot.answer_callback_query(q.id).await?;
+    bot.answer_callback(q.id, None).await?;
     let loc = crate::locale::for_chat(chat_id.0);
-    bot.send_message(chat_id, scheduled_message(now, next, &event, loc))
-        .parse_mode(ParseMode::Html)
+    bot.send_html(chat_id, scheduled_message(now, next, &event, loc), None)
         .await?;
     Ok(())
 }
@@ -671,11 +668,11 @@ pub async fn handle_snooze_callback(
 /// (clearing the keyboard). Routed from `main`'s callback branch for the `pm:`
 /// prefix.
 pub async fn handle_cancel_pending(
-    bot: &Bot,
+    bot: &TgBot,
     pending_msg: &PendingMessage,
     q: CallbackQuery,
 ) -> ResponseResult<()> {
-    bot.answer_callback_query(q.id.clone()).await?;
+    bot.answer_callback(q.id.clone(), None).await?;
 
     let Some(message) = q.regular_message() else {
         return Ok(());
@@ -683,10 +680,7 @@ pub async fn handle_cancel_pending(
     let chat_id = message.chat.id;
     pending_msg.lock().unwrap().remove(&chat_id.0);
 
-    if let Err(e) = bot
-        .edit_message_text(chat_id, message.id, "Cancelled.")
-        .await
-    {
+    if let Err(e) = bot.edit_text(chat_id, message.id, "Cancelled.").await {
         log::warn!(
             "Failed to edit cancelled prompt for chat {}: {e}",
             chat_id.0
@@ -699,14 +693,17 @@ pub async fn handle_cancel_pending(
 /// and asks the admin to send the zip of `.alert` files next.
 async fn handle_import(ctx: &CmdContext<'_>, user_id: i64) -> ResponseResult<()> {
     if !ctx.is_admin {
-        ctx.bot.send_message(ctx.chat_id, "Not authorized.").await?;
+        ctx.bot
+            .send_text(ctx.chat_id, "Not authorized.", None)
+            .await?;
         return Ok(());
     }
     *ctx.pending_import.lock().unwrap() = Some(user_id);
     ctx.bot
-        .send_message(
+        .send_text(
             ctx.chat_id,
             format!("Send the .zip of legacy alerts now to import them for chat {user_id}."),
+            None,
         )
         .await?;
     Ok(())
@@ -716,7 +713,7 @@ async fn handle_import(ctx: &CmdContext<'_>, user_id: i64) -> ResponseResult<()>
 /// with a summary plus the HTML report as a document. Driven from `main` when the
 /// admin sends the zip after `/import <user_id>`.
 pub async fn handle_import_zip(
-    bot: &Bot,
+    bot: &TgBot,
     provider: &EventProvider,
     chat_id: ChatId,
     target: i64,
@@ -725,31 +722,30 @@ pub async fn handle_import_zip(
     let file = bot.get_file(file_id).await?;
     let mut buf: Vec<u8> = Vec::new();
     if let Err(e) = bot.download_file(&file.path, &mut buf).await {
-        bot.send_message(chat_id, format!("Failed to download the zip: {e}"))
+        bot.send_text(chat_id, format!("Failed to download the zip: {e}"), None)
             .await?;
         return Ok(());
     }
 
-    bot.send_message(chat_id, "Importing events from file...")
+    bot.send_text(chat_id, "Importing events from file...", None)
         .await?;
 
     match import::import_zip(provider, target, &buf) {
         Ok(outcome) => {
             let report_path = std::env::temp_dir().join("perbot-legacy-report.html");
-            bot.send_message(chat_id, outcome.summary()).await?;
+            bot.send_text(chat_id, outcome.summary(), None).await?;
             match std::fs::write(&report_path, &outcome.html) {
                 Ok(()) => {
-                    bot.send_document(chat_id, InputFile::file(&report_path))
-                        .await?;
+                    bot.send_document(chat_id, &report_path, None).await?;
                 }
                 Err(e) => {
-                    bot.send_message(chat_id, format!("Failed to write report: {e}"))
+                    bot.send_text(chat_id, format!("Failed to write report: {e}"), None)
                         .await?;
                 }
             }
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("Import failed: {e}"))
+            bot.send_text(chat_id, format!("Import failed: {e}"), None)
                 .await?;
         }
     }
@@ -762,7 +758,9 @@ pub async fn handle_import_zip(
 /// then clean the snapshot up.
 async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     if !ctx.is_admin {
-        ctx.bot.send_message(ctx.chat_id, "Not authorized.").await?;
+        ctx.bot
+            .send_text(ctx.chat_id, "Not authorized.", None)
+            .await?;
         return Ok(());
     }
 
@@ -772,13 +770,20 @@ async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     if let Err(e) = ctx.provider.backup_database(&snapshot) {
         log::error!("Failed to snapshot database: {e}");
         ctx.bot
-            .send_message(ctx.chat_id, format!("Failed to snapshot database: {e}"))
+            .send_text(
+                ctx.chat_id,
+                format!("Failed to snapshot database: {e}"),
+                None,
+            )
             .await?;
         return Ok(());
     }
 
-    let doc = InputFile::file(&snapshot).file_name("perbot.db");
-    if let Err(e) = ctx.bot.send_document(ctx.chat_id, doc).await {
+    if let Err(e) = ctx
+        .bot
+        .send_document(ctx.chat_id, &snapshot, Some("perbot.db"))
+        .await
+    {
         log::error!("Failed to send database to chat {}: {e}", ctx.chat_id.0);
     }
     let _ = std::fs::remove_file(&snapshot);
@@ -790,7 +795,9 @@ async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 /// (no snapshot needed).
 async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     if !ctx.is_admin {
-        ctx.bot.send_message(ctx.chat_id, "Not authorized.").await?;
+        ctx.bot
+            .send_text(ctx.chat_id, "Not authorized.", None)
+            .await?;
         return Ok(());
     }
 
@@ -798,13 +805,16 @@ async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     log::info!("Sending log file: {:?}", path);
     if !path.exists() {
         ctx.bot
-            .send_message(ctx.chat_id, "No log file found.")
+            .send_text(ctx.chat_id, "No log file found.", None)
             .await?;
         return Ok(());
     }
 
-    let doc = InputFile::file(&path).file_name("perbot.log");
-    if let Err(e) = ctx.bot.send_document(ctx.chat_id, doc).await {
+    if let Err(e) = ctx
+        .bot
+        .send_document(ctx.chat_id, &path, Some("perbot.log"))
+        .await
+    {
         log::error!("Failed to send logs to chat {}: {e}", ctx.chat_id.0);
     }
     Ok(())
@@ -814,13 +824,15 @@ async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 async fn handle_exit(ctx: &CmdContext<'_>) -> ResponseResult<()> {
     if !ctx.is_admin {
         ctx.bot
-            .send_message(ctx.chat_id, "Not authorized\\.")
-            .parse_mode(ParseMode::MarkdownV2)
+            .send_markdown(ctx.chat_id, "Not authorized\\.")
             .await?;
         return Ok(());
     }
     log::info!("Received /exit command. Shutting down...");
-    let _ = ctx.bot.send_message(ctx.admin_id, "Shutting down...").await;
+    let _ = ctx
+        .bot
+        .send_text(ctx.admin_id, "Shutting down...", None)
+        .await;
     tokio::spawn(async {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         process::exit(0);

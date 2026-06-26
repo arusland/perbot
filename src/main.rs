@@ -6,13 +6,9 @@ use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
 use perbot::telegram::{edit_prompt, extract_chat_info, scheduled_message};
+use perbot::tgbot::TgBot;
 use perbot::types::TgMessage;
-use teloxide::{
-    prelude::*,
-    types::{BotCommandScope, ParseMode},
-    utils::command::BotCommands,
-    utils::html,
-};
+use teloxide::{prelude::*, types::BotCommandScope, utils::command::BotCommands, utils::html};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -30,17 +26,16 @@ async fn main() -> anyhow::Result<()> {
     let token =
         std::env::var("TG_BOT_TOKEN").context("TG_BOT_TOKEN environment variable not set")?;
     let bot = Bot::new(token);
-    if let Err(e) = bot
-        .send_message(admin_id, "<b>Bot started</b>")
-        .parse_mode(ParseMode::Html)
-        .await
-    {
+    // Every outbound call goes through the logging wrapper; the raw `bot` is kept
+    // only to hand to the dispatcher's updater below.
+    let tg = TgBot::new(bot.clone());
+    if let Err(e) = tg.send_html(admin_id, "<b>Bot started</b>", None).await {
         log::warn!("Failed to send startup message: {}", e);
     }
 
     // The bot username is required to parse commands addressed as `/cmd@bot`, so
     // failing to fetch it is fatal.
-    let me = bot.get_me().await.context("Failed to fetch bot info")?;
+    let me = tg.get_me().await.context("Failed to fetch bot info")?;
     let bot_username = me.username().to_string();
 
     // Clear any commands left over from a previous bot on this token. These can
@@ -51,11 +46,11 @@ async fn main() -> anyhow::Result<()> {
         BotCommandScope::AllGroupChats,
         BotCommandScope::AllChatAdministrators,
     ] {
-        if let Err(e) = bot.delete_my_commands().scope(scope).await {
+        if let Err(e) = tg.delete_my_commands(scope).await {
             log::warn!("Failed to clear old commands scope: {}", e);
         }
     }
-    if let Err(e) = bot.set_my_commands(Command::bot_commands()).await {
+    if let Err(e) = tg.set_my_commands(Command::bot_commands()).await {
         log::error!("Failed to register bot commands: {}", e);
     }
 
@@ -64,19 +59,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Channel for sending scheduled messages to Telegram
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Vec<TgMessage>>();
-    let sender_bot = bot.clone();
+    let sender_bot = tg.clone();
     tokio::spawn(async move {
         while let Some(messages) = msg_rx.recv().await {
             for msg in messages {
                 // Every routed `text` is an HTML fragment (the reminder body may
                 // carry the user's formatting), so always send as HTML.
-                let mut req = sender_bot
-                    .send_message(ChatId(msg.chat_id), msg.text)
-                    .parse_mode(ParseMode::Html);
-                if let Some(kb) = msg.reply_markup {
-                    req = req.reply_markup(kb);
-                }
-                if let Err(e) = req.await {
+                if let Err(e) = sender_bot
+                    .send_html(ChatId(msg.chat_id), msg.text, msg.reply_markup)
+                    .await
+                {
                     log::error!("Failed to send message to {}: {}", msg.chat_id, e);
                 }
             }
@@ -109,7 +101,8 @@ async fn main() -> anyhow::Result<()> {
             bot_username,
             pending_import,
             pending_msg,
-            pending_edit
+            pending_edit,
+            tg
         ])
         .enable_ctrlc_handler()
         .build()
@@ -122,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 /// Handles an inline-button callback (list pagination for `/events`, `/today`,
 /// `/tomorrow`, `/week`, `/month`).
 async fn callback_handler(
-    bot: Bot,
+    bot: TgBot,
     q: CallbackQuery,
     provider: EventProvider,
     pending_msg: PendingMessage,
@@ -148,7 +141,7 @@ async fn callback_handler(
 // Dependencies are injected individually by dptree, so the arg count is expected.
 #[allow(clippy::too_many_arguments)]
 async fn message_handler_safe(
-    bot: Bot,
+    bot: TgBot,
     msg: Message,
     provider: EventProvider,
     admin_id: ChatId,
@@ -186,14 +179,14 @@ async fn message_handler_safe(
         // Best-effort notifications: ignore secondary send errors so reporting a
         // failure can't itself re-trigger the dispatcher's error path.
         let _ = bot_for_err
-            .send_message(chat_id, "⚠️<b>Something goes wrong!</b>")
+            .send_text(chat_id, "⚠️<b>Something goes wrong!</b>", None)
             .await;
         let _ = bot_for_err
-            .send_message(
+            .send_html(
                 admin_id,
                 format!("<b>Error:</b> {}", html::escape(&e.to_string())),
+                None,
             )
-            .parse_mode(ParseMode::Html)
             .await;
     }
 
@@ -205,7 +198,7 @@ async fn message_handler_safe(
 // Dependencies are injected individually by dptree, so the arg count is expected.
 #[allow(clippy::too_many_arguments)]
 async fn message_handler(
-    bot: Bot,
+    bot: TgBot,
     msg: Message,
     provider: EventProvider,
     admin_id: ChatId,
@@ -275,7 +268,7 @@ async fn message_handler(
                 .filter(|e| e.chat_id == msg.chat.id.0)
             else {
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
-                bot.send_message(msg.chat.id, "Event not found.").await?;
+                bot.send_text(msg.chat.id, "Event not found.", None).await?;
                 return Ok(());
             };
 
@@ -297,9 +290,7 @@ async fn message_handler(
                 } else {
                     format!("<b>{}</b>", html::escape(text))
                 };
-                bot.send_message(msg.chat.id, reply)
-                    .parse_mode(ParseMode::Html)
-                    .await?;
+                bot.send_html(msg.chat.id, reply, None).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the copyable current input still attached.
@@ -308,10 +299,12 @@ async fn message_handler(
                 } else {
                     pending::EDIT_NEED_TIME
                 };
-                bot.send_message(msg.chat.id, edit_prompt(lead, &old, loc))
-                    .parse_mode(ParseMode::Html)
-                    .reply_markup(commands::edit_cancel_keyboard(event_id))
-                    .await?;
+                bot.send_html(
+                    msg.chat.id,
+                    edit_prompt(lead, &old, loc),
+                    Some(commands::edit_cancel_keyboard(event_id)),
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -328,9 +321,12 @@ async fn message_handler(
                 // Whitespace-only reply carries no usable body: keep waiting and
                 // re-prompt with the Cancel button.
                 pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
-                bot.send_message(msg.chat.id, pending::ASK_TEXT)
-                    .reply_markup(pending::cancel_keyboard())
-                    .await?;
+                bot.send_text(
+                    msg.chat.id,
+                    pending::ASK_TEXT,
+                    Some(pending::cancel_keyboard()),
+                )
+                .await?;
                 return Ok(());
             }
             event.chat_id = msg.chat.id.0;
@@ -343,9 +339,7 @@ async fn message_handler(
             } else {
                 format!("<b>{}</b>", html::escape(text))
             };
-            bot.send_message(msg.chat.id, reply)
-                .parse_mode(ParseMode::Html)
-                .await?;
+            bot.send_html(msg.chat.id, reply, None).await?;
             return Ok(());
         }
 
@@ -369,9 +363,12 @@ async fn message_handler(
             // A time was given but no reminder body: hold the parsed event and ask
             // for the text, offering a Cancel button.
             pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
-            bot.send_message(msg.chat.id, pending::ASK_TEXT)
-                .reply_markup(pending::cancel_keyboard())
-                .await?;
+            bot.send_text(
+                msg.chat.id,
+                pending::ASK_TEXT,
+                Some(pending::cancel_keyboard()),
+            )
+            .await?;
             return Ok(());
         } else {
             format!("Unparsable message: <b>{}</b>", html::escape(text))
@@ -406,9 +403,7 @@ async fn message_handler(
         "Received an unknown message type!".to_string()
     };
 
-    bot.send_message(msg.chat.id, reply_text)
-        .parse_mode(ParseMode::Html)
-        .await?;
+    bot.send_html(msg.chat.id, reply_text, None).await?;
 
     Ok(())
 }
