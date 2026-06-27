@@ -1,8 +1,9 @@
 use crate::import::{self, PendingImport};
+use crate::locale::LocaleProvider;
 use crate::pending::{self, PendingEdit, PendingMessage};
 use crate::state::EventProvider;
 use crate::telegram::{
-    LIST_PAGE_SIZE, edit_prompt, event_detail, format_page_at, scheduled_message,
+    LIST_PAGE_SIZE, RowStyle, edit_prompt, event_detail, format_page_at, scheduled_message,
 };
 use crate::tgbot::TgBot;
 use crate::types::EventInfo;
@@ -21,6 +22,10 @@ const NOOP_DATA: &str = "noop";
 
 /// The paginated list commands. Each variant knows how to fetch its events,
 /// title its reply, and tag its inline-button callbacks (`<tag>:<page>`).
+///
+/// `Missed` is not a user-typed command: it is reached only by the startup
+/// missed-events send and its `ms:<page>` page-turn callbacks. Its events come
+/// from an in-memory startup snapshot (see [`EventProvider::get_missed_snapshot_events`]).
 #[derive(Clone, Copy)]
 enum ListKind {
     Events,
@@ -28,6 +33,7 @@ enum ListKind {
     Tomorrow,
     Week,
     Month,
+    Missed,
 }
 
 impl ListKind {
@@ -39,6 +45,7 @@ impl ListKind {
             ListKind::Tomorrow => "tm",
             ListKind::Week => "wk",
             ListKind::Month => "mo",
+            ListKind::Missed => "ms",
         }
     }
 
@@ -50,6 +57,7 @@ impl ListKind {
             "tm" => Some(ListKind::Tomorrow),
             "wk" => Some(ListKind::Week),
             "mo" => Some(ListKind::Month),
+            "ms" => Some(ListKind::Missed),
             _ => None,
         }
     }
@@ -62,6 +70,7 @@ impl ListKind {
             ListKind::Tomorrow => "Tomorrow's events",
             ListKind::Week => "This week's events",
             ListKind::Month => "This month's events",
+            ListKind::Missed => "Missed events",
         }
     }
 
@@ -73,15 +82,30 @@ impl ListKind {
             ListKind::Tomorrow => "No events tomorrow.",
             ListKind::Week => "No events this week.",
             ListKind::Month => "No events this month.",
+            ListKind::Missed => "No missed events.",
+        }
+    }
+
+    /// Per-row layout for this list. `/events` uses the two-line row; the missed
+    /// list shows only a plain preview + `/event<id>` link; the rest use the
+    /// single-line row.
+    fn row_style(self) -> RowStyle {
+        match self {
+            ListKind::Events => RowStyle::TwoLine,
+            ListKind::Missed => RowStyle::PreviewLink,
+            ListKind::Today | ListKind::Tomorrow | ListKind::Week | ListKind::Month => {
+                RowStyle::SingleLine
+            }
         }
     }
 
     /// Fetches the events for this list. Date ranges are computed relative to
     /// "now", so paging recomputes them (a page turn across midnight reflects the
-    /// then-current day/week/month).
+    /// then-current day/week/month). `Missed` reads the startup snapshot instead.
     fn fetch(self, provider: &EventProvider, chat_id: i64) -> Vec<crate::types::EventInfo> {
         match self {
             ListKind::Events => provider.get_active_by_chat(chat_id),
+            ListKind::Missed => provider.get_missed_snapshot_events(chat_id),
             ListKind::Today => {
                 let today = Local::now().naive_local().date();
                 provider.get_active_by_chat_on_date(chat_id, today)
@@ -213,6 +237,30 @@ fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<Inli
     Some(InlineKeyboardMarkup::new(vec![row]))
 }
 
+/// Renders one page of the missed-events list: the preview-only HTML body
+/// ([`RowStyle::PreviewLink`]) plus the navigation keyboard (`None` when it fits
+/// on a single page). Used by `state.rs` to build the startup missed-events
+/// message; page turns reuse [`handle_list_callback`] via the `ms` tag.
+pub fn format_missed_page(
+    events: &[EventInfo],
+    now: chrono::NaiveDateTime,
+    page: usize,
+    loc: &dyn LocaleProvider,
+) -> (String, Option<InlineKeyboardMarkup>) {
+    let kind = ListKind::Missed;
+    let (text, total_pages) = format_page_at(
+        events,
+        now,
+        page,
+        LIST_PAGE_SIZE,
+        kind.title(),
+        kind.empty(),
+        kind.row_style(),
+        loc,
+    );
+    (text, list_keyboard(kind, page, total_pages))
+}
+
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
 async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()> {
@@ -225,7 +273,7 @@ async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()>
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
-        matches!(kind, ListKind::Events),
+        kind.row_style(),
         loc,
     );
 
@@ -295,7 +343,7 @@ pub async fn handle_list_callback(
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
-        matches!(kind, ListKind::Events),
+        kind.row_style(),
         loc,
     );
     let page = page.min(total_pages.saturating_sub(1));
@@ -943,6 +991,63 @@ mod tests {
                 ("3/3".to_string(), NOOP_DATA.to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn missed_list_kind_tag_round_trips() {
+        assert_eq!(ListKind::Missed.tag(), "ms");
+        assert!(matches!(ListKind::from_tag("ms"), Some(ListKind::Missed)));
+    }
+
+    #[test]
+    fn format_missed_page_renders_preview_link_rows() {
+        use crate::locale::EN;
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 15).unwrap(),
+            NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
+        );
+        let mut event = scheduler::calc_next_at(
+            {
+                let mut e = sample_missed_event("call the office");
+                e.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+                e
+            },
+            now,
+        );
+        event.id = 7;
+
+        let (text, keyboard) = format_missed_page(&[event], now, 0, &EN);
+        assert!(text.starts_with("<b>Missed events:</b>\n"));
+        assert!(text.contains("/event7"));
+        // One event → single page → no navigation keyboard.
+        assert!(keyboard.is_none());
+    }
+
+    /// Minimal one-off event carrying just a message, for list-rendering tests.
+    fn sample_missed_event(message: &str) -> EventInfo {
+        EventInfo {
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            years: None,
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: None,
+            message: message.to_string(),
+            id: 0,
+            chat_id: 0,
+            active: false,
+            next_datetime: None,
+            last_next_datetime: None,
+            created_at: Local::now().naive_local(),
+            msg_id: 0,
+            legacy: false,
+            snoozed: false,
+        }
     }
 
     #[test]

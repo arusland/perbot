@@ -277,6 +277,27 @@ fn event_when_line(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) 
     format!("• <b>{when}</b>")
 }
 
+/// How each event renders in a paginated list row.
+#[derive(Clone, Copy)]
+pub enum RowStyle {
+    /// `• datetime (relative) — message` (used by `/today`/`/tomorrow`/`/week`/`/month`).
+    SingleLine,
+    /// Bold datetime/recurrence line + `/event<id>` link, then an indented plain
+    /// preview underneath (used by `/events`).
+    TwoLine,
+    /// `• <plain preview> /event<id>` only — no datetime line (used by the missed
+    /// events list, whose rescheduled `next_datetime` would be misleading).
+    PreviewLink,
+}
+
+/// Appends a preview-only HTML event row: `• <plain preview> /event<id>` — the
+/// truncated, tag-stripped, HTML-escaped message preview followed by the tappable
+/// `/event<id>` link. No datetime line (see [`RowStyle::PreviewLink`]).
+fn write_event_row_preview_only(out: &mut String, e: &EventInfo) {
+    let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
+    let _ = writeln!(out, "• {message} /event{}", e.id);
+}
+
 /// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
 /// line ([`event_when_line`]) ending with a tappable `/event<id>` link that opens
 /// the single-event detail view, then an indented plain-text message preview (tags
@@ -342,16 +363,15 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
 /// the title. `empty` is the full message shown when there are no events. Returns
 /// the rendered text and the total number of pages, so the caller can decide
 /// whether to attach navigation buttons.
-/// `page` is clamped to the valid range. When `two_line` is true (used by
-/// `/events`), each event renders as a datetime line plus an indented plain-text
-/// message preview; otherwise as the single-line HTML row.
+/// `page` is clamped to the valid range. `style` selects the per-row layout (see
+/// [`RowStyle`]).
 pub fn format_page(
     events: &[EventInfo],
     page: usize,
     per_page: usize,
     title: &str,
     empty: &str,
-    two_line: bool,
+    style: RowStyle,
     loc: &dyn LocaleProvider,
 ) -> (String, usize) {
     format_page_at(
@@ -361,7 +381,7 @@ pub fn format_page(
         per_page,
         title,
         empty,
-        two_line,
+        style,
         loc,
     )
 }
@@ -375,7 +395,7 @@ pub fn format_page_at(
     per_page: usize,
     title: &str,
     empty: &str,
-    two_line: bool,
+    style: RowStyle,
     loc: &dyn LocaleProvider,
 ) -> (String, usize) {
     let pages = total_pages(events.len(), per_page);
@@ -388,10 +408,10 @@ pub fn format_page_at(
 
     let mut out = format!("<b>{}:</b>\n", html::escape(title));
     for e in slice {
-        if two_line {
-            write_event_row_two_line(&mut out, e, now, loc);
-        } else {
-            write_event_row(&mut out, e, now, loc);
+        match style {
+            RowStyle::SingleLine => write_event_row(&mut out, e, now, loc),
+            RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
+            RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e),
         }
     }
     (out, pages)
@@ -647,7 +667,7 @@ mod tests {
             10,
             "Upcoming events",
             "No upcoming events.",
-            false,
+            RowStyle::SingleLine,
             &EN,
         );
         assert_eq!(text, "No upcoming events.");
@@ -664,8 +684,16 @@ mod tests {
             // HTML specials).
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
-        let (text, pages) =
-            format_page_at(&events, now, 0, 10, "Upcoming events", "none", false, &EN);
+        let (text, pages) = format_page_at(
+            &events,
+            now,
+            0,
+            10,
+            "Upcoming events",
+            "none",
+            RowStyle::SingleLine,
+            &EN,
+        );
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         assert!(text.contains("14:00 15.06.2026 (2h)"));
@@ -678,7 +706,16 @@ mod tests {
         let now =
             NaiveDateTime::parse_from_str("2026-06-16 09:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
-        let (text, _) = format_page_at(&events, now, 0, 10, "Today's events", "none", false, &EN);
+        let (text, _) = format_page_at(
+            &events,
+            now,
+            0,
+            10,
+            "Today's events",
+            "none",
+            RowStyle::SingleLine,
+            &EN,
+        );
         assert!(text.starts_with("<b>Today's events:</b>\n"));
         assert!(text.contains("10:00 16.06.2026 (1h)"));
         assert!(text.contains("standup"));
@@ -693,8 +730,16 @@ mod tests {
             .collect();
 
         // First page: 10 rows. Page position lives on the keyboard, not the title.
-        let (p0, pages) =
-            format_page_at(&events, now, 0, 10, "Upcoming events", "none", false, &EN);
+        let (p0, pages) = format_page_at(
+            &events,
+            now,
+            0,
+            10,
+            "Upcoming events",
+            "none",
+            RowStyle::SingleLine,
+            &EN,
+        );
         assert_eq!(pages, 3);
         assert!(p0.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p0.contains("event 0"));
@@ -702,8 +747,16 @@ mod tests {
         assert!(!p0.contains("event 10"));
 
         // Last page: only 5 rows. Out-of-range page clamps to last.
-        let (p_last, _) =
-            format_page_at(&events, now, 9, 10, "Upcoming events", "none", false, &EN);
+        let (p_last, _) = format_page_at(
+            &events,
+            now,
+            9,
+            10,
+            "Upcoming events",
+            "none",
+            RowStyle::SingleLine,
+            &EN,
+        );
         assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
@@ -803,7 +856,16 @@ mod tests {
             "<b>call</b> the office right now please and bring the documents",
             Some(now + Duration::hours(2)),
         )];
-        let (text, _) = format_page_at(&events, now, 0, 10, "Upcoming events", "none", true, &EN);
+        let (text, _) = format_page_at(
+            &events,
+            now,
+            0,
+            10,
+            "Upcoming events",
+            "none",
+            RowStyle::TwoLine,
+            &EN,
+        );
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
         // Bold datetime line and message live on separate lines; no `—` separator.
         assert!(!text.contains(" — "));
@@ -881,10 +943,47 @@ mod tests {
             interval: 2,
             unit: TimeUnit::Days,
         });
-        let (text, _) = format_page_at(&[e], now, 0, 10, "Upcoming events", "none", true, &EN);
+        let (text, _) = format_page_at(
+            &[e],
+            now,
+            0,
+            10,
+            "Upcoming events",
+            "none",
+            RowStyle::TwoLine,
+            &EN,
+        );
         // Recurrence sits inside the parentheses, next to the relative time; the
         // /event<id> link ends the line.
         assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
+    }
+
+    #[test]
+    fn format_page_preview_link_layout() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let mut e = sample_event(
+            "<b>call</b> the office right now please and bring the documents",
+            Some(now + Duration::hours(2)),
+        );
+        e.id = 42;
+        let (text, _) = format_page_at(
+            &[e],
+            now,
+            0,
+            10,
+            "Missed events",
+            "No missed events.",
+            RowStyle::PreviewLink,
+            &EN,
+        );
+        assert!(text.starts_with("<b>Missed events:</b>\n"));
+        // Plain preview (tags stripped, truncated) + /event<id>, no datetime/bold.
+        assert!(
+            text.contains("• call the office right now please and bring the doc... /event42\n")
+        );
+        assert!(!text.contains("<b>14:"));
+        assert!(!text.contains("(in "));
     }
 
     #[test]

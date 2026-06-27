@@ -52,6 +52,11 @@ struct EventProviderState {
     storage: EventStorage,
     /// Next event to be processed. Stored in memory for efficiency.
     next_event: Option<EventInfo>,
+    /// Per-chat snapshot of the event ids that were missed at startup, in display
+    /// order. Captured in `start()` before the missed events are rescheduled (which
+    /// would otherwise make them un-queryable), so the missed-events list can be
+    /// paged after the fact. In-memory only; empty on a fresh restart.
+    missed_snapshot: HashMap<i64, Vec<i64>>,
 }
 
 /// Cloneable handle around shared storage plus the cached nearest event.
@@ -71,6 +76,7 @@ impl EventProvider {
             inner: Arc::new(Mutex::new(EventProviderState {
                 storage,
                 next_event: None,
+                missed_snapshot: HashMap::new(),
             })),
         }
     }
@@ -110,6 +116,22 @@ impl EventProvider {
                 Vec::new()
             }
         }
+    }
+
+    /// Returns the events recorded in the startup missed snapshot for `chat_id`,
+    /// reloaded from storage (so they reflect their current, post-reschedule state).
+    /// Ids deleted since startup are skipped. Empty when the chat had no missed
+    /// events. Backs the missed-events list's page-turn callbacks.
+    pub fn get_missed_snapshot_events(&self, chat_id: i64) -> Vec<EventInfo> {
+        let inner = self.inner.lock().unwrap();
+        let Some(ids) = inner.missed_snapshot.get(&chat_id).cloned() else {
+            return Vec::new();
+        };
+        // Direct storage calls (not `self.get_event`, which would re-lock the
+        // non-reentrant mutex); `filter_map` drops ids removed since the snapshot.
+        ids.iter()
+            .filter_map(|id| inner.storage.get_event(*id).ok().flatten())
+            .collect()
     }
 
     /// Returns the nearest active event, if any.
@@ -326,22 +348,38 @@ impl EventProvider {
             if !missed.is_empty() {
                 log::info!("Sending {} missed event(s)", missed.len());
 
-                let mut by_chat: HashMap<i64, Vec<&str>> = HashMap::new();
+                // Group the missed events per chat (already ordered by
+                // next_datetime, so per-chat order is preserved).
+                let mut events_by_chat: HashMap<i64, Vec<EventInfo>> = HashMap::new();
                 for event in &missed {
-                    by_chat
+                    events_by_chat
                         .entry(event.chat_id)
                         .or_default()
-                        .push(&event.message);
+                        .push(event.clone());
                 }
 
-                let messages: Vec<TgMessage> = by_chat
+                // Snapshot the missed ids per chat so the list can be paged later,
+                // after these events are rescheduled below (which makes them
+                // un-queryable via get_missed_events).
+                {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.missed_snapshot = events_by_chat
+                        .iter()
+                        .map(|(chat_id, events)| (*chat_id, events.iter().map(|e| e.id).collect()))
+                        .collect();
+                }
+
+                let now = Local::now().naive_local();
+                let messages: Vec<TgMessage> = events_by_chat
                     .into_iter()
-                    .map(|(chat_id, msgs)| {
-                        let combined = msgs.join("\n");
+                    .map(|(chat_id, events)| {
+                        let loc = crate::locale::for_chat(chat_id);
+                        let (text, reply_markup) =
+                            crate::commands::format_missed_page(&events, now, 0, loc);
                         TgMessage {
                             chat_id,
-                            text: format!("Missed:\n{}", combined),
-                            reply_markup: None,
+                            text,
+                            reply_markup,
                         }
                     })
                     .collect();
