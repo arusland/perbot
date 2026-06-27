@@ -300,8 +300,20 @@ fn write_event_row_two_line(
 /// line as the `/events` two-line row ([`event_when_line`]), the full HTML message
 /// fragment (formatting preserved, not truncated), and the upcoming-launches preview
 /// ([`next_launches_preview`], identical to a fired reminder). The preview is empty
-/// for one-off or inactive events.
+/// for one-off events. An **inactive** (out-of-date) event instead renders a single
+/// bold notice — "Event is out of date. Last fired at <last_next_datetime>" — above
+/// the message body.
 pub fn event_detail(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+    if !event.active {
+        let notice = match event.last_next_datetime {
+            Some(dt) => html::escape(&format!(
+                "Event is out of date. Last fired at {}",
+                loc.format_datetime(dt)
+            )),
+            None => "Event is out of date.".to_string(),
+        };
+        return format!("• <b>{notice}</b>\n{}", event.message);
+    }
     let preview = match event.next_datetime {
         Some(dt) => next_launches_preview(event, dt, loc),
         None => String::new(),
@@ -488,6 +500,7 @@ mod tests {
             message: message.to_string(),
             active: next.is_some(),
             next_datetime: next,
+            last_next_datetime: next,
             created_at: NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
@@ -908,6 +921,23 @@ mod tests {
         // Recurring: launches block present, listing dates after the upcoming one.
         assert!(text.contains("<b>Next launches:</b>"));
         assert!(text.contains("• 14:00 16.06.2026"));
+    }
+
+    #[test]
+    fn event_detail_inactive_shows_last_fired_notice() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let mut e = sample_event("expired reminder", None);
+        e.last_next_datetime = Some(
+            NaiveDateTime::parse_from_str("2026-06-10 09:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        let text = event_detail(&e, now, &EN);
+        assert!(
+            text.starts_with("• <b>Event is out of date. Last fired at 09:30 10.06.2026</b>\n")
+        );
+        assert!(text.contains("expired reminder"));
+        // Inactive: no when-line relative time, no launches block.
+        assert!(!text.contains("Next launches:"));
     }
 
     #[test]

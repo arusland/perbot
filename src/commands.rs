@@ -587,6 +587,7 @@ fn snoozed_event(
         chat_id,
         active: true,
         next_datetime: Some(next),
+        last_next_datetime: Some(next),
         created_at: next,
         msg_id,
         legacy: false,

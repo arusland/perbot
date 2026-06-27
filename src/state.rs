@@ -305,10 +305,12 @@ impl EventProvider {
         for event in events {
             let event_id = event.id;
             let next = scheduler::calc_next_at(event, now);
-            if let Err(e) = inner
-                .storage
-                .update_schedule(event_id, next.active, next.next_datetime)
-            {
+            if let Err(e) = inner.storage.update_schedule(
+                event_id,
+                next.active,
+                next.next_datetime,
+                next.last_next_datetime,
+            ) {
                 log::error!("Failed to update schedule for event {}: {}", event_id, e);
             }
         }

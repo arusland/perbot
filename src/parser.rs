@@ -328,6 +328,7 @@ fn parse_components(
         chat_id: 0,
         active: false,
         next_datetime: None,
+        last_next_datetime: None,
         created_at: Local::now().naive_local(),
         msg_id: 0,
         legacy: false,

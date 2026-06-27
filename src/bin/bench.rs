@@ -20,6 +20,7 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
             NaiveDate::from_ymd_opt(2027, i % 12 + 1, i % 28 + 1).unwrap(),
             NaiveTime::from_hms_opt(i % 24, i % 60, 0).unwrap(),
         )),
+        last_next_datetime: None,
         created_at: NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),

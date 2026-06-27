@@ -238,6 +238,7 @@ fn base_event(chat_id: i64, created_at: NaiveDateTime, message: String) -> Event
         chat_id,
         active: false,
         next_datetime: None,
+        last_next_datetime: None,
         created_at,
         msg_id: 0,
         legacy: true,

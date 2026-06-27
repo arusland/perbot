@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 /// A parsed reminder event plus the fields used to track it in the database.
 ///
 /// The first group of fields is populated by [`crate::parser::parse`]; the
-/// trailing group (`id`, `chat_id`, `active`, `next_datetime`, `created_at`,
-/// `msg_id`) is filled in by storage/scheduling and defaults to zero/false/None
+/// trailing group (`id`, `chat_id`, `active`, `next_datetime`,
+/// `last_next_datetime`, `created_at`, `msg_id`) is filled in by
+/// storage/scheduling and defaults to zero/false/None
 /// on a freshly parsed value.
 #[derive(Debug, Clone)]
 pub struct EventInfo {
@@ -43,6 +44,10 @@ pub struct EventInfo {
     pub chat_id: i64,
     pub active: bool,
     pub next_datetime: Option<NaiveDateTime>,
+    /// The most recent non-null `next_datetime` this event ever had. Tracks when
+    /// the event last fired so an inactive (out-of-date) event can still report
+    /// it. Set by [`crate::scheduler::calc_next_at`]; never cleared once set.
+    pub last_next_datetime: Option<NaiveDateTime>,
     pub created_at: NaiveDateTime,
     pub msg_id: i64,
     /// `true` for events imported from the legacy MateBot `.alert` files.
@@ -434,6 +439,7 @@ mod tests {
             chat_id: 0,
             active: false,
             next_datetime: None,
+            last_next_datetime: None,
             created_at: NaiveDate::from_ymd_opt(2024, 1, 1)
                 .unwrap()
                 .and_hms_opt(0, 0, 0)

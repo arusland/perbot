@@ -13,9 +13,13 @@ pub fn calc_next(event: EventInfo) -> EventInfo {
 /// Like [`calc_next`] but with an explicit `now`, for deterministic testing.
 pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
     let next_datetime = calculate_next_datetime(&event, now);
+    let last_next_datetime = next_datetime
+        .or(event.next_datetime)
+        .or(event.last_next_datetime);
     EventInfo {
         active: next_datetime.is_some(),
         next_datetime,
+        last_next_datetime,
         ..event
     }
 }
@@ -345,6 +349,7 @@ mod tests {
             message: String::new(),
             active: false,
             next_datetime: None,
+            last_next_datetime: None,
             created_at: NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
@@ -380,6 +385,32 @@ mod tests {
         let result = calc_next(event);
         assert!(!result.active);
         assert!(result.next_datetime.is_none());
+    }
+
+    #[test]
+    fn last_next_datetime_tracks_active_then_is_retained_when_inactive() {
+        // Active one-off: last_next_datetime mirrors the computed next_datetime.
+        let mut event = make_play_event();
+        event.date = NaiveDate::from_ymd_opt(2027, 6, 1);
+        event.time = NaiveTime::from_hms_opt(12, 0, 0);
+        event.year_explicit = true;
+        let scheduled = calc_next_at(event, dt(2027, 1, 1, 0, 0));
+        let fired = scheduled.next_datetime.unwrap();
+        assert_eq!(scheduled.last_next_datetime, Some(fired));
+
+        // Recomputing after the fire time: now inactive, but the last fired
+        // datetime is preserved.
+        let after = calc_next_at(scheduled, dt(2027, 6, 2, 0, 0));
+        assert!(!after.active);
+        assert!(after.next_datetime.is_none());
+        assert_eq!(after.last_next_datetime, Some(fired));
+    }
+
+    fn dt(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime {
+        NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            NaiveTime::from_hms_opt(h, min, 0).unwrap(),
+        )
     }
 
     #[test]

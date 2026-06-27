@@ -145,6 +145,7 @@ impl EventStorage {
                 message         TEXT NOT NULL,
                 active          INTEGER NOT NULL DEFAULT 1,
                 next_datetime   TEXT,
+                last_next_datetime TEXT,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now')),
                 days            TEXT,
                 repeat_interval INTEGER,
@@ -186,6 +187,9 @@ impl EventStorage {
         let next_str = event
             .next_datetime
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        let last_next_str = event
+            .last_next_datetime
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
         let days_str = event.days.as_ref().map(serialize_days);
         let (repeat_interval, repeat_unit) = match &event.repetition {
             Some(rep) => (Some(rep.interval), Some(rep.unit.label(true).to_string())),
@@ -202,8 +206,8 @@ impl EventStorage {
         let years_str = event.years.as_ref().map(serialize_years);
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, last_next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 event.chat_id,
                 date_str,
@@ -212,6 +216,7 @@ impl EventStorage {
                 event.message,
                 event.active as i32,
                 next_str,
+                last_next_str,
                 days_str,
                 repeat_interval,
                 repeat_unit,
@@ -232,7 +237,7 @@ impl EventStorage {
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
         )?;
 
@@ -244,7 +249,7 @@ impl EventStorage {
     /// Retrieves all active events.
     pub fn get_active_events(&self) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -256,7 +261,7 @@ impl EventStorage {
     /// Retrieves active events for a specific chat.
     pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
         )?;
 
@@ -284,7 +289,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -313,7 +318,7 @@ impl EventStorage {
             .to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
              ORDER BY next_datetime ASC",
         )?;
@@ -333,6 +338,9 @@ impl EventStorage {
         let next_str = event
             .next_datetime
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        let last_next_str = event
+            .last_next_datetime
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
         let days_str = event.days.as_ref().map(serialize_days);
         let (repeat_interval, repeat_unit) = match &event.repetition {
             Some(rep) => (Some(rep.interval), Some(rep.unit.label(true).to_string())),
@@ -349,8 +357,8 @@ impl EventStorage {
         let years_str = event.years.as_ref().map(serialize_years);
 
         let rows_affected = self.conn.execute(
-            "UPDATE events SET date = ?1, time = ?2, year_explicit = ?3, message = ?4, active = ?5, next_datetime = ?6, days = ?7, repeat_interval = ?8, repeat_unit = ?9, in_offset = ?10, in_offset_unit = ?11, bare_hour = ?12, monthly_pattern = ?13, years = ?14
-             WHERE id = ?15",
+            "UPDATE events SET date = ?1, time = ?2, year_explicit = ?3, message = ?4, active = ?5, next_datetime = ?6, last_next_datetime = ?7, days = ?8, repeat_interval = ?9, repeat_unit = ?10, in_offset = ?11, in_offset_unit = ?12, bare_hour = ?13, monthly_pattern = ?14, years = ?15
+             WHERE id = ?16",
             params![
                 date_str,
                 time_str,
@@ -358,6 +366,7 @@ impl EventStorage {
                 event.message,
                 event.active as i32,
                 next_str,
+                last_next_str,
                 days_str,
                 repeat_interval,
                 repeat_unit,
@@ -379,11 +388,13 @@ impl EventStorage {
         id: i64,
         active: bool,
         next_datetime: Option<NaiveDateTime>,
+        last_next_datetime: Option<NaiveDateTime>,
     ) -> Result<()> {
         let next_str = next_datetime.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        let last_next_str = last_next_datetime.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
         self.conn.execute(
-            "UPDATE events SET active = ?1, next_datetime = ?2 WHERE id = ?3",
-            params![active as i32, next_str, id],
+            "UPDATE events SET active = ?1, next_datetime = ?2, last_next_datetime = ?3 WHERE id = ?4",
+            params![active as i32, next_str, last_next_str, id],
         )?;
         Ok(())
     }
@@ -409,7 +420,7 @@ impl EventStorage {
     /// Returns an event by its ID.
     pub fn get_event(&self, id: i64) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE id = ?1",
         )?;
 
@@ -424,7 +435,7 @@ impl EventStorage {
     /// Returns the single nearest active event from `now`.
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE active = 1
              ORDER BY next_datetime ASC LIMIT 1",
         )?;
@@ -442,7 +453,7 @@ impl EventStorage {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE active = 1 AND next_datetime < ?1
              ORDER BY next_datetime ASC",
         )?;
@@ -456,7 +467,7 @@ impl EventStorage {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed
+            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime
              FROM events WHERE active = 1 AND next_datetime = ?1
              ORDER BY id ASC",
         )?;
@@ -566,11 +577,14 @@ impl EventStorage {
         let time_str: Option<String> = row.get(3)?;
         let next_str: Option<String> = row.get(7)?;
         let created_str: String = row.get(8)?;
+        let last_next_str: Option<String> = row.get(20)?;
 
         let date = date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
         let time = time_str.and_then(|s| NaiveTime::parse_from_str(&s, "%H:%M:%S").ok());
         let next_datetime =
             next_str.and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok());
+        let last_next_datetime =
+            last_next_str.and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok());
         let created_at =
             NaiveDateTime::parse_from_str(&created_str, "%Y-%m-%d %H:%M:%S").map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -614,6 +628,7 @@ impl EventStorage {
             message: row.get(5)?,
             active: row.get::<_, i32>(6)? != 0,
             next_datetime,
+            last_next_datetime,
             created_at,
             days,
             years,
@@ -677,6 +692,7 @@ mod tests {
                 NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
                 NaiveTime::from_hms_opt(23, 59, 0).unwrap(),
             )),
+            last_next_datetime: None,
             created_at: NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
@@ -709,6 +725,32 @@ mod tests {
         assert_eq!(stored.time, event.time);
         assert!(stored.year_explicit);
         assert!(stored.active);
+    }
+
+    #[test]
+    fn test_last_next_datetime_round_trips_and_updates() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 555);
+        let mut event = make_event("tracked");
+        event.chat_id = 555;
+        event.msg_id = ensure_message(&storage, 555);
+        let fired = dt(2027, 12, 31, 23, 59);
+        event.last_next_datetime = Some(fired);
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get_event(id).unwrap().unwrap();
+        assert_eq!(stored.last_next_datetime, Some(fired));
+
+        // update_schedule persists a new last_next_datetime even as the event
+        // goes inactive.
+        let later = dt(2028, 1, 1, 8, 0);
+        storage
+            .update_schedule(id, false, None, Some(later))
+            .unwrap();
+        let reloaded = storage.get_event(id).unwrap().unwrap();
+        assert!(!reloaded.active);
+        assert!(reloaded.next_datetime.is_none());
+        assert_eq!(reloaded.last_next_datetime, Some(later));
     }
 
     #[test]
