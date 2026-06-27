@@ -1,0 +1,19 @@
+[Unit]
+Description=Perbot Telegram reminder bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=perbot
+Group=perbot
+WorkingDirectory=/opt/perbot
+EnvironmentFile=/etc/perbot/perbot.env
+Environment=LOG_DIR=/opt/perbot/logs
+ExecStart=/opt/perbot/perbot
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,63 @@
+user: deploy
+ssh_key: ~/.ssh/id_rsa
+
+# EDIT these to your real hosts. dev and prod are separate groups so they get
+# different bots/tokens and can be deployed independently.
+targets:
+  dev:
+    hosts:
+      - {host: "DEV_HOST", user: "deploy", name: "dev"}
+  prod:
+    hosts:
+      - {host: "PROD_HOST", user: "deploy", name: "prod"}
+
+tasks:
+  # One-time provisioning per host. Re-runnable (idempotent).
+  - name: setup
+    commands:
+      - name: create service user
+        script: id perbot &>/dev/null || useradd --system --home-dir /opt/perbot --shell /usr/sbin/nologin perbot
+        options: {sudo: true}
+      - name: create directories
+        script: |
+          install -d -o perbot -g perbot -m 755 /opt/perbot /opt/perbot/logs
+          install -d -m 750 /etc/perbot
+        options: {sudo: true}
+      - name: write env file
+        script: |
+          umask 077
+          cat > /tmp/perbot.env <<EOF
+          TG_BOT_TOKEN=$TG_BOT_TOKEN
+          TG_ADMIN_ID=$TG_ADMIN_ID
+          RUST_LOG=$RUST_LOG
+          EOF
+          install -o root -g perbot -m 640 /tmp/perbot.env /etc/perbot/perbot.env
+          rm -f /tmp/perbot.env
+        env: {RUST_LOG: "info"}
+        options: {sudo: true, secrets: ["TG_BOT_TOKEN"]}
+      - name: upload systemd unit
+        copy: {"src": "deploy/perbot.service", "dst": "/tmp/perbot.service", "mkdir": true}
+      - name: install systemd unit
+        script: |
+          install -m 644 /tmp/perbot.service /etc/systemd/system/perbot.service
+          rm -f /tmp/perbot.service
+          systemctl daemon-reload
+          systemctl enable perbot
+        options: {sudo: true}
+
+  # Routine deploy: build locally, ship the binary, restart.
+  - name: deploy
+    commands:
+      - name: build release binary (local)
+        script: cargo build --release
+        options: {local: true}
+      - name: upload binary
+        copy: {"src": "target/release/perbot", "dst": "/tmp/perbot.new", "chmod+x": true}
+      - name: install and restart
+        script: |
+          install -o perbot -g perbot -m 755 /tmp/perbot.new /opt/perbot/perbot
+          rm -f /tmp/perbot.new
+          systemctl restart perbot
+          sleep 2
+          systemctl is-active perbot
+        options: {sudo: true}

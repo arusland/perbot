@@ -89,6 +89,20 @@ inserted chat message) and `SYSTEM` actions (advance time and assert the next fi
 or `NONE` when the event becomes inactive). New scenarios can be added by appending
 tables to `test-cases.md` — no code changes required.
 
+## Deployment
+
+Dev/prod deploys over SSH are automated with [Spot](https://github.com/umputun/spot). The
+binary is built locally and copied to the server, where it runs as a `systemd` service from
+`/opt/perbot`. See [`deploy/README.md`](deploy/README.md) for the full guide.
+
+```bash
+# one-time per environment (secrets passed on the CLI, never committed)
+spot -p deploy/spot.yml -t dev -n setup -e TG_BOT_TOKEN:<token> -e TG_ADMIN_ID:<id>
+
+# routine deploy (build + ship + restart)
+spot -p deploy/spot.yml -t dev -n deploy   # or: deploy/deploy.sh dev
+```
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
