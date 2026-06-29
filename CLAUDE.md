@@ -47,17 +47,17 @@ These are the conventions that aren't obvious from any single file:
 
 - **locale/** — Localization seam (`mod.rs` + `english.rs`). `LocaleProvider` trait threads all time-format vocabulary, regexes and format patterns; `locale::EN`/`for_chat` resolve the active locale (English only today). **Adding a locale = supplying data:** fill a `GrammarVocab` (word alternations + keywords) and call `TimeGrammar::build` (the shared builder owns the regex shapes), then map words to the shared enums and provide output vocabulary/patterns/relative-time. English delegates storage-canonical words to `types.rs`; a byte-identity test pins the built regexes to the historical strings.
 
-- **types.rs** — `EventInfo` (parsed + DB fields), `MessageInfo`, `ChatInfo`/`ChatType`, `TgMessage`, `MessageSender`, time enums (`TimeUnit`/`Repetition`/`Ordinal`/`MonthlyPattern`). **Fixed canonical (storage) helpers** live only here: `day_to_str`, `parse_days`, `unit_from_str`, `TimeUnit::label` (locale-independent, reused by the English locale). `EventInfo::normalize_time(loc)` (canonical re-parseable string — see Invariants) pulls all its vocabulary from `loc`; user-facing name helpers (`weekday_full`/`ordinal_word`/`ordinal_suffix`/`weekday_abbrev_cap`) now live in `locale`.
+- **types.rs** — `EventInfo` (parsed + DB fields), `MessageInfo`, `ChatInfo`/`ChatType`, `TgMessage`, `MessageSender`, time enums (`TimeUnit`/`Repetition`/`Ordinal`/`MonthlyPattern`), and `NextSource` (which field produced `next_datetime`; see EventInfo `source`). **Fixed canonical (storage) helpers** live only here: `day_to_str`, `parse_days`, `unit_from_str`, `TimeUnit::label`, `NextSource::as_str`/`from_str` (locale-independent, reused by the English locale). `EventInfo::normalize_time(loc)` (canonical re-parseable string — see Invariants) pulls all its vocabulary from `loc`; user-facing name helpers (`weekday_full`/`ordinal_word`/`ordinal_suffix`/`weekday_abbrev_cap`) now live in `locale`.
 
 - **parser.rs** — Stateless extraction over the active locale's regexes/word maps (`loc: &dyn LocaleProvider`). `parse` / `parse_full` (also returns surviving body byte-ranges for `richtext`) / `parse_time_only` (time present, body empty → drives main's "send me the text" flow). Clock time matches anywhere; offset/bare-hour/short-date must lead. Standalone 4-digit token in 2000..=2100 is a year restriction. Body derived via `richtext::normalize`; `main` overwrites it with the HTML render before persisting.
 
 - **richtext.rs** — Pure. `normalize` is the single source of truth for body normalization: collapses intra-line whitespace to single spaces, **preserves line breaks verbatim**, tracks each char's source byte offset. `render_html` rebuilds `MessageEntity`s (UTF-16) over the leftover text and renders via teloxide's `Renderer`; falls back to `html::escape` with no entities.
 
-- **scheduler.rs** — Pure datetime math. `calc_next[_at](EventInfo[, now])` set `active` + `next_datetime`.
+- **scheduler.rs** — Pure datetime math. `calc_next[_at](EventInfo[, now])` set `active` + `next_datetime` + `source` (the `NextSource` identifying which field produced the datetime; `None` when inactive). The private `calculate_next_datetime` returns `Option<(NaiveDateTime, NextSource)>`.
 
 - **error.rs** — Crate error (`thiserror`) + `Result<T>`. Libraries use it; binaries wrap with `anyhow`.
 
-- **storage.rs** — `EventStorage` over rusqlite. Tables `chats`, `messages`, `events` (`events.msg_id` NOT NULL FK; `legacy`/`snoozed` flags; `last_next_datetime` tracks the last non-null `next_datetime`). Standard CRUD + range/active/missed queries + `backup_to` (`VACUUM INTO`). `update_schedule(id, active, next_datetime, last_next_datetime)` persists a reschedule.
+- **storage.rs** — `EventStorage` over rusqlite. Tables `chats`, `messages`, `events` (`events.msg_id` NOT NULL FK; `legacy`/`snoozed` flags; `last_next_datetime` tracks the last non-null `next_datetime`; `source` TEXT holds `NextSource::as_str()`). Standard CRUD + range/active/missed queries + `backup_to` (`VACUUM INTO`). `update_schedule(id, active, next_datetime, last_next_datetime, source)` persists a reschedule (including the new source).
 
 - **state.rs** — `EventProvider`: `Clone` handle over `Arc<Mutex<_>>` (storage + cached `next_event` + `missed_snapshot`). `start(msg_tx)` sends missed events then spawns a 1s poll thread that fires due events and reschedules. **Missed events** render as a paged, preview-only `/event<id>` list (`commands::format_missed_page`): because rescheduling makes them un-queryable, `start` first snapshots the missed event ids per chat into `missed_snapshot`; `get_missed_snapshot_events(chat_id)` reloads them for the `ms:<page>` page-turn callbacks. Fired text = `<message><preview>\n\n<SNOOZE_HINT>` (message + preview are HTML fragments, hint escaped). **Snooze presentation lives here** (`SNOOZE_OPTIONS`/`SNOOZE_HINT`/`snooze_keyboard`, callback `eid:<id>:sn:<minutes>`). Insert/update wrappers: `insert_event_and_get[_at]`, `insert_prebuilt_event` (no re-scheduling; importer + snooze), `update_event_and_get[_at]` (edit flow), `delete` (reloads cached next).
 
@@ -99,6 +99,7 @@ These are the conventions that aren't obvious from any single file:
 | `chat_id` | `i64` | storage/caller | Destination chat. |
 | `active` | `bool` | scheduler | `true` while a future occurrence remains. |
 | `next_datetime` | `Option<NaiveDateTime>` | scheduler | Next fire; `None` → inactive. |
+| `source` | `Option<NextSource>` | scheduler | Which field produced `next_datetime` (`Time`/`Date`/`BareHour`/`InOffset`/`Repetition`/`MonthlyPattern`/`Years`/`Weekdays`). `Some` iff `next_datetime` is `Some`. Persisted to `events.source`. |
 | `last_next_datetime` | `Option<NaiveDateTime>` | scheduler | Most recent non-null `next_datetime`; retained when the event goes inactive (drives the `/event<id>` "out of date / last fired at" notice). |
 | `created_at` | `NaiveDateTime` | storage/converter | Insertion time (legacy: from `.alert` filename). |
 | `msg_id` | `i64` | storage/caller | FK to originating `messages` row. |
@@ -107,7 +108,7 @@ These are the conventions that aren't obvious from any single file:
 
 ## Test Cases
 
-`test-cases.md` holds markdown tables driving `tests/table_tests.rs`. Rows alternate `USER` (parse + `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, assert `next_datetime` or `NONE`). Column 4 = expected `event.message` (asserted on USER rows). Column 5 = expected `normalize_time()` (asserted on USER rows; empty when input doesn't parse). A literal `\n` in Input/Message is decoded to a real newline. Add scenarios by appending `###` sections — no code changes needed.
+`test-cases.md` holds markdown tables driving `tests/table_tests.rs`. Rows alternate `USER` (parse + `insert_event_and_get_at`) and `SYSTEM` (`update_at_and_reload`, assert `next_datetime` or `NONE`). Column 4 is overloaded by actor: on USER rows it is the expected `event.message`; on SYSTEM rows it is the expected source as `source=<name>` (asserted against `event.source.as_str()`; empty on `NONE` rows). Column 5 = expected `normalize_time()` (asserted on USER rows; empty when input doesn't parse). A literal `\n` in Input/Message is decoded to a real newline. Add scenarios by appending `###` sections — no code changes needed.
 
 ## Datetime formats
 

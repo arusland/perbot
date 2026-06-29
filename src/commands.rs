@@ -6,7 +6,7 @@ use crate::telegram::{
     LIST_PAGE_SIZE, RowStyle, edit_prompt, event_detail, format_page_at, scheduled_message,
 };
 use crate::tgbot::TgBot;
-use crate::types::EventInfo;
+use crate::types::{EventInfo, NextSource};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use std::process;
 use teloxide::{
@@ -635,6 +635,7 @@ fn snoozed_event(
         chat_id,
         active: true,
         next_datetime: Some(next),
+        source: Some(NextSource::Date),
         last_next_datetime: Some(next),
         created_at: next,
         msg_id,
@@ -1042,6 +1043,7 @@ mod tests {
             chat_id: 0,
             active: false,
             next_datetime: None,
+            source: None,
             last_next_datetime: None,
             created_at: Local::now().naive_local(),
             msg_id: 0,

@@ -44,6 +44,10 @@ pub struct EventInfo {
     pub chat_id: i64,
     pub active: bool,
     pub next_datetime: Option<NaiveDateTime>,
+    /// Which time/recurrence field produced the current `next_datetime`. Set by
+    /// [`crate::scheduler::calc_next_at`] and `Some` exactly when `next_datetime`
+    /// is `Some` (an inactive event with no next datetime carries `None`).
+    pub source: Option<NextSource>,
     /// The most recent non-null `next_datetime` this event ever had. Tracks when
     /// the event last fired so an inactive (out-of-date) event can still report
     /// it. Set by [`crate::scheduler::calc_next_at`]; never cleared once set.
@@ -236,6 +240,64 @@ impl std::str::FromStr for ChatType {
             "supergroup" => Ok(ChatType::Supergroup),
             "channel" => Ok(ChatType::Channel),
             _ => Err(()),
+        }
+    }
+}
+
+/// Identifies which time/recurrence field the scheduler used to compute an
+/// event's `next_datetime`. Stored on the `events.source` column and asserted by
+/// the table tests. The string mapping is **fixed canonical** (lowercase snake,
+/// not localized), mirroring the other storage helpers in this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextSource {
+    /// Clock time, today or tomorrow (time-only event, first fire).
+    Time,
+    /// Explicit or short date, including the yearly short-date wrap.
+    Date,
+    /// Leading bare hour, first fire.
+    BareHour,
+    /// Relative offset (`now + offset`), first fire.
+    InOffset,
+    /// Advanced by an `every <n> <unit>` interval.
+    Repetition,
+    /// Monthly anchor: ordinal weekday / last day / fixed day-of-month.
+    MonthlyPattern,
+    /// Year-restricted schedule.
+    Years,
+    /// Weekday-set recurrence.
+    Weekdays,
+}
+
+impl NextSource {
+    /// Fixed canonical, storage-and-test string for this source.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NextSource::Time => "time",
+            NextSource::Date => "date",
+            NextSource::BareHour => "bare_hour",
+            NextSource::InOffset => "in_offset",
+            NextSource::Repetition => "repetition",
+            NextSource::MonthlyPattern => "monthly_pattern",
+            NextSource::Years => "years",
+            NextSource::Weekdays => "weekdays",
+        }
+    }
+
+    /// Inverse of [`NextSource::as_str`]. Named for symmetry with the other
+    /// `*_from_str` storage helpers in this module; returns `Option` (not the
+    /// `FromStr` trait's `Result`) since an unknown column value is simply `None`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "time" => Some(NextSource::Time),
+            "date" => Some(NextSource::Date),
+            "bare_hour" => Some(NextSource::BareHour),
+            "in_offset" => Some(NextSource::InOffset),
+            "repetition" => Some(NextSource::Repetition),
+            "monthly_pattern" => Some(NextSource::MonthlyPattern),
+            "years" => Some(NextSource::Years),
+            "weekdays" => Some(NextSource::Weekdays),
+            _ => None,
         }
     }
 }
@@ -439,6 +501,7 @@ mod tests {
             chat_id: 0,
             active: false,
             next_datetime: None,
+            source: None,
             last_next_datetime: None,
             created_at: NaiveDate::from_ymd_opt(2024, 1, 1)
                 .unwrap()

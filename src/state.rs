@@ -332,6 +332,7 @@ impl EventProvider {
                 next.active,
                 next.next_datetime,
                 next.last_next_datetime,
+                next.source,
             ) {
                 log::error!("Failed to update schedule for event {}: {}", event_id, e);
             }

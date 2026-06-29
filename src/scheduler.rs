@@ -1,6 +1,6 @@
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 
-use crate::types::{EventInfo, MonthlyPattern, Ordinal, TimeUnit};
+use crate::types::{EventInfo, MonthlyPattern, NextSource, Ordinal, TimeUnit};
 
 /// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
@@ -12,19 +12,28 @@ pub fn calc_next(event: EventInfo) -> EventInfo {
 
 /// Like [`calc_next`] but with an explicit `now`, for deterministic testing.
 pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
-    let next_datetime = calculate_next_datetime(&event, now);
+    let computed = calculate_next_datetime(&event, now);
+    let next_datetime = computed.map(|(dt, _)| dt);
+    let source = computed.map(|(_, src)| src);
     let last_next_datetime = next_datetime
         .or(event.next_datetime)
         .or(event.last_next_datetime);
     EventInfo {
         active: next_datetime.is_some(),
         next_datetime,
+        source,
         last_next_datetime,
         ..event
     }
 }
 
-fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<NaiveDateTime> {
+/// Computes the next fire datetime and the field that produced it. Returns
+/// `None` when no future occurrence remains (the event is then inactive and its
+/// `source` is cleared).
+fn calculate_next_datetime(
+    event: &EventInfo,
+    now: NaiveDateTime,
+) -> Option<(NaiveDateTime, NextSource)> {
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
         // One-shot: already scheduled and no repetition means it has fired
@@ -39,15 +48,15 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
             while next <= now {
                 next = advance_by(next, rep.interval, rep.unit)?;
             }
-            return Some(next);
+            return Some((next, NextSource::Repetition));
         }
         let today = now.date();
         let dt = today.and_time(t);
         return if dt > now {
-            Some(dt)
+            Some((dt, NextSource::BareHour))
         } else {
             let tomorrow = today.succ_opt()?;
-            Some(tomorrow.and_time(t))
+            Some((tomorrow.and_time(t), NextSource::BareHour))
         };
     }
 
@@ -63,24 +72,25 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
             while next <= now {
                 next = advance_by(next, rep.interval, rep.unit)?;
             }
-            return Some(next);
+            return Some((next, NextSource::Repetition));
         }
         // First scheduling: fire at now + offset
-        return match unit {
-            TimeUnit::Minutes => Some(now + chrono::Duration::minutes(value as i64)),
-            TimeUnit::Hours => Some(now + chrono::Duration::hours(value as i64)),
-            TimeUnit::Days => Some(now + chrono::Duration::days(value as i64)),
-            TimeUnit::Weeks => Some(now + chrono::Duration::weeks(value as i64)),
+        let first = match unit {
+            TimeUnit::Minutes => now + chrono::Duration::minutes(value as i64),
+            TimeUnit::Hours => now + chrono::Duration::hours(value as i64),
+            TimeUnit::Days => now + chrono::Duration::days(value as i64),
+            TimeUnit::Weeks => now + chrono::Duration::weeks(value as i64),
             TimeUnit::Months => {
                 let new_date = now.date().checked_add_months(chrono::Months::new(value))?;
-                Some(new_date.and_time(now.time()))
+                new_date.and_time(now.time())
             }
             TimeUnit::Years => {
                 let months = value.checked_mul(12)?;
                 let new_date = now.date().checked_add_months(chrono::Months::new(months))?;
-                Some(new_date.and_time(now.time()))
+                new_date.and_time(now.time())
             }
         };
+        return Some((first, NextSource::InOffset));
     }
 
     // Handle years restriction: fire at the given time within the specified years only,
@@ -112,7 +122,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                     .as_ref()
                     .is_none_or(|days| days.contains(&candidate.weekday()));
                 if day_ok && candidate_dt > now {
-                    return Some(candidate_dt);
+                    return Some((candidate_dt, NextSource::Years));
                 }
                 candidate = candidate.succ_opt()?;
             }
@@ -175,22 +185,25 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
             while candidate <= now {
                 candidate = advance_by(candidate, rep.interval, rep.unit)?;
             }
+            // The anchor wins when it is no later than the interval step;
+            // otherwise the repetition governs. Compare explicitly (rather than
+            // `.min()`) so the reported source matches the chosen value.
             return match next_anchor {
-                Some(anchor) => Some(candidate.min(anchor)),
-                None => Some(candidate),
+                Some(anchor) if anchor <= candidate => Some((anchor, NextSource::MonthlyPattern)),
+                _ => Some((candidate, NextSource::Repetition)),
             };
         }
 
-        return next_anchor;
+        return next_anchor.map(|anchor| (anchor, NextSource::MonthlyPattern));
     }
 
-    let dt = match (event.time, event.date) {
+    let (dt, source) = match (event.time, event.date) {
         (Some(t), Some(d)) => {
             let dt = d.and_time(t);
             if dt > now {
                 // First fire: on the stored date (the next future occurrence for a
                 // future short date, or the explicit date).
-                Some(dt)
+                Some((dt, NextSource::Date))
             } else if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref())
             {
                 // Already scheduled once and repeating (explicit year *or* short
@@ -201,7 +214,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 while next <= now {
                     next = advance_by(next, rep.interval, rep.unit)?;
                 }
-                Some(next)
+                Some((next, NextSource::Repetition))
             } else if event.year_explicit {
                 // Explicit year, no repetition: one-shot, already fired.
                 None
@@ -214,7 +227,7 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 while next.and_time(t) <= now {
                     next = NaiveDate::from_ymd_opt(next.year() + 1, d.month(), d.day())?;
                 }
-                Some(next.and_time(t))
+                Some((next.and_time(t), NextSource::Date))
             }
         }
         (Some(t), None) => {
@@ -230,23 +243,23 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 while next <= now {
                     next = advance_by(next, rep.interval, rep.unit)?;
                 }
-                return Some(next);
+                return Some((next, NextSource::Repetition));
             }
             let today = now.date();
             let dt = today.and_time(t);
             if dt > now {
-                Some(dt)
+                Some((dt, NextSource::Time))
             } else {
                 // Time already passed today — tomorrow
                 let tomorrow = today.succ_opt()?;
-                Some(tomorrow.and_time(t))
+                Some((tomorrow.and_time(t), NextSource::Time))
             }
         }
         (None, Some(d)) => {
             // Date only — use midnight
             let dt = d.and_hms_opt(0, 0, 0)?;
             if dt > now {
-                Some(dt)
+                Some((dt, NextSource::Date))
             } else if event.year_explicit {
                 None
             } else {
@@ -255,25 +268,26 @@ fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> Option<Naiv
                 while next.and_hms_opt(0, 0, 0)? <= now {
                     next = NaiveDate::from_ymd_opt(next.year() + 1, d.month(), d.day())?;
                 }
-                Some(next.and_hms_opt(0, 0, 0)?)
+                Some((next.and_hms_opt(0, 0, 0)?, NextSource::Date))
             }
         }
         (None, None) => None,
     }?;
 
-    // If days-of-week restriction is set, advance to the next allowed day
+    // If days-of-week restriction is set, advance to the next allowed day. The
+    // weekday set is then the field that governs the result.
     if let Some(ref days) = event.days {
         let time = dt.time();
         let mut candidate = dt.date();
         for _ in 0..7 {
             if days.contains(&candidate.weekday()) && candidate.and_time(time) > now {
-                return Some(candidate.and_time(time));
+                return Some((candidate.and_time(time), NextSource::Weekdays));
             }
             candidate = candidate.succ_opt()?;
         }
         None
     } else {
-        Some(dt)
+        Some((dt, source))
     }
 }
 
@@ -349,6 +363,7 @@ mod tests {
             message: String::new(),
             active: false,
             next_datetime: None,
+            source: None,
             last_next_datetime: None,
             created_at: NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

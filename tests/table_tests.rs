@@ -15,6 +15,11 @@ struct TableRow {
     /// Expected `EventInfo::normalize_time()` for USER rows (5th column); `None`
     /// for SYSTEM rows and for USER rows whose input fails to parse (empty cell).
     normalized: Option<String>,
+    /// Expected `source=<name>` for SYSTEM rows that compute a datetime (4th
+    /// column); `None` when the cell is empty (NONE rows, USER rows). Shares the
+    /// 4th column with `message`, but the two are read in mutually exclusive arms
+    /// (`message` only on USER rows, `source` only on SYSTEM rows).
+    source: Option<String>,
     original: String,
 }
 
@@ -172,6 +177,7 @@ fn parse_tables(content: &str) -> Vec<Table> {
                 value: unescape(cols[2]),
                 message: cols.get(3).map(|s| unescape(s)),
                 normalized: cols.get(4).map(|s| unescape(s)),
+                source: cols.get(3).map(|s| unescape(s)),
                 original: trimmed.to_string(),
             });
         } else {
@@ -363,6 +369,36 @@ fn run_table(table_idx: usize, table: &Table) {
                                 step,
                                 &format!("invalid expected datetime '{}'", row.value),
                                 "",
+                            );
+                        }
+                    }
+
+                    // When the 4th column carries a `source=<name>`, assert the
+                    // scheduler tagged the computed datetime with that source.
+                    if let Some(cell) = row.source.as_deref().filter(|s| !s.is_empty()) {
+                        let expected_src = cell.strip_prefix("source=").unwrap_or_else(|| {
+                            fail_at(
+                                table_idx,
+                                table,
+                                step,
+                                &format!(
+                                    "source cell must look like 'source=<name>', got {cell:?}"
+                                ),
+                                cell,
+                            )
+                        });
+                        let actual_src = result.as_ref().and_then(|e| e.source).map(|s| s.as_str());
+                        if actual_src != Some(expected_src) {
+                            fail_at(
+                                table_idx,
+                                table,
+                                step,
+                                &format!(
+                                    "expected source {:?}, got {:?}",
+                                    Some(expected_src),
+                                    actual_src
+                                ),
+                                actual_src.unwrap_or("None"),
                             );
                         }
                     }

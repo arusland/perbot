@@ -520,6 +520,7 @@ mod tests {
             message: message.to_string(),
             active: next.is_some(),
             next_datetime: next,
+            source: next.map(|_| crate::types::NextSource::Date),
             last_next_datetime: next,
             created_at: NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
