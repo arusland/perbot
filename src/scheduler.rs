@@ -206,15 +206,32 @@ fn calculate_next_datetime(
                 Some((dt, NextSource::Date))
             } else if let (Some(base), Some(rep)) = (event.next_datetime, event.repetition.as_ref())
             {
-                // Already scheduled once and repeating (explicit year *or* short
-                // date): advance from the previous fire by the repeat interval. For
-                // a short date this means the repetition — not the yearly wrap —
-                // governs subsequent fires.
+                // Already scheduled once and repeating: advance from the previous
+                // fire by the repeat interval.
                 let mut next = base;
                 while next <= now {
                     next = advance_by(next, rep.interval, rep.unit)?;
                 }
-                Some((next, NextSource::Repetition))
+                if event.year_explicit {
+                    // Explicit year: the repetition governs subsequent fires.
+                    Some((next, NextSource::Repetition))
+                } else {
+                    // Short date: the yearly date anchor competes and has priority
+                    // (mirrors the monthly-pattern anchor rule). Find the next
+                    // occurrence of (month/day) at time `t` strictly after `now`.
+                    let mut anchor = NaiveDate::from_ymd_opt(d.year(), d.month(), d.day())?;
+                    while anchor.and_time(t) <= now {
+                        anchor = NaiveDate::from_ymd_opt(anchor.year() + 1, d.month(), d.day())?;
+                    }
+                    let anchor_dt = anchor.and_time(t);
+                    // Anchor wins ties, so the yearly date is not skipped over by
+                    // the interval steps.
+                    if anchor_dt <= next {
+                        Some((anchor_dt, NextSource::Date))
+                    } else {
+                        Some((next, NextSource::Repetition))
+                    }
+                }
             } else if event.year_explicit {
                 // Explicit year, no repetition: one-shot, already fired.
                 None

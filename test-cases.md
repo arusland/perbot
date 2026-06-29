@@ -220,12 +220,18 @@ is independent of when the suite runs.
 | 2099-10-01 09:00:00 | SYSTEM | 2099-11-05 11:07:00                | source=date |                        |
 | 2099-11-05 11:07:01 | SYSTEM | 2099-11-07 11:07:00                | source=repetition |                  |
 | 2099-11-07 11:07:01 | SYSTEM | 2099-11-09 11:07:00                | source=repetition |                  |
+| 2100-11-05 09:00:00 | SYSTEM | 2100-11-05 11:07:00                | source=date |                        |
+| 2100-11-05 11:07:01 | SYSTEM | 2100-11-07 11:07:00                | source=repetition |                  |
+| 2100-11-07 11:07:01 | SYSTEM | 2100-11-09 11:07:00                | source=repetition |                  |
 
-### Case 9.9: Short date with repetition — first and last only
+
+### Case 9.9: Short date with repetition and yearly wrap
 | Current Time        | Actor  | Input / Expected Next              | Message / Source   | Normalized               |
 |---------------------|--------|------------------------------------|-----------|--------------------------|
 | 2099-10-01 09:00:00 | USER   | 11:07 05.11 every 2 days take meds | take meds | 11:07 05.11 every 2 days yearly |
 | 2099-11-07 11:07:01 | SYSTEM | 2099-11-09 11:07:00                | source=repetition |                  |
+| 2100-11-05 09:00:00 | SYSTEM | 2100-11-05 11:07:00                | source=date |                        |
+| 2101-11-05 09:00:00 | SYSTEM | 2101-11-05 11:07:00                | source=date |                        |
 
 ### Case 10: every month - fires at next 20:00, does not deactivate
 

@@ -90,7 +90,7 @@ These are the conventions that aren't obvious from any single file:
 | `year_explicit` | `bool` | parser | `true` only when a full date spelled the year — honors `date`'s year vs rolling it forward yearly. |
 | `days` | `Option<HashSet<Weekday>>` | parser | Weekday-set recurrence; pairs with `years`. |
 | `years` | `Option<HashSet<i32>>` | parser | Standalone year token(s) 2000..=2100; restricts a `days` schedule. |
-| `repetition` | `Option<Repetition>` | parser | `every <n> <unit>` interval. On a short date, a non-year repetition overrides the yearly wrap; a year-unit one is dropped as redundant. |
+| `repetition` | `Option<Repetition>` | parser | `every <n> <unit>` interval. On a short date, a non-year repetition fills between the yearly date anchors (which keep priority); a year-unit one is dropped as redundant. |
 | `in_offset` | `Option<(u32, TimeUnit)>` | parser | Relative offset (`now + offset`); with `repetition` repeats. Exclusive with `time`/`date`. |
 | `bare_hour` | `Option<u32>` | parser | Leading bare hour 0..=24 → next occurrence of that hour. |
 | `monthly_pattern` | `Option<MonthlyPattern>` | parser | Ordinal weekday / last day / fixed `DayOfMonth`. With a `repetition`, the day-of-month anchor has priority. |
@@ -114,7 +114,7 @@ These are the conventions that aren't obvious from any single file:
 
 - `13:23`, `5:24 PM`, `1:23 26.11`, `31.12.2027` — clock time anywhere; bare hour / offset / short date must lead. Minutes accept 1-2 digits (`10:6` → `10:06`).
 - **Short date, no year** (`10:03 15.12`) → **yearly**; a redundant `every year`/`yearly` is absorbed (canonical `10:03 15.12 yearly`). **Full date + `every year`/`every N years`** → true yearly repetition (first fire on the date). **Full date alone** → one-off.
-- **Short date + non-year repetition** (`11:07 05.11 every 2 days`) → date is the start anchor, repetition governs. Canonical keeps trailing `yearly`: `11:07 05.11 every 2 days yearly`.
+- **Short date + non-year repetition** (`11:07 05.11 every 2 days`) → date is the start anchor; the repetition fills between fires, but the **yearly date anchor has priority** (it wins ties, so the interval steps never skip over it). Canonical keeps trailing `yearly`: `11:07 05.11 every 2 days yearly`.
 - `13:45 mon-fri`, `13:25 thu-fri,sun 2023` — weekday sets, optional year. Leading `every` absorbed.
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then interval.
 - `8 call Alex` → next 08:00; `24` → 00:00; `25` → invalid.
