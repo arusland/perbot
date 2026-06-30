@@ -289,7 +289,7 @@ fn run_table(table_idx: usize, table: &Table) {
                     let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
                     event.chat_id = CHAT_ID;
                     event.msg_id = msg_id;
-                    let event = provider.insert_event_and_get_at(event, row.ts);
+                    let event = provider.insert_event_and_get_at(event, row.ts).unwrap();
                     event.id
                 });
             }
@@ -309,7 +309,7 @@ fn run_table(table_idx: usize, table: &Table) {
                         );
                     }
                 };
-                let event = match provider.get_event(id) {
+                let event = match provider.get_event(id).unwrap() {
                     Some(event) => event,
                     None => {
                         fail_at(
@@ -326,7 +326,9 @@ fn run_table(table_idx: usize, table: &Table) {
                 if let Some(next_dt) = event.next_datetime
                     && row.ts >= next_dt
                 {
-                    provider.update_at_and_reload(vec![event.clone()], row.ts);
+                    provider
+                        .update_at_and_reload(vec![event.clone()], row.ts)
+                        .unwrap();
                 }
 
                 // Re-read the event after potential update

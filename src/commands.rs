@@ -102,7 +102,11 @@ impl ListKind {
     /// Fetches the events for this list. Date ranges are computed relative to
     /// "now", so paging recomputes them (a page turn across midnight reflects the
     /// then-current day/week/month). `Missed` reads the startup snapshot instead.
-    fn fetch(self, provider: &EventProvider, chat_id: i64) -> Vec<crate::types::EventInfo> {
+    fn fetch(
+        self,
+        provider: &EventProvider,
+        chat_id: i64,
+    ) -> crate::error::Result<Vec<crate::types::EventInfo>> {
         match self {
             ListKind::Events => provider.get_active_by_chat(chat_id),
             ListKind::Missed => provider.get_missed_snapshot_events(chat_id),
@@ -173,7 +177,7 @@ pub struct CmdContext<'a> {
 
 impl Command {
     /// Dispatches a parsed command to its handler.
-    pub async fn handle(self, ctx: CmdContext<'_>) -> ResponseResult<()> {
+    pub async fn handle(self, ctx: CmdContext<'_>) -> anyhow::Result<()> {
         match self {
             Command::Help => handle_help(&ctx).await,
             Command::Events => handle_list(&ctx, ListKind::Events).await,
@@ -190,7 +194,7 @@ impl Command {
 }
 
 /// Replies with the list of commands. Admins additionally see admin-only commands.
-async fn handle_help(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+async fn handle_help(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     let mut help = Command::descriptions().to_string();
     if ctx.is_admin {
         help.push_str(
@@ -263,8 +267,8 @@ pub fn format_missed_page(
 
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
-async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> ResponseResult<()> {
-    let events = kind.fetch(ctx.provider, ctx.chat_id.0);
+async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
+    let events = kind.fetch(ctx.provider, ctx.chat_id.0)?;
     let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
@@ -316,7 +320,7 @@ pub async fn handle_list_callback(
     bot: &TgBot,
     provider: &EventProvider,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     // Always answer to clear the client's loading spinner.
     bot.answer_callback(q.id.clone(), None).await?;
 
@@ -334,7 +338,7 @@ pub async fn handle_list_callback(
     let chat_id = message.chat.id;
     let message_id = message.id;
 
-    let events = kind.fetch(provider, chat_id.0);
+    let events = kind.fetch(provider, chat_id.0)?;
     let loc = crate::locale::for_chat(chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
@@ -397,8 +401,8 @@ pub async fn handle_event_view(
     provider: &EventProvider,
     chat_id: ChatId,
     id: i64,
-) -> ResponseResult<()> {
-    match provider.get_event(id) {
+) -> anyhow::Result<()> {
+    match provider.get_event(id)? {
         Some(event) if event.chat_id == chat_id.0 => {
             let now = Local::now().naive_local();
             let loc = crate::locale::for_chat(chat_id.0);
@@ -472,7 +476,7 @@ pub async fn handle_event_callback(
     provider: &EventProvider,
     pending_edit: &PendingEdit,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
         Some((id, "del")) => handle_delete_prompt(bot, id, q).await,
         Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, q).await,
@@ -500,14 +504,14 @@ async fn handle_edit_prompt(
     pending_edit: &PendingEdit,
     id: i64,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
         bot.answer_callback(q.id, None).await?;
         return Ok(());
     };
     let chat_id = message.chat.id;
 
-    let event = provider.get_event(id).filter(|e| e.chat_id == chat_id.0);
+    let event = provider.get_event(id)?.filter(|e| e.chat_id == chat_id.0);
     bot.answer_callback(q.id, None).await?;
     if let Some(event) = event {
         pending_edit.lock().unwrap().insert(chat_id.0, id);
@@ -530,7 +534,7 @@ async fn handle_edit_cancel(
     bot: &TgBot,
     pending_edit: &PendingEdit,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     bot.answer_callback(q.id.clone(), None).await?;
 
     let Some(message) = q.regular_message() else {
@@ -550,7 +554,7 @@ async fn handle_edit_cancel(
 
 /// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
 /// the confirm/cancel row, leaving the detail text untouched.
-async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
         if let Err(e) = bot
             .edit_markup(message.chat.id, message.id, delete_confirm_keyboard(id))
@@ -565,7 +569,7 @@ async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> Respons
 
 /// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
 /// Edit/Delete action buttons, leaving the detail text untouched.
-async fn handle_delete_cancel(bot: &TgBot, id: i64, q: CallbackQuery) -> ResponseResult<()> {
+async fn handle_delete_cancel(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
         if let Err(e) = bot
             .edit_markup(message.chat.id, message.id, event_actions_keyboard(id))
@@ -587,7 +591,7 @@ async fn handle_delete_confirm(
     provider: &EventProvider,
     id: i64,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
         bot.answer_callback(q.id, None).await?;
         return Ok(());
@@ -595,8 +599,8 @@ async fn handle_delete_confirm(
     let chat_id = message.chat.id;
     let message_id = message.id;
 
-    let owned = matches!(provider.get_event(id), Some(event) if event.chat_id == chat_id.0);
-    let text = if owned && provider.delete(id) {
+    let owned = matches!(provider.get_event(id)?, Some(event) if event.chat_id == chat_id.0);
+    let text = if owned && provider.delete(id)? {
         "Event deleted."
     } else {
         "Event not found."
@@ -657,7 +661,7 @@ pub async fn handle_snooze_callback(
     bot: &TgBot,
     provider: &EventProvider,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     let parsed = q.data.as_deref().and_then(parse_snooze_callback);
     let Some((event_id, minutes)) = parsed else {
         bot.answer_callback(q.id, None).await?;
@@ -674,7 +678,7 @@ pub async fn handle_snooze_callback(
     // Load the event and verify it belongs to this chat before acting on it.
     // `event.message` is an HTML fragment, so the snoozed copy keeps the user's
     // formatting verbatim.
-    let title = match provider.get_event(event_id) {
+    let title = match provider.get_event(event_id)? {
         Some(event) if event.chat_id == chat_id.0 => event.message,
         _ => {
             bot.answer_callback(q.id, Some("Can't snooze this reminder.".to_owned()))
@@ -721,7 +725,7 @@ pub async fn handle_cancel_pending(
     bot: &TgBot,
     pending_msg: &PendingMessage,
     q: CallbackQuery,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     bot.answer_callback(q.id.clone(), None).await?;
 
     let Some(message) = q.regular_message() else {
@@ -741,7 +745,7 @@ pub async fn handle_cancel_pending(
 
 /// Begins a legacy import for `user_id`. Admin-only; records the pending target
 /// and asks the admin to send the zip of `.alert` files next.
-async fn handle_import(ctx: &CmdContext<'_>, user_id: i64) -> ResponseResult<()> {
+async fn handle_import(ctx: &CmdContext<'_>, user_id: i64) -> anyhow::Result<()> {
     if !ctx.is_admin {
         ctx.bot
             .send_text(ctx.chat_id, "Not authorized.", None)
@@ -768,7 +772,7 @@ pub async fn handle_import_zip(
     chat_id: ChatId,
     target: i64,
     file_id: FileId,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     let file = bot.get_file(file_id).await?;
     let mut buf: Vec<u8> = Vec::new();
     if let Err(e) = bot.download_file(&file.path, &mut buf).await {
@@ -806,7 +810,7 @@ pub async fn handle_import_zip(
 /// Admin-only; non-admins get a rejection reply. The bot holds an open connection,
 /// so we snapshot via `VACUUM INTO` (a temp file) rather than copying the live file,
 /// then clean the snapshot up.
-async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+async fn handle_database(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     if !ctx.is_admin {
         ctx.bot
             .send_text(ctx.chat_id, "Not authorized.", None)
@@ -843,7 +847,7 @@ async fn handle_database(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 /// Sends the current log file back as a document. Admin-only; non-admins get a
 /// rejection reply. The log file is append-only text, so it is sent directly
 /// (no snapshot needed).
-async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+async fn handle_logs(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     if !ctx.is_admin {
         ctx.bot
             .send_text(ctx.chat_id, "Not authorized.", None)
@@ -871,7 +875,7 @@ async fn handle_logs(ctx: &CmdContext<'_>) -> ResponseResult<()> {
 }
 
 /// Shuts the bot down. Admin-only; non-admins get a rejection reply.
-async fn handle_exit(ctx: &CmdContext<'_>) -> ResponseResult<()> {
+async fn handle_exit(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     if !ctx.is_admin {
         ctx.bot
             .send_markdown(ctx.chat_id, "Not authorized\\.")

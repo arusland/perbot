@@ -75,8 +75,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Start background polling thread: reloads events, sends missed, polls every second
-    provider.start(msg_tx);
+    // Start background polling thread: reloads events, sends missed, polls every second.
+    // A startup DB error is fatal: tell the admin and don't start the dispatcher.
+    if let Err(e) = provider.start(msg_tx) {
+        log::error!("Startup failed: {}", e);
+        let _ = tg
+            .send_html(
+                admin_id,
+                format!("<b>Startup failed:</b> {}", html::escape(&e.to_string())),
+                None,
+            )
+            .await;
+        return Ok(());
+    }
 
     // Pending legacy import target (chat id) recorded by `/import <user_id>`.
     let pending_import: PendingImport = import::new_pending();
@@ -92,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     // `dptree::deps!`.
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(message_handler_safe))
-        .branch(Update::filter_callback_query().endpoint(callback_handler));
+        .branch(Update::filter_callback_query().endpoint(callback_handler_safe));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
@@ -112,6 +123,42 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Wraps `callback_handler` so a failure can never bubble up to the dispatcher's
+/// default error path. On error it logs, answers the callback (clearing the
+/// client's loading spinner), and forwards the error detail to the admin — the
+/// callback mirror of [`message_handler_safe`].
+async fn callback_handler_safe(
+    bot: TgBot,
+    q: CallbackQuery,
+    provider: EventProvider,
+    admin_id: ChatId,
+    pending_msg: PendingMessage,
+    pending_edit: PendingEdit,
+) -> ResponseResult<()> {
+    // `callback_handler` consumes `q`, so capture the id for the fallback answer.
+    let bot_for_err = bot.clone();
+    let callback_id = q.id.clone();
+
+    if let Err(e) = callback_handler(bot, q, provider, pending_msg, pending_edit).await {
+        log::error!("callback_handler failed: {}", e);
+
+        // Best-effort notifications: ignore secondary send errors so reporting a
+        // failure can't itself re-trigger the dispatcher's error path.
+        let _ = bot_for_err
+            .answer_callback(callback_id, Some("Something goes wrong!".to_owned()))
+            .await;
+        let _ = bot_for_err
+            .send_html(
+                admin_id,
+                format!("<b>Error:</b> {}", html::escape(&e.to_string())),
+                None,
+            )
+            .await;
+    }
+
+    Ok(())
+}
+
 /// Handles an inline-button callback (list pagination for `/events`, `/today`,
 /// `/tomorrow`, `/week`, `/month`).
 async fn callback_handler(
@@ -120,7 +167,7 @@ async fn callback_handler(
     provider: EventProvider,
     pending_msg: PendingMessage,
     pending_edit: PendingEdit,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     // `eid:<id>:…` is the event-specific envelope (snooze / delete / edit); `pm:`
     // cancels a pending "send me the reminder text" prompt; everything else is list
     // pagination (`<tag>:<page>`).
@@ -206,7 +253,7 @@ async fn message_handler(
     pending_import: PendingImport,
     pending_msg: PendingMessage,
     pending_edit: PendingEdit,
-) -> ResponseResult<()> {
+) -> anyhow::Result<()> {
     // Save/update chat info
     let chat_info = extract_chat_info(&msg.chat);
     if let Err(e) = provider.upsert_chat(&chat_info) {
@@ -264,7 +311,7 @@ async fn message_handler(
             // Re-load the event once and verify it still belongs to this chat; a
             // pending edit can outlive the event (deleted meanwhile).
             let Some(old) = provider
-                .get_event(event_id)
+                .get_event(event_id)?
                 .filter(|e| e.chat_id == msg.chat.id.0)
             else {
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
@@ -284,7 +331,7 @@ async fn message_handler(
                 let (clamped, truncated) = clamp_message(&rendered);
                 event.message = clamped;
 
-                let stored = provider.update_event_and_get(event);
+                let stored = provider.update_event_and_get(event)?;
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
                 if truncated {
                     bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
@@ -339,7 +386,7 @@ async fn message_handler(
             event.msg_id = msg_id;
             let (clamped, truncated) = clamp_message(&body);
             event.message = clamped;
-            let stored = provider.insert_event_and_get(event);
+            let stored = provider.insert_event_and_get(event)?;
             if truncated {
                 bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
                     .await?;
@@ -364,7 +411,7 @@ async fn message_handler(
             let (clamped, truncated) = clamp_message(&rendered);
             event.message = clamped;
 
-            let stored = provider.insert_event_and_get(event);
+            let stored = provider.insert_event_and_get(event)?;
             if truncated {
                 bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
                     .await?;
