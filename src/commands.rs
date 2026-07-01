@@ -162,7 +162,7 @@ pub enum Command {
     #[command(description = "download the current log file (admin only)", hide)]
     Logs,
     #[command(description = "shut the bot down (admin only)", hide)]
-    Exit,
+    Exit(String),
 }
 
 /// Shared dependencies passed to every command handler.
@@ -188,7 +188,7 @@ impl Command {
             Command::Import(user_id) => handle_import(&ctx, user_id).await,
             Command::Database => handle_database(&ctx).await,
             Command::Logs => handle_logs(&ctx).await,
-            Command::Exit => handle_exit(&ctx).await,
+            Command::Exit(arg) => handle_exit(&ctx, &arg).await,
         }
     }
 }
@@ -1019,10 +1019,20 @@ async fn handle_logs(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
 }
 
 /// Shuts the bot down. Admin-only; non-admins get a rejection reply.
-async fn handle_exit(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
+async fn handle_exit(ctx: &CmdContext<'_>, arg: &str) -> anyhow::Result<()> {
     if !ctx.is_admin {
         ctx.bot
             .send_markdown(ctx.chat_id, "Not authorized\\.")
+            .await?;
+        return Ok(());
+    }
+    if arg.trim() != "yes" {
+        ctx.bot
+            .send_text(
+                ctx.chat_id,
+                "Admin command /exit must be run as \"/exit yes\"",
+                None,
+            )
             .await?;
         return Ok(());
     }
