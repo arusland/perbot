@@ -260,6 +260,15 @@ fn calculate_next_datetime(
                 while next <= now {
                     next = advance_by(next, rep.interval, rep.unit)?;
                 }
+                // A weekday restriction competes with the interval fill and has
+                // priority (mirrors the monthly-pattern / short-date anchor
+                // rule): the earlier wins, ties go to the weekday anchor.
+                if let Some(ref days) = event.days {
+                    return match next_weekday_anchor(days, t, now) {
+                        Some(anchor) if anchor <= next => Some((anchor, NextSource::Weekdays)),
+                        _ => Some((next, NextSource::Repetition)),
+                    };
+                }
                 return Some((next, NextSource::Repetition));
             }
             let today = now.date();
@@ -306,6 +315,24 @@ fn calculate_next_datetime(
     } else {
         Some((dt, source))
     }
+}
+
+/// Finds the next datetime strictly after `now` that falls on one of `days` at
+/// `time`. Scans forward day by day (at most a full week plus the current day).
+fn next_weekday_anchor(
+    days: &std::collections::HashSet<Weekday>,
+    time: NaiveTime,
+    now: NaiveDateTime,
+) -> Option<NaiveDateTime> {
+    let mut candidate = now.date();
+    for _ in 0..8 {
+        let dt = candidate.and_time(time);
+        if days.contains(&candidate.weekday()) && dt > now {
+            return Some(dt);
+        }
+        candidate = candidate.succ_opt()?;
+    }
+    None
 }
 
 fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: u32) -> Option<NaiveDate> {

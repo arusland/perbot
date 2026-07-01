@@ -299,6 +299,17 @@ is independent of when the suite runs.
 | 2026-02-20 10:00:00 | USER   | 10:30 fri release day   | release day | 10:30 Fri  |
 | 2026-02-27 10:30:01 | SYSTEM | 2026-03-06 10:30:00     | source=weekdays |        |
 
+### Case 13.4: Single weekday - repeat every day
+| Current Time        | Actor  | Input / Expected Next      | Message / Source                        | Normalized |
+|---------------------|--------|----------------------------|-------------------|---------------------|
+| 2026-07-01 10:00:00 | USER   | 14:56 fri every day day X  | day X             | 14:56 Fri every day |
+| 2026-07-01 10:30:01 | SYSTEM | 2026-07-03 14:56:00        | source=weekdays   |                     |
+| 2026-07-03 14:56:01 | SYSTEM | 2026-07-04 14:56:00        | source=repetition |                     |
+| 2026-07-04 14:56:01 | SYSTEM | 2026-07-05 14:56:00        | source=repetition |                     |
+| 2026-07-09 14:56:01 | SYSTEM | 2026-07-10 14:56:00        | source=weekdays   |                     |
+| 2026-07-10 14:56:01 | SYSTEM | 2026-07-11 14:56:00        | source=repetition |                     |
+| 2026-07-11 14:56:01 | SYSTEM | 2026-07-12 14:56:00        | source=repetition |                     |
+
 ### Case 14: Single weekday — created mid-week, skips to next matching day then repeats weekly
 
 | Current Time        | Actor  | Input / Expected Next      | Message / Source     | Normalized |
