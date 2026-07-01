@@ -378,7 +378,7 @@ pub async fn handle_list_callback(
 /// for anything else (including the bare `/events` list command, `/event` with no id,
 /// a non-numeric id, or a mismatched `@bot` suffix).
 pub fn parse_event_command(text: &str, bot_username: &str) -> Option<i64> {
-    let token = text.trim().split_whitespace().next()?;
+    let token = text.split_whitespace().next()?;
     let rest = token.strip_prefix("/event")?;
     // Strip an optional `@bot_username` suffix; reject if it names another bot.
     let digits = match rest.split_once('@') {
@@ -684,13 +684,12 @@ async fn handle_edit_cancel(
 /// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
 /// the confirm/cancel row, leaving the detail text untouched.
 async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow::Result<()> {
-    if let Some(message) = q.regular_message() {
-        if let Err(e) = bot
+    if let Some(message) = q.regular_message()
+        && let Err(e) = bot
             .edit_markup(message.chat.id, message.id, delete_confirm_keyboard(id))
             .await
-        {
-            log::warn!("Failed to show delete confirmation for event {id}: {e}");
-        }
+    {
+        log::warn!("Failed to show delete confirmation for event {id}: {e}");
     }
     bot.answer_callback(q.id, None).await?;
     Ok(())

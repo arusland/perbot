@@ -182,11 +182,8 @@ fn format_weekday_set(days: &HashSet<Weekday>, loc: &dyn LocaleProvider) -> Stri
             let last = loc.weekday_abbrev_cap(weekday_from_monday(idx[j]));
             groups.push(format!("{first}-{last}"));
         } else {
-            for k in i..=j {
-                groups.push(
-                    loc.weekday_abbrev_cap(weekday_from_monday(idx[k]))
-                        .to_string(),
-                );
+            for &day in &idx[i..=j] {
+                groups.push(loc.weekday_abbrev_cap(weekday_from_monday(day)).to_string());
             }
         }
         i = j + 1;
@@ -620,6 +617,58 @@ mod tests {
         // Single day.
         e.days = Some(day_set(&[Weekday::Fri]));
         assert_eq!(e.normalize_time(&EN), "01:25 Fri");
+    }
+
+    #[test]
+    fn format_weekday_set_directly() {
+        let fmt = |days: &[Weekday]| format_weekday_set(&day_set(days), &EN);
+
+        // Empty set renders to an empty string.
+        assert_eq!(format_weekday_set(&HashSet::new(), &EN), "");
+        // Single day.
+        assert_eq!(fmt(&[Weekday::Fri]), "Fri");
+        // A 2-day run stays a comma list (a range needs ≥3 consecutive days).
+        assert_eq!(fmt(&[Weekday::Thu, Weekday::Fri]), "Thu,Fri");
+        // Exactly 3 consecutive days collapse into a range.
+        assert_eq!(fmt(&[Weekday::Mon, Weekday::Tue, Weekday::Wed]), "Mon-Wed");
+        // The full week is one range, Monday-first.
+        assert_eq!(
+            fmt(&[
+                Weekday::Sun,
+                Weekday::Sat,
+                Weekday::Fri,
+                Weekday::Thu,
+                Weekday::Wed,
+                Weekday::Tue,
+                Weekday::Mon,
+            ]),
+            "Mon-Sun"
+        );
+        // Output is Monday-first and order-independent of insertion.
+        assert_eq!(fmt(&[Weekday::Wed, Weekday::Mon, Weekday::Tue]), "Mon-Wed");
+        // A ≥3 run plus an isolated day: the doc-comment example.
+        assert_eq!(
+            fmt(&[Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Fri]),
+            "Mon-Wed,Fri"
+        );
+        // Two separate ranges are joined with a comma.
+        assert_eq!(
+            fmt(&[
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Fri,
+                Weekday::Sat,
+                Weekday::Sun,
+            ]),
+            "Mon-Wed,Fri-Sun"
+        );
+        // The run detection does not wrap past Sunday: {Sat,Sun} is a 2-day run,
+        // while {Fri,Sat,Sun} is a range.
+        assert_eq!(fmt(&[Weekday::Sat, Weekday::Sun]), "Sat,Sun");
+        assert_eq!(fmt(&[Weekday::Fri, Weekday::Sat, Weekday::Sun]), "Fri-Sun");
+        // Non-adjacent isolated days (Sunday sorts last).
+        assert_eq!(fmt(&[Weekday::Thu, Weekday::Sun]), "Thu,Sun");
     }
 
     #[test]

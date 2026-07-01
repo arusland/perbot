@@ -24,7 +24,7 @@ fn file_spec() -> flexi_logger::FileSpec {
 /// Path of the currently active log file (the `rCURRENT` file produced by
 /// rotation), derived from the same `FileSpec`/`LOG_DIR` `init` uses.
 pub fn current_log_path() -> std::path::PathBuf {
-    return std::path::PathBuf::from("logs/perbot_rCURRENT.log");
+    std::path::PathBuf::from("logs/perbot_rCURRENT.log")
 }
 
 fn log_format(
