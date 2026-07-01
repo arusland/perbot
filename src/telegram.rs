@@ -12,13 +12,16 @@ const MAX_NEXT_PREVIEW: usize = 3;
 /// Preview block of upcoming launches for a reminder, computed with
 /// `scheduler::calc_next_at`. Lists up to MAX_NEXT_PREVIEW launches as bullets,
 /// plus a trailing `• ...` when more remain. Returns "" for one-off events
-/// (no future occurrence). `after` is the baseline (the launch being confirmed
-/// or fired), used as both the search baseline and the relative-time origin, so
-/// the listed launches are strictly after it. Output is an HTML fragment: the
-/// `<b>Next launches:</b>` header is bold, the bullets and datetimes are plain
-/// (no HTML specials), so callers embed it verbatim into their HTML output.
+/// (no future occurrence). `after` is the search baseline (the launch being
+/// confirmed or fired), so the listed launches are strictly after it; `now` is
+/// the relative-time origin, so each bullet's relative offset (`(1d)`) is
+/// measured from the current moment rather than from `after`. Output is an HTML
+/// fragment: the `<b>Next launches:</b>` header is bold, the bullets and
+/// datetimes are plain (no HTML specials), so callers embed it verbatim into
+/// their HTML output.
 pub fn next_launches_preview(
     event: &EventInfo,
+    now: NaiveDateTime,
     after: NaiveDateTime,
     loc: &dyn LocaleProvider,
 ) -> String {
@@ -41,7 +44,7 @@ pub fn next_launches_preview(
     }
     let mut out = format!("\n\n<b>{}</b>", loc.next_launches_header());
     for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
-        out.push_str(&format!("\n• {}", format_when(after, *dt, loc)));
+        out.push_str(&format!("\n• {}", format_when(now, *dt, loc)));
     }
     if launches.len() > MAX_NEXT_PREVIEW {
         out.push_str("\n• ...");
@@ -62,7 +65,7 @@ pub fn scheduled_message(
     event: &EventInfo,
     loc: &dyn LocaleProvider,
 ) -> String {
-    let preview = next_launches_preview(event, dt, loc);
+    let preview = next_launches_preview(event, now, dt, loc);
     format!(
         "Scheduled message for <b>{}</b>\nMessage: {}{}",
         html::escape(&format_when(now, dt, loc)),
@@ -336,7 +339,7 @@ pub fn event_detail(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvi
         return format!("• <b>{notice}</b>\n{}", event.message);
     }
     let preview = match event.next_datetime {
-        Some(dt) => next_launches_preview(event, dt, loc),
+        Some(dt) => next_launches_preview(event, now, dt, loc),
         None => String::new(),
     };
     format!(
@@ -604,7 +607,7 @@ mod tests {
         );
         let mut event = sample_event("call mom", Some(fire));
         event.time = NaiveTime::from_hms_opt(10, 0, 0);
-        assert_eq!(next_launches_preview(&event, fire, &EN), "");
+        assert_eq!(next_launches_preview(&event, fire, fire, &EN), "");
     }
 
     #[test]
@@ -621,7 +624,7 @@ mod tests {
             unit: TimeUnit::Days,
         });
 
-        let preview = next_launches_preview(&event, fire, &EN);
+        let preview = next_launches_preview(&event, fire, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
         assert!(preview.contains("• 10:00 23.06.2026"));
@@ -629,6 +632,31 @@ mod tests {
         assert!(preview.contains("• 10:00 25.06.2026"));
         assert!(preview.contains("• ..."));
         assert_eq!(preview.matches('•').count(), 4);
+    }
+
+    #[test]
+    fn next_launches_preview_relative_measured_from_now_not_after() {
+        use crate::types::{Repetition, TimeUnit};
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        // `now` one day before the firing occurrence. The first upcoming launch
+        // is 2026-06-23 10:00 — two days after `now`, so the relative offset must
+        // read `(2d)` (measured from `now`), not `(1d)` (from `after`/`fire`).
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let preview = next_launches_preview(&event, now, fire, &EN);
+        assert!(preview.contains("• 10:00 23.06.2026 (2d)"));
     }
 
     #[test]
@@ -644,7 +672,7 @@ mod tests {
         event.time = NaiveTime::from_hms_opt(23, 0, 0);
         event.years = Some(HashSet::from([2027]));
 
-        let preview = next_launches_preview(&event, fire, &EN);
+        let preview = next_launches_preview(&event, fire, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         assert!(preview.contains("• 23:00 31.12.2027"));
         assert!(!preview.contains("• ..."));
