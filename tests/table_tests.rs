@@ -1,6 +1,6 @@
 use chrono::NaiveDateTime;
 use perbot::parser;
-use perbot::state::EventProvider;
+use perbot::state::{DismissOutcome, EventProvider};
 use perbot::storage::EventStorage;
 use perbot::types::{ChatInfo, ChatType};
 
@@ -135,7 +135,9 @@ fn expand_table(table: &Table) -> Vec<Table> {
 /// (must equal `EventInfo.message`) and an optional 5th column with the expected
 /// canonical time expression (must equal `EventInfo.normalize_time()`); SYSTEM
 /// rows leave both empty, so the empty-cell filter drops them and they yield only
-/// 3 columns.
+/// 3 columns. A USER row whose 3rd column starts with `!` (`!Dismiss`,
+/// `!Dismiss repetition`) is an action row (see `run_table`) and leaves the 4th
+/// and 5th columns empty as well.
 ///
 /// Returns a list of tables; each table is a list of rows.
 fn parse_tables(content: &str) -> Vec<Table> {
@@ -240,6 +242,14 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 /// Panics on the first failure with a table display showing the error.
 /// Each table gets its own in-memory EventStorage so storage round-trips
 /// are exercised for every scenario.
+///
+/// A USER row whose Input starts with `!` is an *action* row, not text to parse:
+/// `!Dismiss` / `!Dismiss repetition` (case-insensitive after the `!`) invoke
+/// `EventProvider::dismiss` / `dismiss_repetition` on the current event; any
+/// other `!command` fails the table. The row's timestamp is not fed to the
+/// method (both advance from the stored `next_datetime + 1s`); the following
+/// SYSTEM row asserts the resulting schedule. `Dismissed`/`Inactive` outcomes
+/// both pass, `NotFound` fails.
 fn run_table(table_idx: usize, table: &Table) {
     const CHAT_ID: i64 = 1;
     let storage = EventStorage::open_in_memory().unwrap();
@@ -262,6 +272,39 @@ fn run_table(table_idx: usize, table: &Table) {
     for (step, row) in table.rows.iter().enumerate() {
         match row.actor.as_str() {
             "USER" => {
+                if let Some(action) = row.value.strip_prefix('!') {
+                    let action = action.to_lowercase();
+                    if action != "dismiss" && action != "dismiss repetition" {
+                        fail_at(
+                            table_idx,
+                            table,
+                            step,
+                            &format!("unknown action '{}'", row.value),
+                            "",
+                        );
+                    }
+                    let id = match current_id {
+                        Some(id) => id,
+                        None => {
+                            fail_at(table_idx, table, step, "no current event to dismiss", "");
+                        }
+                    };
+                    let outcome = if action == "dismiss" {
+                        provider.dismiss(id, CHAT_ID).unwrap()
+                    } else {
+                        provider.dismiss_repetition(id, CHAT_ID).unwrap()
+                    };
+                    if let DismissOutcome::NotFound = outcome {
+                        fail_at(
+                            table_idx,
+                            table,
+                            step,
+                            &format!("{} returned NotFound for event {}", row.value, id),
+                            "NotFound",
+                        );
+                    }
+                    continue;
+                }
                 current_id = parser::parse(&row.value, &perbot::locale::EN).map(|mut event| {
                     if let Some(expected) = &row.message
                         && &event.message != expected

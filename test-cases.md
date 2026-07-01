@@ -5,6 +5,7 @@
 * First column contains current time in format YYYY-MM-DD HH:MM:SS
 * Second column is actor's type: USER or SYSTEM
 * When actor is USER, third column contains user's input in chat like "12:45 call Poly", test framework should parse it as EventInfo and than map it to StoredEvent (now it's current StoredEvent)
+* When actor is USER and third column starts with `!`, it is a command, not text to parse: `!Dismiss` / `!Dismiss repetition` call `EventProvider::dismiss` / `dismiss_repetition` on the current event (the `/event<id>` button actions). Both methods advance from the stored `next_datetime + 1s`, so the first column's time is not used (it must still be a valid timestamp). Fourth and fifth columns stay empty; the following SYSTEM row asserts the resulting schedule (or `NONE`).
 * When actor is SYSTEM, test framework call function storage::play_at with current StoredEvent and current time from first column. Now returned value is new current StoredEvent. And current event's next_datetime must be equals to the time in third column (format YYYY-MM-DD HH:MM:SS). If after call play_at new StoredEvent.active==false then third column must be NONE.
 * Fourth column: when actor is USER it holds the pure reminder message (must equal the parsed `event.message`); when actor is SYSTEM it holds the source of the computed `next_datetime` as `source=<name>` (must equal `event.source.as_str()`, e.g. `source=repetition`, `source=bare_hour`, `source=monthly_pattern`). It is left empty on `NONE` rows (an inactive event has no source).
 * Fifth column holds the canonical normalized time expression. When actor is USER it must equal `event.normalize_time()` (the re-parseable canonical form of the time/recurrence — e.g. `12:2` → `12:02`, `8 call Alex` → `08:00`, `mon-fri` → `Mon-Fri`); when actor is SYSTEM it is left empty. It is also left empty on USER rows whose input does not parse.
@@ -730,3 +731,72 @@ is independent of when the suite runs.
 | 2026-02-20 09:00:00 | USER   | 12:45 buy milk\ncall mom    | buy milk\ncall mom | 12:45      |
 | 2026-02-20 09:00:00 | SYSTEM | 2026-02-20 12:45:00         | source=time |               |
 | 2026-02-20 12:45:01 | SYSTEM | NONE                        |                    |            |
+
+### Case 43: Dismiss a one-off — deactivates
+
+| Current Time        | Actor  | Input / Expected Next | Message / Source   | Normalized |
+|---------------------|--------|-----------------------|-----------|------------|
+| 2026-02-20 10:00:00 | USER   | 12:45 call Poly       | call Poly | 12:45      |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 12:45:00   | source=time |          |
+| 2026-02-20 11:00:00 | USER   | !Dismiss              |           |            |
+| 2026-02-20 11:00:00 | SYSTEM | NONE                  |           |            |
+
+### Case 44: Dismiss a repeating event — advances one interval each time
+
+| Current Time        | Actor  | Input / Expected Next          | Message / Source    | Normalized         |
+|---------------------|--------|--------------------------------|------------|--------------------|
+| 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  | run backup | 15:30 every 3 days |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 15:30:00            | source=time |                   |
+| 2026-02-20 11:00:00 | USER   | !Dismiss                       |            |                    |
+| 2026-02-20 11:00:00 | SYSTEM | 2026-02-23 15:30:00            | source=repetition |             |
+| 2026-02-20 12:00:00 | USER   | !Dismiss                       |            |                    |
+| 2026-02-20 12:00:00 | SYSTEM | 2026-02-26 15:30:00            | source=repetition |             |
+
+### Case 45: Dismiss weekdays — Thu→Fri, then Fri→Mon (skips weekend)
+
+| Current Time        | Actor  | Input / Expected Next        | Message / Source       | Normalized    |
+|---------------------|--------|------------------------------|---------------|---------------|
+| 2026-02-19 10:00:00 | USER   | 10:25 mon-fri Daily standup  | Daily standup | 10:25 Mon-Fri |
+| 2026-02-19 10:00:00 | SYSTEM | 2026-02-19 10:25:00          | source=weekdays |             |
+| 2026-02-19 11:00:00 | USER   | !Dismiss                     |               |               |
+| 2026-02-19 11:00:00 | SYSTEM | 2026-02-20 10:25:00          | source=weekdays |             |
+| 2026-02-19 11:00:00 | USER   | !Dismiss                     |               |               |
+| 2026-02-19 11:00:00 | SYSTEM | 2026-02-23 10:25:00          | source=weekdays |             |
+
+### Case 46: Dismiss an already-inactive event — stays NONE
+
+| Current Time        | Actor  | Input / Expected Next | Message / Source   | Normalized |
+|---------------------|--------|-----------------------|-----------|------------|
+| 2026-02-20 10:00:00 | USER   | 12:45 call Poly       | call Poly | 12:45      |
+| 2026-02-20 12:45:01 | SYSTEM | NONE                  |           |            |
+| 2026-02-20 13:00:00 | USER   | !Dismiss              |           |            |
+| 2026-02-20 13:00:00 | SYSTEM | NONE                  |           |            |
+
+### Case 47: Dismiss repetition — skips interval fills to the yearly short-date anchor
+
+| Current Time        | Actor  | Input / Expected Next              | Message / Source   | Normalized               |
+|---------------------|--------|------------------------------------|-----------|--------------------------|
+| 2099-10-01 09:00:00 | USER   | 11:07 05.11 every 2 days take meds | take meds | 11:07 05.11 every 2 days yearly |
+| 2099-11-05 11:07:01 | SYSTEM | 2099-11-07 11:07:00                | source=repetition |                  |
+| 2099-11-08 09:00:00 | USER   | !Dismiss repetition                |           |                          |
+| 2099-11-08 09:00:00 | SYSTEM | 2100-11-05 11:07:00                | source=date |                        |
+
+### Case 48: Dismiss repetition — skips fills to the next monthly-pattern anchor
+
+| Current Time        | Actor  | Input / Expected Next                       | Message / Source    | Normalized                       |
+|---------------------|--------|---------------------------------------------|------------|----------------------------------|
+| 2026-03-01 09:00:00 | USER   | 10:00 first friday every 10 days buy ticket | buy ticket | 10:00 first Friday every 10 days |
+| 2026-03-06 10:00:01 | SYSTEM | 2026-03-16 10:00:00                         | source=repetition |                  |
+| 2026-03-17 09:00:00 | SYSTEM | 2026-03-26 10:00:00                         | source=repetition |                                  |
+| 2026-03-17 09:00:00 | USER   | !Dismiss repetition                         |            |                                  |
+| 2026-03-17 09:00:00 | SYSTEM | 2026-04-03 10:00:00                         | source=monthly_pattern |             |
+| 2026-04-03 10:00:01 | SYSTEM | 2026-04-13 10:00:00                         | source=repetition |                                  |
+
+### Case 49: Dismiss repetition — no anchor, falls back to a single dismiss
+
+| Current Time        | Actor  | Input / Expected Next          | Message / Source    | Normalized         |
+|---------------------|--------|--------------------------------|------------|--------------------|
+| 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  | run backup | 15:30 every 3 days |
+| 2026-02-20 15:30:01 | SYSTEM | 2026-02-23 15:30:00            | source=repetition |             |
+| 2026-02-21 09:00:00 | USER   | !Dismiss repetition            |            |                    |
+| 2026-02-21 09:00:00 | SYSTEM | 2026-02-26 15:30:00            | source=repetition |             |
