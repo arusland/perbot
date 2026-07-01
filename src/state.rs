@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Local, NaiveDate, NaiveDateTime};
+use chrono::{Duration, Local, NaiveDate, NaiveDateTime};
 
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
@@ -57,6 +57,18 @@ struct EventProviderState {
     /// would otherwise make them un-queryable), so the missed-events list can be
     /// paged after the fact. In-memory only; empty on a fresh restart.
     missed_snapshot: HashMap<i64, Vec<i64>>,
+}
+
+/// Result of an [`EventProvider::dismiss`] request.
+pub enum DismissOutcome {
+    /// The event was advanced past its current occurrence; carries the updated
+    /// event as stored (inactive when nothing followed).
+    Dismissed(Box<EventInfo>),
+    /// The event was already inactive — there was no `next_datetime` to advance
+    /// past, so nothing changed.
+    Inactive,
+    /// No event with that id exists in the given chat (missing or foreign id).
+    NotFound,
 }
 
 /// Cloneable handle around shared storage plus the cached nearest event.
@@ -283,6 +295,38 @@ impl EventProvider {
         }
         Self::load_next_event(&mut inner)?;
         Ok(())
+    }
+
+    /// Dismisses an event: advances it past its current occurrence by rescheduling
+    /// as if "now" were one second after the current `next_datetime` — the next
+    /// occurrence for a recurring event, or inactive for a one-off with nothing
+    /// further. Access-checks `chat_id` against the stored event (callback ids are
+    /// user-influenceable). Returns [`DismissOutcome::NotFound`] for a missing or
+    /// foreign id and [`DismissOutcome::Inactive`] when the event has no
+    /// `next_datetime` to advance past; otherwise persists the new schedule,
+    /// reloads the next-event cache, and returns the updated event.
+    pub fn dismiss(&self, id: i64, chat_id: i64) -> Result<DismissOutcome> {
+        let mut inner = self.inner.lock().unwrap();
+        let event = match inner.storage.get_event(id)? {
+            Some(event) if event.chat_id == chat_id => event,
+            _ => return Ok(DismissOutcome::NotFound),
+        };
+        let Some(next_dt) = event.next_datetime else {
+            return Ok(DismissOutcome::Inactive);
+        };
+
+        let calculated = scheduler::calc_next_at(event, next_dt + Duration::seconds(1));
+        inner.storage.update_schedule(
+            id,
+            calculated.active,
+            calculated.next_datetime,
+            calculated.last_next_datetime,
+            calculated.source,
+        )?;
+        Self::load_next_event(&mut inner)?;
+
+        let updated = inner.storage.get_event(id)?.unwrap_or(calculated);
+        Ok(DismissOutcome::Dismissed(Box::new(updated)))
     }
 
     /// Starts the background polling thread. Reloads events from DB, sends missed events,

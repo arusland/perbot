@@ -1,7 +1,7 @@
 use crate::import::{self, PendingImport};
 use crate::locale::LocaleProvider;
 use crate::pending::{self, PendingEdit, PendingMessage};
-use crate::state::EventProvider;
+use crate::state::{DismissOutcome, EventProvider};
 use crate::telegram::{
     LIST_PAGE_SIZE, RowStyle, edit_prompt, event_detail, format_page_at, scheduled_message,
 };
@@ -409,7 +409,7 @@ pub async fn handle_event_view(
             bot.send_html(
                 chat_id,
                 event_detail(&event, now, loc),
-                Some(event_actions_keyboard(id)),
+                Some(event_actions_keyboard(id, event.active)),
             )
             .await?;
         }
@@ -420,14 +420,28 @@ pub async fn handle_event_view(
     Ok(())
 }
 
-/// The action buttons shown under the `/event<id>` detail view: `✏️ Edit`
-/// (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete` (callback
-/// `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
-fn event_actions_keyboard(event_id: i64) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
-        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del")),
-    ]])
+/// The action buttons shown under the `/event<id>` detail view: an optional
+/// `⏭ Dismiss` (callback `eid:<id>:dis`, advances past the current occurrence —
+/// only shown when the event is `active`), `✏️ Edit` (callback `eid:<id>:ed`,
+/// starts the edit flow) and `🗑 Delete` (callback `eid:<id>:del`, swaps in the
+/// [`delete_confirm_keyboard`] row).
+fn event_actions_keyboard(event_id: i64, active: bool) -> InlineKeyboardMarkup {
+    let mut row = Vec::new();
+    if active {
+        row.push(InlineKeyboardButton::callback(
+            "⏭ Dismiss",
+            format!("eid:{event_id}:dis"),
+        ));
+    }
+    row.push(InlineKeyboardButton::callback(
+        "✏️ Edit",
+        format!("eid:{event_id}:ed"),
+    ));
+    row.push(InlineKeyboardButton::callback(
+        "🗑 Delete",
+        format!("eid:{event_id}:del"),
+    ));
+    InlineKeyboardMarkup::new(vec![row])
 }
 
 /// The single Cancel button shown while the chat is editing an event (callback
@@ -467,10 +481,11 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
 }
 
 /// Dispatches an event-specific callback (`eid:<id>:<action>`) to the matching
-/// handler: snooze (`sn:<minutes>`), the delete flow (`del` → confirm prompt,
-/// `delyes` → delete, `delno` → restore the action buttons), or the edit flow
-/// (`ed` → start editing, `edno` → cancel editing). Unknown actions are
-/// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
+/// handler: dismiss (`dis` → advance past the current occurrence), snooze
+/// (`sn:<minutes>`), the delete flow (`del` → confirm prompt, `delyes` → delete,
+/// `delno` → restore the action buttons), or the edit flow (`ed` → start editing,
+/// `edno` → cancel editing). Unknown actions are acknowledged and ignored. Routed
+/// from `main`'s `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
     bot: &TgBot,
     provider: &EventProvider,
@@ -478,9 +493,10 @@ pub async fn handle_event_callback(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
+        Some((id, "dis")) => handle_dismiss(bot, provider, id, q).await,
         Some((id, "del")) => handle_delete_prompt(bot, id, q).await,
         Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, q).await,
-        Some((id, "delno")) => handle_delete_cancel(bot, id, q).await,
+        Some((id, "delno")) => handle_delete_cancel(bot, provider, id, q).await,
         Some((id, "ed")) => handle_edit_prompt(bot, provider, pending_edit, id, q).await,
         Some((_, "edno")) => handle_edit_cancel(bot, pending_edit, q).await,
         Some((_, action)) if action.starts_with("sn:") => {
@@ -491,6 +507,54 @@ pub async fn handle_event_callback(
             Ok(())
         }
     }
+}
+
+/// Handles the `⏭ Dismiss` press (`eid:<id>:dis`): delegates to
+/// [`EventProvider::dismiss`] (which advances the event past its current
+/// occurrence and access-checks the chat), then re-renders the detail view in
+/// place. Replies with a toast for a missing/foreign id or an already-inactive
+/// event.
+async fn handle_dismiss(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
+    let Some(message) = q.regular_message() else {
+        bot.answer_callback(q.id, None).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    let message_id = message.id;
+
+    match provider.dismiss(id, chat_id.0)? {
+        DismissOutcome::NotFound => {
+            bot.answer_callback(q.id, Some("Event not found.".to_owned()))
+                .await?;
+        }
+        DismissOutcome::Inactive => {
+            bot.answer_callback(q.id, Some("Nothing to dismiss.".to_owned()))
+                .await?;
+        }
+        DismissOutcome::Dismissed(updated) => {
+            bot.answer_callback(q.id, Some("Dismissed.".to_owned()))
+                .await?;
+            let loc = crate::locale::for_chat(chat_id.0);
+            let text = event_detail(&updated, Local::now().naive_local(), loc);
+            if let Err(e) = bot
+                .edit_html(
+                    chat_id,
+                    message_id,
+                    text.as_str(),
+                    Some(event_actions_keyboard(id, updated.active)),
+                )
+                .await
+            {
+                log::warn!("Failed to refresh dismissed event {id}: {e}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
@@ -568,11 +632,23 @@ async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow:
 }
 
 /// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
-/// Edit/Delete action buttons, leaving the detail text untouched.
-async fn handle_delete_cancel(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow::Result<()> {
+/// Dismiss/Edit/Delete action buttons, leaving the detail text untouched. The
+/// event is reloaded so the restored keyboard reflects its current active state
+/// (whether the Dismiss button belongs there).
+async fn handle_delete_cancel(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
+        let active = provider.get_event(id)?.is_some_and(|e| e.active);
         if let Err(e) = bot
-            .edit_markup(message.chat.id, message.id, event_actions_keyboard(id))
+            .edit_markup(
+                message.chat.id,
+                message.id,
+                event_actions_keyboard(id, active),
+            )
             .await
         {
             log::warn!("Failed to restore delete button for event {id}: {e}");
@@ -917,6 +993,7 @@ mod tests {
         assert_eq!(parse_event_callback("eid:42:sn:30"), Some((42, "sn:30")));
         assert_eq!(parse_event_callback("eid:-7:del"), Some((-7, "del")));
         assert_eq!(parse_event_callback("eid:5:delyes"), Some((5, "delyes")));
+        assert_eq!(parse_event_callback("eid:42:dis"), Some((42, "dis")));
 
         // Missing prefix, non-numeric id, no action separator.
         assert_eq!(parse_event_callback("ev:1:del"), None);
@@ -940,7 +1017,11 @@ mod tests {
         };
 
         assert_eq!(
-            datas(event_actions_keyboard(42)),
+            datas(event_actions_keyboard(42, true)),
+            ["eid:42:dis", "eid:42:ed", "eid:42:del"]
+        );
+        assert_eq!(
+            datas(event_actions_keyboard(42, false)),
             ["eid:42:ed", "eid:42:del"]
         );
         assert_eq!(
