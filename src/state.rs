@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Local, NaiveDate, NaiveDateTime};
+use chrono::{Duration, Local, Months, NaiveDate, NaiveDateTime};
 
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
@@ -9,7 +9,7 @@ use teloxide::utils::html;
 use crate::error::Result;
 use crate::scheduler;
 use crate::storage::EventStorage;
-use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, TgMessage};
+use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, TgMessage};
 
 /// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
 /// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
@@ -329,6 +329,75 @@ impl EventProvider {
         Ok(DismissOutcome::Dismissed(Box::new(updated)))
     }
 
+    /// Dismisses the *repetition fills* of an event: advances it past every
+    /// consecutive `NextSource::Repetition` occurrence to the next occurrence whose
+    /// source is something else — the next anchor (a yearly short-date `Date` or a
+    /// `MonthlyPattern`). Used by the `/event<id>` "Dismiss repetition" action, which
+    /// is only offered when the current `source` is `Repetition`.
+    ///
+    /// Access-checks `chat_id` like [`dismiss`](Self::dismiss); returns
+    /// [`DismissOutcome::NotFound`]/[`DismissOutcome::Inactive`] the same way.
+    ///
+    /// Only a short date (`date` set, year not explicit) or a `monthly_pattern` can
+    /// ever produce a non-`Repetition` source once repeating; an event with neither
+    /// anchor stays `Repetition` forever, so for those we skip the search and fall
+    /// straight back to the ordinary single-step dismiss. When an anchored event's
+    /// anchor somehow stays out of reach for 100 years, we likewise fall back to the
+    /// single step. Advancing one interval at a time via `calc_next_at(_, prev + 1s)`
+    /// mirrors [`dismiss`], so the fallback is exactly one ordinary dismiss.
+    pub fn dismiss_repetition(&self, id: i64, chat_id: i64) -> Result<DismissOutcome> {
+        let mut inner = self.inner.lock().unwrap();
+        let event = match inner.storage.get_event(id)? {
+            Some(event) if event.chat_id == chat_id => event,
+            _ => return Ok(DismissOutcome::NotFound),
+        };
+        let Some(next_dt) = event.next_datetime else {
+            return Ok(DismissOutcome::Inactive);
+        };
+
+        let has_anchor =
+            (event.date.is_some() && !event.year_explicit) || event.monthly_pattern.is_some();
+
+        // The single-step advance — identical to `dismiss`. Also the fallback when no
+        // non-repetition occurrence is reachable.
+        let fallback = scheduler::calc_next_at(event.clone(), next_dt + Duration::seconds(1));
+
+        let chosen = if !has_anchor {
+            fallback
+        } else {
+            let horizon = next_dt
+                .checked_add_months(Months::new(1200))
+                .unwrap_or(NaiveDateTime::MAX);
+            let mut current = fallback.clone();
+            loop {
+                match current.source {
+                    // Reached the next anchor (or the event went inactive): done.
+                    Some(NextSource::Repetition) => {}
+                    _ => break current,
+                }
+                let Some(cur_dt) = current.next_datetime else {
+                    break current;
+                };
+                if cur_dt > horizon {
+                    break fallback;
+                }
+                current = scheduler::calc_next_at(current, cur_dt + Duration::seconds(1));
+            }
+        };
+
+        inner.storage.update_schedule(
+            id,
+            chosen.active,
+            chosen.next_datetime,
+            chosen.last_next_datetime,
+            chosen.source,
+        )?;
+        Self::load_next_event(&mut inner)?;
+
+        let updated = inner.storage.get_event(id)?.unwrap_or(chosen);
+        Ok(DismissOutcome::Dismissed(Box::new(updated)))
+    }
+
     /// Starts the background polling thread. Reloads events from DB, sends missed events,
     /// then loops every second checking if the nearest event is due.
     ///
@@ -455,6 +524,148 @@ impl EventProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an in-memory provider with a single private chat and a backing
+    /// message row so events (whose `msg_id`/`chat_id` are FKs) can be inserted.
+    fn test_provider(chat_id: i64) -> (EventProvider, i64) {
+        use crate::types::{ChatInfo, ChatType};
+        let storage = EventStorage::open_in_memory().unwrap();
+        let provider = EventProvider::new(storage);
+        provider
+            .upsert_chat(&ChatInfo {
+                id: chat_id,
+                chat_type: ChatType::Private,
+                title: None,
+                username: None,
+                first_name: None,
+                last_name: None,
+                updated_at: None,
+                created_at: None,
+            })
+            .unwrap();
+        let msg_id = provider
+            .insert_message(None, chat_id, "call the office")
+            .unwrap();
+        (provider, msg_id)
+    }
+
+    fn ndt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
+        use chrono::NaiveTime;
+        NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            NaiveTime::from_hms_opt(h, mi, s).unwrap(),
+        )
+    }
+
+    /// A minimal event carrying just chat/message wiring; time fields are set by
+    /// each test.
+    fn base_event(chat_id: i64, msg_id: i64) -> EventInfo {
+        EventInfo {
+            id: 0,
+            chat_id,
+            date: None,
+            time: None,
+            year_explicit: false,
+            days: None,
+            years: None,
+            message: "call the office".to_string(),
+            active: false,
+            next_datetime: None,
+            source: None,
+            last_next_datetime: None,
+            created_at: ndt(2099, 1, 1, 0, 0, 0),
+            repetition: None,
+            in_offset: None,
+            bare_hour: None,
+            monthly_pattern: None,
+            msg_id,
+            legacy: false,
+            snoozed: false,
+        }
+    }
+
+    #[test]
+    fn dismiss_repetition_jumps_to_next_date_anchor() {
+        use crate::types::{Repetition, TimeUnit};
+        use chrono::NaiveTime;
+        let chat_id = 555;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // Short date (no explicit year) + every 2 days: the yearly Nov 5 date is the
+        // anchor, the interval fills between. Mirrors the scheduler's
+        // `play_short_date_with_repetition` data. Far-future `now` keeps the stored
+        // short-date year safely in the past.
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(11, 7, 0);
+        event.date = NaiveDate::from_ymd_opt(2026, 11, 5);
+        event.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+
+        // First schedule → the Nov 5 anchor (source Date).
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2099, 10, 1, 9, 0, 0))
+            .unwrap();
+        assert_eq!(event.next_datetime, Some(ndt(2099, 11, 5, 11, 7, 0)));
+        assert_eq!(event.source, Some(NextSource::Date));
+
+        // Advance once past the anchor → now on a repetition fill (source Repetition).
+        provider
+            .update_at_and_reload(vec![event.clone()], ndt(2099, 11, 5, 11, 7, 1))
+            .unwrap();
+        let stepped = provider.get_event(event.id).unwrap().unwrap();
+        assert_eq!(stepped.next_datetime, Some(ndt(2099, 11, 7, 11, 7, 0)));
+        assert_eq!(stepped.source, Some(NextSource::Repetition));
+
+        // Dismiss repetition → skip the interval fills to the next yearly anchor.
+        match provider.dismiss_repetition(event.id, chat_id).unwrap() {
+            DismissOutcome::Dismissed(updated) => {
+                assert_eq!(updated.next_datetime, Some(ndt(2100, 11, 5, 11, 7, 0)));
+                assert_eq!(updated.source, Some(NextSource::Date));
+                assert!(updated.active);
+            }
+            _ => panic!("expected Dismissed"),
+        }
+    }
+
+    #[test]
+    fn dismiss_repetition_without_anchor_advances_one_step() {
+        use crate::types::{Repetition, TimeUnit};
+        use chrono::NaiveTime;
+        let chat_id = 556;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // Time-only + every 3 days: no anchor, so `source` is Repetition forever.
+        // Dismiss repetition falls back to a single ordinary step.
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(15, 30, 0);
+        event.repetition = Some(Repetition {
+            interval: 3,
+            unit: TimeUnit::Days,
+        });
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2099, 10, 1, 9, 0, 0))
+            .unwrap();
+        let first = event.next_datetime.unwrap();
+
+        match provider.dismiss_repetition(event.id, chat_id).unwrap() {
+            DismissOutcome::Dismissed(updated) => {
+                assert_eq!(updated.next_datetime, Some(first + Duration::days(3)));
+                assert_eq!(updated.source, Some(NextSource::Repetition));
+            }
+            _ => panic!("expected Dismissed"),
+        }
+    }
+
+    #[test]
+    fn dismiss_repetition_rejects_foreign_and_missing() {
+        let (provider, _) = test_provider(1);
+        assert!(matches!(
+            provider.dismiss_repetition(9999, 1).unwrap(),
+            DismissOutcome::NotFound
+        ));
+    }
 
     #[test]
     fn snooze_keyboard_has_a_button_per_option() {

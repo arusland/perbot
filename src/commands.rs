@@ -406,10 +406,11 @@ pub async fn handle_event_view(
         Some(event) if event.chat_id == chat_id.0 => {
             let now = Local::now().naive_local();
             let loc = crate::locale::for_chat(chat_id.0);
+            let is_repetition = event.source == Some(NextSource::Repetition);
             bot.send_html(
                 chat_id,
                 event_detail(&event, now, loc),
-                Some(event_actions_keyboard(id, event.active)),
+                Some(event_actions_keyboard(id, event.active, is_repetition)),
             )
             .await?;
         }
@@ -422,16 +423,28 @@ pub async fn handle_event_view(
 
 /// The action buttons shown under the `/event<id>` detail view: an optional
 /// `⏭ Dismiss` (callback `eid:<id>:dis`, advances past the current occurrence —
-/// only shown when the event is `active`), `✏️ Edit` (callback `eid:<id>:ed`,
-/// starts the edit flow) and `🗑 Delete` (callback `eid:<id>:del`, swaps in the
-/// [`delete_confirm_keyboard`] row).
-fn event_actions_keyboard(event_id: i64, active: bool) -> InlineKeyboardMarkup {
+/// only shown when the event is `active`), an optional `⏩ Dismiss repetition`
+/// (callback `eid:<id>:disr`, skips the interval fills to the next anchor — only
+/// shown when the event is `active` and its current source is `Repetition`),
+/// `✏️ Edit` (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete`
+/// (callback `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
+fn event_actions_keyboard(
+    event_id: i64,
+    active: bool,
+    is_repetition: bool,
+) -> InlineKeyboardMarkup {
     let mut row = Vec::new();
     if active {
         row.push(InlineKeyboardButton::callback(
             "⏭ Dismiss",
             format!("eid:{event_id}:dis"),
         ));
+        if is_repetition {
+            row.push(InlineKeyboardButton::callback(
+                "⏩ Dismiss repetition",
+                format!("eid:{event_id}:disr"),
+            ));
+        }
     }
     row.push(InlineKeyboardButton::callback(
         "✏️ Edit",
@@ -481,7 +494,8 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
 }
 
 /// Dispatches an event-specific callback (`eid:<id>:<action>`) to the matching
-/// handler: dismiss (`dis` → advance past the current occurrence), snooze
+/// handler: dismiss (`dis` → advance past the current occurrence), dismiss
+/// repetition (`disr` → skip the interval fills to the next anchor), snooze
 /// (`sn:<minutes>`), the delete flow (`del` → confirm prompt, `delyes` → delete,
 /// `delno` → restore the action buttons), or the edit flow (`ed` → start editing,
 /// `edno` → cancel editing). Unknown actions are acknowledged and ignored. Routed
@@ -494,6 +508,7 @@ pub async fn handle_event_callback(
 ) -> anyhow::Result<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
         Some((id, "dis")) => handle_dismiss(bot, provider, id, q).await,
+        Some((id, "disr")) => handle_dismiss_repetition(bot, provider, id, q).await,
         Some((id, "del")) => handle_delete_prompt(bot, id, q).await,
         Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, q).await,
         Some((id, "delno")) => handle_delete_cancel(bot, provider, id, q).await,
@@ -541,16 +556,66 @@ async fn handle_dismiss(
                 .await?;
             let loc = crate::locale::for_chat(chat_id.0);
             let text = event_detail(&updated, Local::now().naive_local(), loc);
+            let is_repetition = updated.source == Some(NextSource::Repetition);
             if let Err(e) = bot
                 .edit_html(
                     chat_id,
                     message_id,
                     text.as_str(),
-                    Some(event_actions_keyboard(id, updated.active)),
+                    Some(event_actions_keyboard(id, updated.active, is_repetition)),
                 )
                 .await
             {
                 log::warn!("Failed to refresh dismissed event {id}: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handles the `⏩ Dismiss repetition` press (`eid:<id>:disr`): delegates to
+/// [`EventProvider::dismiss_repetition`] (which skips the event's repetition fills
+/// to the next anchor and access-checks the chat), then re-renders the detail view
+/// in place. Replies with a toast for a missing/foreign id or an already-inactive
+/// event.
+async fn handle_dismiss_repetition(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
+    let Some(message) = q.regular_message() else {
+        bot.answer_callback(q.id, None).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+    let message_id = message.id;
+
+    match provider.dismiss_repetition(id, chat_id.0)? {
+        DismissOutcome::NotFound => {
+            bot.answer_callback(q.id, Some("Event not found.".to_owned()))
+                .await?;
+        }
+        DismissOutcome::Inactive => {
+            bot.answer_callback(q.id, Some("Nothing to dismiss.".to_owned()))
+                .await?;
+        }
+        DismissOutcome::Dismissed(updated) => {
+            bot.answer_callback(q.id, Some("Repetition dismissed.".to_owned()))
+                .await?;
+            let loc = crate::locale::for_chat(chat_id.0);
+            let text = event_detail(&updated, Local::now().naive_local(), loc);
+            let is_repetition = updated.source == Some(NextSource::Repetition);
+            if let Err(e) = bot
+                .edit_html(
+                    chat_id,
+                    message_id,
+                    text.as_str(),
+                    Some(event_actions_keyboard(id, updated.active, is_repetition)),
+                )
+                .await
+            {
+                log::warn!("Failed to refresh dismissed-repetition event {id}: {e}");
             }
         }
     }
@@ -642,12 +707,16 @@ async fn handle_delete_cancel(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
-        let active = provider.get_event(id)?.is_some_and(|e| e.active);
+        let event = provider.get_event(id)?;
+        let active = event.as_ref().is_some_and(|e| e.active);
+        let is_repetition = event
+            .as_ref()
+            .is_some_and(|e| e.source == Some(NextSource::Repetition));
         if let Err(e) = bot
             .edit_markup(
                 message.chat.id,
                 message.id,
-                event_actions_keyboard(id, active),
+                event_actions_keyboard(id, active, is_repetition),
             )
             .await
         {
@@ -994,6 +1063,7 @@ mod tests {
         assert_eq!(parse_event_callback("eid:-7:del"), Some((-7, "del")));
         assert_eq!(parse_event_callback("eid:5:delyes"), Some((5, "delyes")));
         assert_eq!(parse_event_callback("eid:42:dis"), Some((42, "dis")));
+        assert_eq!(parse_event_callback("eid:42:disr"), Some((42, "disr")));
 
         // Missing prefix, non-numeric id, no action separator.
         assert_eq!(parse_event_callback("ev:1:del"), None);
@@ -1017,11 +1087,21 @@ mod tests {
         };
 
         assert_eq!(
-            datas(event_actions_keyboard(42, true)),
+            datas(event_actions_keyboard(42, true, false)),
             ["eid:42:dis", "eid:42:ed", "eid:42:del"]
         );
+        // Active + repetition source → the extra Dismiss-repetition button appears.
         assert_eq!(
-            datas(event_actions_keyboard(42, false)),
+            datas(event_actions_keyboard(42, true, true)),
+            ["eid:42:dis", "eid:42:disr", "eid:42:ed", "eid:42:del"]
+        );
+        assert_eq!(
+            datas(event_actions_keyboard(42, false, false)),
+            ["eid:42:ed", "eid:42:del"]
+        );
+        // Inactive → no dismiss buttons even when the last source was repetition.
+        assert_eq!(
+            datas(event_actions_keyboard(42, false, true)),
             ["eid:42:ed", "eid:42:del"]
         );
         assert_eq!(
