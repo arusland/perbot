@@ -433,28 +433,27 @@ fn event_actions_keyboard(
     active: bool,
     is_repetition: bool,
 ) -> InlineKeyboardMarkup {
-    let mut row = Vec::new();
+    let mut rows = Vec::new();
+    // Dismiss actions get their own first row (only for active events).
     if active {
-        row.push(InlineKeyboardButton::callback(
+        let mut dismiss_row = vec![InlineKeyboardButton::callback(
             "⏭ Dismiss",
             format!("eid:{event_id}:dis"),
-        ));
+        )];
         if is_repetition {
-            row.push(InlineKeyboardButton::callback(
+            dismiss_row.push(InlineKeyboardButton::callback(
                 "⏩ Dismiss repetition",
                 format!("eid:{event_id}:disr"),
             ));
         }
+        rows.push(dismiss_row);
     }
-    row.push(InlineKeyboardButton::callback(
-        "✏️ Edit",
-        format!("eid:{event_id}:ed"),
-    ));
-    row.push(InlineKeyboardButton::callback(
-        "🗑 Delete",
-        format!("eid:{event_id}:del"),
-    ));
-    InlineKeyboardMarkup::new(vec![row])
+    // Edit / Delete are always present, on their own row.
+    rows.push(vec![
+        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
+        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del")),
+    ]);
+    InlineKeyboardMarkup::new(rows)
 }
 
 /// The single Cancel button shown while the chat is editing an event (callback
@@ -1118,6 +1117,37 @@ mod tests {
             ["eid:42:delyes", "eid:42:delno"]
         );
         assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
+
+        // Row layout: dismiss actions sit on their own first row, Edit/Delete
+        // on the second. Inactive events drop the dismiss row entirely.
+        let rows = |kb: InlineKeyboardMarkup| -> Vec<Vec<String>> {
+            kb.inline_keyboard
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|b| match &b.kind {
+                            CallbackData(d) => d.clone(),
+                            _ => panic!("expected callback data"),
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows(event_actions_keyboard(42, true, true)),
+            vec![
+                vec!["eid:42:dis", "eid:42:disr"],
+                vec!["eid:42:ed", "eid:42:del"],
+            ]
+        );
+        assert_eq!(
+            rows(event_actions_keyboard(42, true, false)),
+            vec![vec!["eid:42:dis"], vec!["eid:42:ed", "eid:42:del"]]
+        );
+        assert_eq!(
+            rows(event_actions_keyboard(42, false, false)),
+            vec![vec!["eid:42:ed", "eid:42:del"]]
+        );
     }
 
     #[test]
