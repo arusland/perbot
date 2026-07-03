@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Local, Months, NaiveDate, NaiveDateTime};
@@ -32,6 +31,11 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
 /// the message text.
 const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
+/// How many missed events `move_missed_events` fetches and reschedules per
+/// batch — the upper bound on how much of the missed backlog is ever held in
+/// memory at once.
+const MISSED_MOVE_BATCH: usize = 100;
+
 /// Inline keyboard attached to a fired reminder, offering to re-send it after a
 /// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
 /// `<id>` is the fired event's DB id (used to load the event when pressed).
@@ -55,11 +59,6 @@ struct EventProviderState {
     storage: EventStorage,
     /// Next event to be processed. Stored in memory for efficiency.
     next_event: Option<EventInfo>,
-    /// Per-chat snapshot of the event ids that were missed at startup, in display
-    /// order. Captured in `start()` before the missed events are rescheduled (which
-    /// would otherwise make them un-queryable), so the missed-events list can be
-    /// paged after the fact. In-memory only; empty on a fresh restart.
-    missed_snapshot: HashMap<i64, Vec<i64>>,
 }
 
 /// Result of an [`EventProvider::dismiss`] request.
@@ -91,7 +90,6 @@ impl EventProvider {
             inner: Arc::new(Mutex::new(EventProviderState {
                 storage,
                 next_event: None,
-                missed_snapshot: HashMap::new(),
             })),
         }
     }
@@ -120,44 +118,45 @@ impl EventProvider {
         inner.storage.insert_message(&msg)
     }
 
-    /// Returns missed events (active events whose datetime is in the past).
-    pub fn get_missed_events(&self) -> Result<Vec<EventInfo>> {
-        let inner = self.inner.lock().unwrap();
-        let now = Local::now().naive_local();
-        inner.storage.get_missed_events(now)
+    /// Moves the missed backlog (active events whose datetime is in the past)
+    /// into the `missed_events` helper table, one batch at a time: each batch's
+    /// ids are recorded, then the batch is rescheduled (which removes it from
+    /// the missed predicate, so the next fetch returns the next batch). Only
+    /// one batch is ever held in memory. Returns the number of events moved.
+    /// Callers clear the table first (see `start()`).
+    pub fn move_missed_events(&self) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let mut inner = self.inner.lock().unwrap();
+            let now = Local::now().naive_local();
+            let batch = inner.storage.get_missed_events(now, MISSED_MOVE_BATCH)?;
+            if batch.is_empty() {
+                return Ok(total);
+            }
+            let ids: Vec<i64> = batch.iter().map(|e| e.id).collect();
+            inner.storage.insert_missed_events(&ids)?;
+            total += batch.len();
+            Self::update_at_and_reload_locked(&mut inner, batch, now)?;
+        }
     }
 
-    /// Returns one page of the events recorded in the startup missed snapshot for
-    /// `chat_id`, reloaded from storage (so they reflect their current,
-    /// post-reschedule state), plus the snapshot's total size (for page-count
-    /// math). Only the page's ids are loaded; ids deleted since startup are
-    /// skipped (which can leave a page short — the snapshot is not re-counted).
-    /// Empty when the chat had no missed events. Backs the missed-events list's
-    /// page-turn callbacks.
+    /// Returns one page of the events recorded in the startup missed snapshot
+    /// (the `missed_events` table) for `chat_id`, in missed order and reflecting
+    /// their current, post-reschedule state, plus the snapshot's total size (for
+    /// page-count math). Paging happens in SQL; events deleted since startup
+    /// drop out of both the page and the total. Empty when the chat had no
+    /// missed events. Backs the missed-events list's page-turn callbacks.
     pub fn get_missed_snapshot_events(
         &self,
         chat_id: i64,
         page: PageRequest,
     ) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
-        let Some(ids) = inner.missed_snapshot.get(&chat_id) else {
-            return Ok(PageResponse {
-                events: Vec::new(),
-                total: 0,
-            });
-        };
-        let total = ids.len();
-        let start = page.offset().min(total);
-        let end = (start + page.size).min(total);
-        // Direct storage calls (not `self.get_event`, which would re-lock the
-        // non-reentrant mutex); ids removed since the snapshot read back as `None`
-        // and are skipped, while a real query failure propagates.
-        let mut events = Vec::new();
-        for id in &ids[start..end] {
-            if let Some(event) = inner.storage.get_event(*id)? {
-                events.push(event);
-            }
-        }
+        let total = inner.storage.count_missed_snapshot_by_chat(chat_id)?;
+        let events =
+            inner
+                .storage
+                .get_missed_snapshot_by_chat(chat_id, page.size, page.offset())?;
         Ok(PageResponse { events, total })
     }
 
@@ -323,6 +322,17 @@ impl EventProvider {
     /// Recalculates all given events and reloads the next event from DB.
     pub fn update_at_and_reload(&self, events: Vec<EventInfo>, now: NaiveDateTime) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
+        Self::update_at_and_reload_locked(&mut inner, events, now)
+    }
+
+    /// [`update_at_and_reload`](Self::update_at_and_reload) body operating on an
+    /// already-locked inner (the mutex is non-reentrant), for callers that hold
+    /// the lock across surrounding storage work (`move_missed_events`).
+    fn update_at_and_reload_locked(
+        inner: &mut EventProviderState,
+        events: Vec<EventInfo>,
+        now: NaiveDateTime,
+    ) -> Result<()> {
         for event in events {
             let event_id = event.id;
             let next = scheduler::calc_next_at(event, now);
@@ -334,7 +344,7 @@ impl EventProvider {
                 next.source,
             )?;
         }
-        Self::load_next_event(&mut inner)?;
+        Self::load_next_event(inner)?;
         Ok(())
     }
 
@@ -447,61 +457,48 @@ impl EventProvider {
     /// (notify the admin, don't start the bot). Once the polling thread is running, its
     /// per-tick errors are logged in place (it has no caller to return them to).
     pub fn start(&self, msg_tx: MessageSender) -> Result<()> {
-        // Initial reload and send missed events
+        // Initial reload and send missed events: record the missed backlog in
+        // the missed_events table batch by batch (never whole in memory),
+        // rescheduling each batch as it is recorded, then send each chat its
+        // first missed-list page read back from the table.
         {
-            let missed = self.get_missed_events()?;
-            if !missed.is_empty() {
-                log::info!("Sending {} missed event(s)", missed.len());
-
-                // Group the missed events per chat (already ordered by
-                // next_datetime, so per-chat order is preserved).
-                let mut events_by_chat: HashMap<i64, Vec<EventInfo>> = HashMap::new();
-                for event in &missed {
-                    events_by_chat
-                        .entry(event.chat_id)
-                        .or_default()
-                        .push(event.clone());
-                }
-
-                // Snapshot the missed ids per chat so the list can be paged later,
-                // after these events are rescheduled below (which makes them
-                // un-queryable via get_missed_events).
-                {
-                    let mut inner = self.inner.lock().unwrap();
-                    inner.missed_snapshot = events_by_chat
-                        .iter()
-                        .map(|(chat_id, events)| (*chat_id, events.iter().map(|e| e.id).collect()))
-                        .collect();
-                }
+            {
+                let inner = self.inner.lock().unwrap();
+                inner.storage.clear_missed_events()?;
+            }
+            let moved = self.move_missed_events()?;
+            if moved > 0 {
+                log::info!("Sending {} missed event(s)", moved);
 
                 let now = Local::now().naive_local();
-                let messages: Vec<TgMessage> = events_by_chat
-                    .into_iter()
-                    .map(|(chat_id, events)| {
-                        let loc = crate::locale::for_chat(chat_id);
-                        // Page 0 only; page turns re-fetch via the snapshot.
-                        let first_page =
-                            &events[..events.len().min(crate::telegram::LIST_PAGE_SIZE)];
-                        let (text, reply_markup) = crate::commands::format_missed_page(
-                            first_page,
-                            events.len(),
-                            now,
-                            0,
-                            loc,
-                        );
-                        TgMessage {
-                            chat_id,
-                            text,
-                            reply_markup,
-                        }
-                    })
-                    .collect();
+                let chat_ids = {
+                    let inner = self.inner.lock().unwrap();
+                    inner.storage.get_missed_chat_ids()?
+                };
+                let mut messages = Vec::with_capacity(chat_ids.len());
+                for chat_id in chat_ids {
+                    // Page 0 only; page turns re-fetch via the missed_events table.
+                    let page = self.get_missed_snapshot_events(
+                        chat_id,
+                        PageRequest {
+                            page: 0,
+                            size: crate::telegram::LIST_PAGE_SIZE,
+                        },
+                    )?;
+                    let loc = crate::locale::for_chat(chat_id);
+                    let (text, reply_markup) =
+                        crate::commands::format_missed_page(&page.events, page.total, now, 0, loc);
+                    messages.push(TgMessage {
+                        chat_id,
+                        text,
+                        reply_markup,
+                    });
+                }
 
                 if let Err(e) = msg_tx.send(messages) {
                     log::error!("Failed to queue missed messages: {}", e);
                 }
             }
-            self.update_and_reload(missed)?;
         }
 
         // Polling loop
@@ -782,5 +779,109 @@ mod tests {
             };
             assert_eq!(data, &format!("eid:42:sn:{minutes}"));
         }
+    }
+
+    #[test]
+    fn start_clears_stale_snapshot_and_sends_missed_list() {
+        use chrono::NaiveTime;
+        let chat_id = 888;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // A future event recorded in missed_events, simulating leftovers from a
+        // previous run — startup must clear it before re-recording.
+        let mut future = base_event(chat_id, msg_id);
+        future.time = NaiveTime::from_hms_opt(10, 0, 0);
+        future.date = NaiveDate::from_ymd_opt(2099, 1, 1);
+        future.year_explicit = true;
+        let future = provider.insert_event_and_get(future).unwrap();
+        {
+            let inner = provider.inner.lock().unwrap();
+            inner.storage.insert_missed_events(&[future.id]).unwrap();
+        }
+
+        // One genuinely missed event (past due relative to the real clock).
+        let mut past = base_event(chat_id, msg_id);
+        past.time = NaiveTime::from_hms_opt(10, 0, 0);
+        past.date = NaiveDate::from_ymd_opt(2020, 5, 1);
+        past.year_explicit = true;
+        let past = provider
+            .insert_event_and_get_at(past, ndt(2020, 1, 1, 0, 0, 0))
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        provider.start(tx).unwrap();
+
+        // The missed-list message was queued synchronously during startup.
+        let messages = rx.try_recv().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].chat_id, chat_id);
+        assert!(messages[0].text.contains(&format!("/event{}", past.id)));
+        assert!(!messages[0].text.contains(&format!("/event{}", future.id)));
+
+        // The snapshot holds only the freshly missed event.
+        let page = provider
+            .get_missed_snapshot_events(chat_id, PageRequest { page: 0, size: 10 })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.events[0].id, past.id);
+    }
+
+    #[test]
+    fn move_missed_events_records_reschedules_and_pages_in_missed_order() {
+        use chrono::NaiveTime;
+        let chat_id = 777;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // Three one-off full-date events, all past due relative to the real
+        // clock (move_missed_events uses Local::now()). Inserted out of missed
+        // order to prove the snapshot orders by next_datetime, not insertion.
+        let insert_past = |y: i32, m: u32, d: u32| {
+            let mut event = base_event(chat_id, msg_id);
+            event.time = NaiveTime::from_hms_opt(10, 0, 0);
+            event.date = NaiveDate::from_ymd_opt(y, m, d);
+            event.year_explicit = true;
+            provider
+                .insert_event_and_get_at(event, ndt(2020, 1, 1, 0, 0, 0))
+                .unwrap()
+        };
+        let june = insert_past(2020, 6, 1);
+        let may = insert_past(2020, 5, 1);
+        let july = insert_past(2020, 7, 1);
+
+        let moved = provider.move_missed_events().unwrap();
+        assert_eq!(moved, 3);
+
+        // One-off past events reschedule to inactive; nothing is missed anymore.
+        for event in [&may, &june, &july] {
+            let stored = provider.get_event(event.id).unwrap().unwrap();
+            assert!(!stored.active);
+            assert!(stored.next_datetime.is_none());
+        }
+        assert_eq!(provider.move_missed_events().unwrap(), 0);
+
+        // The snapshot pages back in missed (next_datetime) order with the
+        // full total on every page.
+        let page0 = provider
+            .get_missed_snapshot_events(chat_id, PageRequest { page: 0, size: 2 })
+            .unwrap();
+        let page1 = provider
+            .get_missed_snapshot_events(chat_id, PageRequest { page: 1, size: 2 })
+            .unwrap();
+        assert_eq!(page0.total, 3);
+        assert_eq!(page1.total, 3);
+        let ids: Vec<i64> = page0
+            .events
+            .iter()
+            .chain(page1.events.iter())
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec![may.id, june.id, july.id]);
+
+        // Other chats see an empty snapshot.
+        let other = provider
+            .get_missed_snapshot_events(chat_id + 1, PageRequest { page: 0, size: 2 })
+            .unwrap();
+        assert_eq!(other.total, 0);
+        assert!(other.events.is_empty());
     }
 }

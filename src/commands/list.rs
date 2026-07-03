@@ -23,7 +23,8 @@ const NOOP_DATA: &str = "noop";
 ///
 /// `Missed` is not a user-typed command: it is reached only by the startup
 /// missed-events send and its `ms:<page>` page-turn callbacks. Its events come
-/// from an in-memory startup snapshot (see [`EventProvider::get_missed_snapshot_events`]).
+/// from the `missed_events` snapshot table populated at startup (see
+/// [`EventProvider::get_missed_snapshot_events`]).
 #[derive(Clone, Copy)]
 pub(super) enum ListKind {
     Events,

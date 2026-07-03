@@ -178,6 +178,23 @@ impl EventStorage {
             [],
         )?;
 
+        // Helper table recording the event ids that were missed at the last
+        // startup, in missed (next_datetime) order — rescheduling wipes their
+        // old next_datetime, so this is what keeps the missed list pageable.
+        // Cleared at every startup before being repopulated.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS missed_events (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missed_events_event_id ON missed_events(event_id)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -502,17 +519,89 @@ impl EventStorage {
         }
     }
 
-    /// Returns all active events whose `next_datetime` is before `now` (missed events).
-    pub fn get_missed_events(&self, now: NaiveDateTime) -> Result<Vec<EventInfo>> {
+    /// Returns up to `limit` active events whose `next_datetime` is before `now`
+    /// (missed events), earliest first. Callers batch through the backlog by
+    /// rescheduling each batch (which removes it from this predicate) and
+    /// fetching again — no offset needed.
+    pub fn get_missed_events(&self, now: NaiveDateTime, limit: usize) -> Result<Vec<EventInfo>> {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
              FROM events WHERE active = 1 AND next_datetime < ?1
-             ORDER BY next_datetime ASC",
+             ORDER BY next_datetime ASC LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![now_str], Self::row_to_event)?;
+        let rows = stmt.query_map(params![now_str, limit as i64], Self::row_to_event)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Empties the `missed_events` helper table. Called once at startup before
+    /// the missed backlog is re-recorded.
+    pub fn clear_missed_events(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM missed_events", [])?;
+        Ok(())
+    }
+
+    /// Records a batch of missed event ids in the `missed_events` table.
+    /// Insertion order is preserved by the autoincrement `id`, so callers must
+    /// pass ids in display (missed) order.
+    pub fn insert_missed_events(&self, event_ids: &[i64]) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO missed_events (event_id) VALUES (?1)")?;
+        for id in event_ids {
+            stmt.execute(params![id])?;
+        }
+        Ok(())
+    }
+
+    /// Returns the distinct chat ids that have events recorded in
+    /// `missed_events`.
+    pub fn get_missed_chat_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT e.chat_id FROM missed_events m
+             JOIN events e ON e.id = m.event_id
+             ORDER BY e.chat_id",
+        )?;
+
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Counts the recorded missed events for a chat (events deleted since the
+    /// snapshot drop out via the join/cascade).
+    pub fn count_missed_snapshot_by_chat(&self, chat_id: i64) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM missed_events m
+             JOIN events e ON e.id = m.event_id
+             WHERE e.chat_id = ?1",
+            params![chat_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Returns one page of a chat's recorded missed events in the order they
+    /// were missed (insertion order of `missed_events`).
+    pub fn get_missed_snapshot_by_chat(
+        &self,
+        chat_id: i64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EventInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.chat_id, e.date, e.time, e.year_explicit, e.message, e.active, e.next_datetime, e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, e.legacy, e.snoozed, e.last_next_datetime, e.source
+             FROM missed_events m
+             JOIN events e ON e.id = m.event_id
+             WHERE e.chat_id = ?1
+             ORDER BY m.id ASC LIMIT ?2 OFFSET ?3",
+        )?;
+
+        let rows = stmt.query_map(
+            params![chat_id, limit as i64, offset as i64],
+            Self::row_to_event,
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1422,10 +1511,15 @@ mod tests {
             .unwrap();
 
         let now = dt(2027, 1, 1, 0, 0);
-        let missed = storage.get_missed_events(now).unwrap();
+        let missed = storage.get_missed_events(now, 10).unwrap();
         let ids: Vec<i64> = missed.iter().map(|e| e.id).collect();
         // Only the two past events, ordered by next_datetime ascending.
         assert_eq!(ids, vec![past_early, past_late]);
+
+        // The limit caps the batch, keeping the earliest.
+        let capped = storage.get_missed_events(now, 1).unwrap();
+        let ids: Vec<i64> = capped.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![past_early]);
     }
 
     #[test]
@@ -1439,8 +1533,84 @@ mod tests {
             .unwrap();
         storage.mark_inactive(id).unwrap();
 
-        let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0)).unwrap();
+        let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0), 10).unwrap();
         assert!(missed.is_empty());
+    }
+
+    #[test]
+    fn test_missed_events_table_pages_per_chat_in_insertion_order() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        ensure_chat(&storage, 2);
+        let msg1 = ensure_message(&storage, 1);
+        let msg2 = ensure_message(&storage, 2);
+
+        let a = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 1, 1, 10, 0)))
+            .unwrap();
+        let b = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 2, 1, 10, 0)))
+            .unwrap();
+        let c = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 3, 1, 10, 0)))
+            .unwrap();
+        let other = storage
+            .insert_event(&event_at(2, msg2, dt(2026, 1, 15, 10, 0)))
+            .unwrap();
+
+        storage.insert_missed_events(&[a, other]).unwrap();
+        storage.insert_missed_events(&[b, c]).unwrap();
+
+        assert_eq!(storage.get_missed_chat_ids().unwrap(), vec![1, 2]);
+        assert_eq!(storage.count_missed_snapshot_by_chat(1).unwrap(), 3);
+        assert_eq!(storage.count_missed_snapshot_by_chat(2).unwrap(), 1);
+
+        // Pages keep insertion order and never mix chats.
+        let page0: Vec<i64> = storage
+            .get_missed_snapshot_by_chat(1, 2, 0)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        let page1: Vec<i64> = storage
+            .get_missed_snapshot_by_chat(1, 2, 2)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(page0, vec![a, b]);
+        assert_eq!(page1, vec![c]);
+    }
+
+    #[test]
+    fn test_missed_events_table_clear_and_cascade_delete() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        let msg = ensure_message(&storage, 1);
+
+        let a = storage
+            .insert_event(&event_at(1, msg, dt(2026, 1, 1, 10, 0)))
+            .unwrap();
+        let b = storage
+            .insert_event(&event_at(1, msg, dt(2026, 2, 1, 10, 0)))
+            .unwrap();
+        storage.insert_missed_events(&[a, b]).unwrap();
+
+        // Deleting the event removes it from the missed list (cascade), so the
+        // count and the page shrink together.
+        assert!(storage.delete(a).unwrap());
+        assert_eq!(storage.count_missed_snapshot_by_chat(1).unwrap(), 1);
+        let ids: Vec<i64> = storage
+            .get_missed_snapshot_by_chat(1, 10, 0)
+            .unwrap()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec![b]);
+
+        storage.clear_missed_events().unwrap();
+        assert_eq!(storage.count_missed_snapshot_by_chat(1).unwrap(), 0);
+        assert!(storage.get_missed_chat_ids().unwrap().is_empty());
     }
 
     #[test]
