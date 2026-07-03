@@ -207,6 +207,35 @@ pub struct MessageInfo {
     pub message: String,
 }
 
+/// One page of a paginated list query: the zero-based page index and the page
+/// size. Passed to the `EventProvider` list methods, which translate it to SQL
+/// `LIMIT`/`OFFSET` so large lists never load whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRequest {
+    pub page: usize,
+    pub size: usize,
+}
+
+impl PageRequest {
+    pub fn new(page: usize, size: usize) -> Self {
+        Self { page, size }
+    }
+
+    /// Number of rows before this page (the SQL `OFFSET`).
+    pub fn offset(self) -> usize {
+        self.page * self.size
+    }
+}
+
+/// One page of a paginated list query's result: the page's events plus the
+/// list's total size (for page-count math). Returned by the `EventProvider`
+/// list methods.
+#[derive(Debug, Clone)]
+pub struct PageResponse {
+    pub events: Vec<EventInfo>,
+    pub total: usize,
+}
+
 /// Chat type enumeration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatType {

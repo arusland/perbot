@@ -9,7 +9,10 @@ use teloxide::utils::html;
 use crate::error::Result;
 use crate::scheduler;
 use crate::storage::EventStorage;
-use crate::types::{ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, TgMessage};
+use crate::types::{
+    ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, PageRequest, PageResponse,
+    TgMessage,
+};
 
 /// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
 /// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
@@ -124,25 +127,38 @@ impl EventProvider {
         inner.storage.get_missed_events(now)
     }
 
-    /// Returns the events recorded in the startup missed snapshot for `chat_id`,
-    /// reloaded from storage (so they reflect their current, post-reschedule state).
-    /// Ids deleted since startup are skipped. Empty when the chat had no missed
-    /// events. Backs the missed-events list's page-turn callbacks.
-    pub fn get_missed_snapshot_events(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
+    /// Returns one page of the events recorded in the startup missed snapshot for
+    /// `chat_id`, reloaded from storage (so they reflect their current,
+    /// post-reschedule state), plus the snapshot's total size (for page-count
+    /// math). Only the page's ids are loaded; ids deleted since startup are
+    /// skipped (which can leave a page short — the snapshot is not re-counted).
+    /// Empty when the chat had no missed events. Backs the missed-events list's
+    /// page-turn callbacks.
+    pub fn get_missed_snapshot_events(
+        &self,
+        chat_id: i64,
+        page: PageRequest,
+    ) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
-        let Some(ids) = inner.missed_snapshot.get(&chat_id).cloned() else {
-            return Ok(Vec::new());
+        let Some(ids) = inner.missed_snapshot.get(&chat_id) else {
+            return Ok(PageResponse {
+                events: Vec::new(),
+                total: 0,
+            });
         };
+        let total = ids.len();
+        let start = page.offset().min(total);
+        let end = (start + page.size).min(total);
         // Direct storage calls (not `self.get_event`, which would re-lock the
         // non-reentrant mutex); ids removed since the snapshot read back as `None`
         // and are skipped, while a real query failure propagates.
         let mut events = Vec::new();
-        for id in ids {
-            if let Some(event) = inner.storage.get_event(id)? {
+        for id in &ids[start..end] {
+            if let Some(event) = inner.storage.get_event(*id)? {
                 events.push(event);
             }
         }
-        Ok(events)
+        Ok(PageResponse { events, total })
     }
 
     /// Returns the nearest active event, if any.
@@ -157,33 +173,58 @@ impl EventProvider {
         inner.storage.get_event(id)
     }
 
-    /// Returns active events for a chat, ordered by next datetime.
-    pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
+    /// Returns one page of the active events for a chat (ordered by next
+    /// datetime) plus the total number of active events. Paging happens in SQL,
+    /// so only `page.size` rows are ever loaded; the count and the page read
+    /// the same locked storage, so they are consistent with each other.
+    pub fn get_active_by_chat(&self, chat_id: i64, page: PageRequest) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
-        inner.storage.get_active_by_chat(chat_id)
+        let total = inner.storage.count_active_by_chat(chat_id)?;
+        let events = inner
+            .storage
+            .get_active_by_chat(chat_id, page.size, page.offset())?;
+        Ok(PageResponse { events, total })
     }
 
-    /// Returns active events for a chat scheduled on the given date, ordered by next datetime.
+    /// Returns one page of the active events for a chat scheduled on the given
+    /// date plus the day's total (see [`get_active_by_chat`](Self::get_active_by_chat)).
     pub fn get_active_by_chat_on_date(
         &self,
         chat_id: i64,
         date: NaiveDate,
-    ) -> Result<Vec<EventInfo>> {
+        page: PageRequest,
+    ) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
-        inner.storage.get_active_by_chat_on_date(chat_id, date)
+        let total = inner.storage.count_active_by_chat_on_date(chat_id, date)?;
+        let events =
+            inner
+                .storage
+                .get_active_by_chat_on_date(chat_id, date, page.size, page.offset())?;
+        Ok(PageResponse { events, total })
     }
 
-    /// Returns active events for a chat scheduled within `[start, end)`, ordered by next datetime.
+    /// Returns one page of the active events for a chat scheduled within
+    /// `[start, end)` plus the range's total (see
+    /// [`get_active_by_chat`](Self::get_active_by_chat)).
     pub fn get_active_by_chat_in_range(
         &self,
         chat_id: i64,
         start: NaiveDate,
         end: NaiveDate,
-    ) -> Result<Vec<EventInfo>> {
+        page: PageRequest,
+    ) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
-        inner
+        let total = inner
             .storage
-            .get_active_by_chat_in_range(chat_id, start, end)
+            .count_active_by_chat_in_range(chat_id, start, end)?;
+        let events = inner.storage.get_active_by_chat_in_range(
+            chat_id,
+            start,
+            end,
+            page.size,
+            page.offset(),
+        )?;
+        Ok(PageResponse { events, total })
     }
 
     /// Returns all active events scheduled at the given datetime.
@@ -438,8 +479,16 @@ impl EventProvider {
                     .into_iter()
                     .map(|(chat_id, events)| {
                         let loc = crate::locale::for_chat(chat_id);
-                        let (text, reply_markup) =
-                            crate::commands::format_missed_page(&events, now, 0, loc);
+                        // Page 0 only; page turns re-fetch via the snapshot.
+                        let first_page =
+                            &events[..events.len().min(crate::telegram::LIST_PAGE_SIZE)];
+                        let (text, reply_markup) = crate::commands::format_missed_page(
+                            first_page,
+                            events.len(),
+                            now,
+                            0,
+                            loc,
+                        );
                         TgMessage {
                             chat_id,
                             text,
@@ -656,6 +705,49 @@ mod tests {
             }
             _ => panic!("expected Dismissed"),
         }
+    }
+
+    #[test]
+    fn get_active_by_chat_pages_in_storage() {
+        use chrono::NaiveTime;
+        let chat_id = 557;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // Twelve one-off events, one hour apart.
+        for hour in 0..12 {
+            let mut event = base_event(chat_id, msg_id);
+            event.date = NaiveDate::from_ymd_opt(2099, 5, 20);
+            event.year_explicit = true;
+            event.time = NaiveTime::from_hms_opt(hour, 0, 0);
+            provider
+                .insert_event_and_get_at(event, ndt(2099, 1, 1, 0, 0, 0))
+                .unwrap();
+        }
+
+        let page0 = provider
+            .get_active_by_chat(chat_id, PageRequest::new(0, 10))
+            .unwrap();
+        assert_eq!(page0.total, 12);
+        assert_eq!(page0.events.len(), 10);
+        assert_eq!(
+            page0.events[0].next_datetime,
+            Some(ndt(2099, 5, 20, 0, 0, 0))
+        );
+
+        let page1 = provider
+            .get_active_by_chat(chat_id, PageRequest::new(1, 10))
+            .unwrap();
+        assert_eq!(page1.total, 12);
+        assert_eq!(page1.events.len(), 2);
+        assert_eq!(
+            page1.events[1].next_datetime,
+            Some(ndt(2099, 5, 20, 11, 0, 0))
+        );
+
+        let page2 = provider
+            .get_active_by_chat(chat_id, PageRequest::new(2, 10))
+            .unwrap();
+        assert!(page2.events.is_empty());
     }
 
     #[test]

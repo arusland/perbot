@@ -9,7 +9,7 @@ use crate::state::EventProvider;
 use crate::telegram::RowStyle;
 use crate::telegram::{LIST_PAGE_SIZE, format_page_at};
 use crate::tgbot::TgBot;
-use crate::types::EventInfo;
+use crate::types::{EventInfo, PageRequest, PageResponse};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup};
 
@@ -97,26 +97,34 @@ impl ListKind {
         }
     }
 
-    /// Fetches the events for this list. Date ranges are computed relative to
-    /// "now", so paging recomputes them (a page turn across midnight reflects the
-    /// then-current day/week/month). `Missed` reads the startup snapshot instead.
-    fn fetch(self, provider: &EventProvider, chat_id: i64) -> crate::error::Result<Vec<EventInfo>> {
+    /// Fetches one page of this list's events plus the list's total size (the
+    /// storage layer pages in SQL, so large lists never load whole). Date ranges
+    /// are computed relative to "now", so paging recomputes them (a page turn
+    /// across midnight reflects the then-current day/week/month). `Missed` reads
+    /// the startup snapshot instead.
+    fn fetch(
+        self,
+        provider: &EventProvider,
+        chat_id: i64,
+        page: usize,
+    ) -> crate::error::Result<PageResponse> {
+        let page = PageRequest::new(page, LIST_PAGE_SIZE);
         match self {
-            ListKind::Events => provider.get_active_by_chat(chat_id),
-            ListKind::Missed => provider.get_missed_snapshot_events(chat_id),
+            ListKind::Events => provider.get_active_by_chat(chat_id, page),
+            ListKind::Missed => provider.get_missed_snapshot_events(chat_id, page),
             ListKind::Today => {
                 let today = Local::now().naive_local().date();
-                provider.get_active_by_chat_on_date(chat_id, today)
+                provider.get_active_by_chat_on_date(chat_id, today, page)
             }
             ListKind::Tomorrow => {
                 let tomorrow = Local::now().naive_local().date() + Duration::days(1);
-                provider.get_active_by_chat_on_date(chat_id, tomorrow)
+                provider.get_active_by_chat_on_date(chat_id, tomorrow, page)
             }
             ListKind::Week => {
                 let today = Local::now().naive_local().date();
                 let start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
                 let end = start + Duration::days(7);
-                provider.get_active_by_chat_in_range(chat_id, start, end)
+                provider.get_active_by_chat_in_range(chat_id, start, end, page)
             }
             ListKind::Month => {
                 let today = Local::now().naive_local().date();
@@ -128,7 +136,7 @@ impl ListKind {
                     (today.year(), today.month() + 1)
                 };
                 let end = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(start);
-                provider.get_active_by_chat_in_range(chat_id, start, end)
+                provider.get_active_by_chat_in_range(chat_id, start, end, page)
             }
         }
     }
@@ -168,19 +176,22 @@ fn list_keyboard(kind: ListKind, page: usize, total_pages: usize) -> Option<Inli
 
 /// Renders one page of the missed-events list: the preview-only HTML body
 /// ([`RowStyle::PreviewLink`]) plus the navigation keyboard (`None` when it fits
-/// on a single page). Used by `state.rs` to build the startup missed-events
-/// message; page turns reuse [`handle_list_callback`] via the `ms` tag.
+/// on a single page). `page_events` holds only the rows of `page`; `total` is
+/// the whole list's length. Used by `state.rs` to build the startup
+/// missed-events message; page turns reuse [`handle_list_callback`] via the
+/// `ms` tag.
 pub fn format_missed_page(
-    events: &[EventInfo],
+    page_events: &[EventInfo],
+    total: usize,
     now: chrono::NaiveDateTime,
     page: usize,
     loc: &dyn LocaleProvider,
 ) -> (String, Option<InlineKeyboardMarkup>) {
     let kind = ListKind::Missed;
     let (text, total_pages) = format_page_at(
-        events,
+        page_events,
+        total,
         now,
-        page,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
@@ -193,12 +204,12 @@ pub fn format_missed_page(
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
 pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
-    let events = kind.fetch(ctx.provider, ctx.chat_id.0)?;
+    let PageResponse { events, total } = kind.fetch(ctx.provider, ctx.chat_id.0, 0)?;
     let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
+        total,
         Local::now().naive_local(),
-        0,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
@@ -221,14 +232,14 @@ pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow:
             "Failed to send /{} reply to chat {}: {e} ({} events, {} chars).",
             kind.tag(),
             ctx.chat_id.0,
-            events.len(),
+            total,
             text.chars().count(),
         );
         let warning = format!(
             "Failed to send /{} reply to chat {}: {e} ({} events, {} chars).",
             kind.tag(),
             ctx.chat_id.0,
-            events.len(),
+            total,
             text.chars().count(),
         );
         if let Err(warn_err) = ctx.bot.send_text(ctx.admin_id, warning, None).await {
@@ -263,19 +274,28 @@ pub async fn handle_list_callback(
     let chat_id = message.chat.id;
     let message_id = message.id;
 
-    let events = kind.fetch(provider, chat_id.0)?;
+    let PageResponse { events, total } = kind.fetch(provider, chat_id.0, page)?;
+    // The requested page can fall past the end when events were removed since
+    // the keyboard was rendered; clamp to the (then-current) last page and
+    // refetch it.
+    let pages = crate::telegram::total_pages(total, LIST_PAGE_SIZE);
+    let (events, page) = if page >= pages {
+        let page = pages - 1;
+        (kind.fetch(provider, chat_id.0, page)?.events, page)
+    } else {
+        (events, page)
+    };
     let loc = crate::locale::for_chat(chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
+        total,
         Local::now().naive_local(),
-        page,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
         kind.row_style(),
         loc,
     );
-    let page = page.min(total_pages.saturating_sub(1));
 
     if let Err(e) = bot
         .edit_html(
@@ -374,7 +394,7 @@ mod tests {
         );
         event.id = 7;
 
-        let (text, keyboard) = format_missed_page(&[event], now, 0, &EN);
+        let (text, keyboard) = format_missed_page(&[event], 1, now, 0, &EN);
         assert!(text.starts_with("<b>Missed events:</b>\n"));
         assert!(text.contains("/event7"));
         // One event → single page → no navigation keyboard.

@@ -1,7 +1,7 @@
 use crate::locale::LocaleProvider;
 use crate::scheduler;
 use crate::types::{ChatInfo, ChatType, EventInfo, MonthlyPattern};
-use chrono::{Local, NaiveDateTime, Weekday};
+use chrono::{NaiveDateTime, Weekday};
 use std::fmt::Write as _;
 use teloxide::utils::html;
 
@@ -359,58 +359,35 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
     len.div_ceil(per_page).max(1)
 }
 
-/// Builds the HTML reply for a single page of an event list.
+/// Builds the HTML reply for one already-fetched page of an event list.
 ///
-/// `title` is the bare heading (e.g. `"Upcoming events"`), rendered as-is; the
-/// page position is surfaced by the navigation keyboard's indicator button, not in
-/// the title. `empty` is the full message shown when there are no events. Returns
-/// the rendered text and the total number of pages, so the caller can decide
-/// whether to attach navigation buttons.
-/// `page` is clamped to the valid range. `style` selects the per-row layout (see
-/// [`RowStyle`]).
-pub fn format_page(
-    events: &[EventInfo],
-    page: usize,
-    per_page: usize,
-    title: &str,
-    empty: &str,
-    style: RowStyle,
-    loc: &dyn LocaleProvider,
-) -> (String, usize) {
-    format_page_at(
-        events,
-        Local::now().naive_local(),
-        page,
-        per_page,
-        title,
-        empty,
-        style,
-        loc,
-    )
-}
-
-/// Like [`format_page`] but with an explicit `now` for relative-time tests.
+/// `page_events` holds only the rows of the page being rendered — the caller
+/// pages at the storage layer (SQL `LIMIT`/`OFFSET`), so a large list never
+/// loads whole. `total` is the list's full length, used to derive the page
+/// count. `title` is the bare heading (e.g. `"Upcoming events"`), rendered
+/// as-is; the page position is surfaced by the navigation keyboard's indicator
+/// button, not in the title. `empty` is the full message shown when the page
+/// has no events. Returns the rendered text and the total number of pages, so
+/// the caller can decide whether to attach navigation buttons. `style` selects
+/// the per-row layout (see [`RowStyle`]).
 #[allow(clippy::too_many_arguments)]
 pub fn format_page_at(
-    events: &[EventInfo],
+    page_events: &[EventInfo],
+    total: usize,
     now: NaiveDateTime,
-    page: usize,
     per_page: usize,
     title: &str,
     empty: &str,
     style: RowStyle,
     loc: &dyn LocaleProvider,
 ) -> (String, usize) {
-    let pages = total_pages(events.len(), per_page);
-    if events.is_empty() {
+    let pages = total_pages(total, per_page);
+    if page_events.is_empty() {
         return (empty.to_string(), pages);
     }
-    let page = page.min(pages - 1);
-    let start = page * per_page;
-    let slice = &events[start..(start + per_page).min(events.len())];
 
     let mut out = format!("<b>{}:</b>\n", html::escape(title));
-    for e in slice {
+    for e in page_events {
         match style {
             RowStyle::SingleLine => write_event_row(&mut out, e, now, loc),
             RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
@@ -462,7 +439,7 @@ mod tests {
     use super::*;
     use crate::locale::EN;
     use crate::types::EventInfo;
-    use chrono::{Duration, NaiveDate, NaiveTime};
+    use chrono::{Duration, Local, NaiveDate, NaiveTime};
 
     fn at(now: NaiveDateTime, d: Duration) -> String {
         format_relative(now, now + d, &EN)
@@ -691,8 +668,8 @@ mod tests {
     fn format_page_empty() {
         let (text, pages) = format_page_at(
             &[],
-            Local::now().naive_local(),
             0,
+            Local::now().naive_local(),
             10,
             "Upcoming events",
             "No upcoming events.",
@@ -715,8 +692,8 @@ mod tests {
         ];
         let (text, pages) = format_page_at(
             &events,
+            events.len(),
             now,
-            0,
             10,
             "Upcoming events",
             "none",
@@ -737,8 +714,8 @@ mod tests {
         let events = vec![sample_event("standup", Some(now + Duration::hours(1)))];
         let (text, _) = format_page_at(
             &events,
+            events.len(),
             now,
-            0,
             10,
             "Today's events",
             "none",
@@ -751,18 +728,19 @@ mod tests {
     }
 
     #[test]
-    fn format_page_slices_and_labels() {
+    fn format_page_renders_given_slice_and_counts_pages_from_total() {
         let now =
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events: Vec<EventInfo> = (0..25)
             .map(|i| sample_event(&format!("event {i}"), Some(now + Duration::hours(i + 1))))
             .collect();
 
-        // First page: 10 rows. Page position lives on the keyboard, not the title.
+        // First page slice: 10 rows. The page count comes from `total`, not the
+        // slice; page position lives on the keyboard, not the title.
         let (p0, pages) = format_page_at(
-            &events,
+            &events[..10],
+            25,
             now,
-            0,
             10,
             "Upcoming events",
             "none",
@@ -775,17 +753,18 @@ mod tests {
         assert!(p0.contains("event 9"));
         assert!(!p0.contains("event 10"));
 
-        // Last page: only 5 rows. Out-of-range page clamps to last.
-        let (p_last, _) = format_page_at(
-            &events,
+        // Last page slice: only 5 rows.
+        let (p_last, pages) = format_page_at(
+            &events[20..],
+            25,
             now,
-            9,
             10,
             "Upcoming events",
             "none",
             RowStyle::SingleLine,
             &EN,
         );
+        assert_eq!(pages, 3);
         assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
@@ -887,8 +866,8 @@ mod tests {
         )];
         let (text, _) = format_page_at(
             &events,
+            events.len(),
             now,
-            0,
             10,
             "Upcoming events",
             "none",
@@ -974,8 +953,8 @@ mod tests {
         });
         let (text, _) = format_page_at(
             &[e],
+            1,
             now,
-            0,
             10,
             "Upcoming events",
             "none",
@@ -998,8 +977,8 @@ mod tests {
         e.id = 42;
         let (text, _) = format_page_at(
             &[e],
+            1,
             now,
-            0,
             10,
             "Missed events",
             "No missed events.",

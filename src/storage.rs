@@ -261,53 +261,71 @@ impl EventStorage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Retrieves active events for a specific chat.
-    pub fn get_active_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
+    /// Retrieves one page of the active events for a chat, ordered by next
+    /// datetime: at most `limit` rows starting `offset` rows in. Paging happens
+    /// in SQL so large lists never load whole.
+    pub fn get_active_by_chat(
+        &self,
+        chat_id: i64,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC",
+             FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC
+             LIMIT ?2 OFFSET ?3",
         )?;
 
-        let rows = stmt.query_map(params![chat_id], Self::row_to_event)?;
+        let rows = stmt.query_map(
+            params![chat_id, limit as i64, offset as i64],
+            Self::row_to_event,
+        )?;
 
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Retrieves active events for a chat scheduled on the given calendar date.
+    /// Counts the active events for a chat (the total behind
+    /// [`get_active_by_chat`](Self::get_active_by_chat) pages).
+    pub fn count_active_by_chat(&self, chat_id: i64) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND active = 1",
+            params![chat_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Retrieves one page of the active events for a chat scheduled on the given
+    /// calendar date (see [`get_active_by_chat`](Self::get_active_by_chat) for
+    /// the `limit`/`offset` semantics).
     pub fn get_active_by_chat_on_date(
         &self,
         chat_id: i64,
         date: NaiveDate,
+        limit: usize,
+        offset: usize,
     ) -> Result<Vec<EventInfo>> {
-        let start = date
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
         let next_day = date.succ_opt().unwrap_or(date);
-        let end = next_day
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
-             ORDER BY next_datetime ASC",
-        )?;
-
-        let rows = stmt.query_map(params![chat_id, start, end], Self::row_to_event)?;
-
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        self.get_active_by_chat_in_range(chat_id, date, next_day, limit, offset)
     }
 
-    /// Retrieves active events for a chat scheduled within `[start, end)` (end exclusive).
+    /// Counts the active events for a chat scheduled on the given calendar date.
+    pub fn count_active_by_chat_on_date(&self, chat_id: i64, date: NaiveDate) -> Result<usize> {
+        let next_day = date.succ_opt().unwrap_or(date);
+        self.count_active_by_chat_in_range(chat_id, date, next_day)
+    }
+
+    /// Retrieves one page of the active events for a chat scheduled within
+    /// `[start, end)` (end exclusive; see
+    /// [`get_active_by_chat`](Self::get_active_by_chat) for the `limit`/`offset`
+    /// semantics).
     pub fn get_active_by_chat_in_range(
         &self,
         chat_id: i64,
         start: NaiveDate,
         end: NaiveDate,
+        limit: usize,
+        offset: usize,
     ) -> Result<Vec<EventInfo>> {
         let start_str = start
             .and_hms_opt(0, 0, 0)
@@ -323,12 +341,41 @@ impl EventStorage {
         let mut stmt = self.conn.prepare(
             "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
              FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
-             ORDER BY next_datetime ASC",
+             ORDER BY next_datetime ASC LIMIT ?4 OFFSET ?5",
         )?;
 
-        let rows = stmt.query_map(params![chat_id, start_str, end_str], Self::row_to_event)?;
+        let rows = stmt.query_map(
+            params![chat_id, start_str, end_str, limit as i64, offset as i64],
+            Self::row_to_event,
+        )?;
 
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Counts the active events for a chat scheduled within `[start, end)`.
+    pub fn count_active_by_chat_in_range(
+        &self,
+        chat_id: i64,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Result<usize> {
+        let start_str = start
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let end_str = end
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3",
+            params![chat_id, start_str, end_str],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Replaces every parsed field of an event (time/recurrence + message) plus the
@@ -1426,9 +1473,12 @@ mod tests {
         storage.mark_inactive(inactive).unwrap();
 
         let today = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
-        let events = storage.get_active_by_chat_on_date(1, today).unwrap();
+        let events = storage
+            .get_active_by_chat_on_date(1, today, 100, 0)
+            .unwrap();
         let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
         assert_eq!(ids, vec![morning, night]);
+        assert_eq!(storage.count_active_by_chat_on_date(1, today).unwrap(), 2);
     }
 
     #[test]
@@ -1466,9 +1516,67 @@ mod tests {
 
         let start = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
-        let events = storage.get_active_by_chat_in_range(1, start, end).unwrap();
+        let events = storage
+            .get_active_by_chat_in_range(1, start, end, 100, 0)
+            .unwrap();
         let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
         assert_eq!(ids, vec![first, last]);
+        assert_eq!(
+            storage
+                .count_active_by_chat_in_range(1, start, end)
+                .unwrap(),
+            2
+        );
+
+        // Paging: one row per page, ordered by next_datetime.
+        let page0 = storage
+            .get_active_by_chat_in_range(1, start, end, 1, 0)
+            .unwrap();
+        let page1 = storage
+            .get_active_by_chat_in_range(1, start, end, 1, 1)
+            .unwrap();
+        let page2 = storage
+            .get_active_by_chat_in_range(1, start, end, 1, 2)
+            .unwrap();
+        assert_eq!(page0.iter().map(|e| e.id).collect::<Vec<_>>(), vec![first]);
+        assert_eq!(page1.iter().map(|e| e.id).collect::<Vec<_>>(), vec![last]);
+        assert!(page2.is_empty());
+    }
+
+    #[test]
+    fn test_get_active_by_chat_pages_and_counts() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        let msg = ensure_message(&storage, 1);
+
+        // Five active events, inserted out of order; pages follow next_datetime.
+        let mut ids: Vec<i64> = Vec::new();
+        for day in [3, 1, 5, 2, 4] {
+            ids.push(
+                storage
+                    .insert_event(&event_at(1, msg, dt(2027, 1, day, 10, 0)))
+                    .unwrap(),
+            );
+        }
+        // An inactive event is excluded from pages and count alike.
+        let inactive = storage
+            .insert_event(&event_at(1, msg, dt(2027, 1, 6, 10, 0)))
+            .unwrap();
+        storage.mark_inactive(inactive).unwrap();
+
+        assert_eq!(storage.count_active_by_chat(1).unwrap(), 5);
+
+        let days = |events: Vec<EventInfo>| -> Vec<u32> {
+            use chrono::Datelike;
+            events
+                .iter()
+                .map(|e| e.next_datetime.unwrap().day())
+                .collect()
+        };
+        assert_eq!(days(storage.get_active_by_chat(1, 2, 0).unwrap()), [1, 2]);
+        assert_eq!(days(storage.get_active_by_chat(1, 2, 2).unwrap()), [3, 4]);
+        assert_eq!(days(storage.get_active_by_chat(1, 2, 4).unwrap()), [5]);
+        assert!(storage.get_active_by_chat(1, 2, 6).unwrap().is_empty());
     }
 
     #[test]
