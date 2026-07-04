@@ -148,25 +148,43 @@ impl LocaleProvider for English {
     }
 
     fn format_relative(&self, secs: i64) -> String {
+        // Rounds to the nearest unit (>half rounds up, e.g. 59 min 31 s →
+        // "1h"), except just past an hour/week the smaller unit is kept so a
+        // bare "1h"/"1w" never hides a large remainder: 61–90 min → "Nm",
+        // 8–13 d → "Nd".
         if secs <= 0 {
             return "soon".to_string();
         }
-        let mins = secs / 60;
+        let mins = (secs + 29) / 60;
         if mins < 1 {
             return "soon".to_string();
         }
         if mins < 60 {
             return format!("{} min{}", mins, if mins == 1 { "" } else { "s" });
         }
-        let hours = mins / 60;
+        if mins <= 90 {
+            return if mins == 60 {
+                "1h".to_string()
+            } else {
+                format!("{mins}m")
+            };
+        }
+        let hours = (mins + 29) / 60;
         if hours < 24 {
             return format!("{hours}h");
         }
-        let days = hours / 24;
+        let days = (hours + 11) / 24;
         if days < 7 {
             return format!("{days}d");
         }
-        let weeks = days / 7;
+        if days < 14 {
+            return if days == 7 {
+                "1w".to_string()
+            } else {
+                format!("{days}d")
+            };
+        }
+        let weeks = (days + 3) / 7;
         if weeks < 52 {
             return format!("{weeks}w");
         }
@@ -239,7 +257,11 @@ mod tests {
     fn format_relative_in_drops_preposition_for_soon() {
         assert_eq!(English.format_relative_in(30), "soon");
         assert_eq!(English.format_relative_in(-5), "soon");
+        assert_eq!(English.format_relative_in(31), "in 1 min");
         assert_eq!(English.format_relative_in(13 * 60), "in 13 mins");
+        assert_eq!(English.format_relative_in(59 * 60 + 31), "in 1h");
+        assert_eq!(English.format_relative_in(90 * 60), "in 90m");
         assert_eq!(English.format_relative_in(2 * 3600), "in 2h");
+        assert_eq!(English.format_relative_in(10 * 86400), "in 10d");
     }
 }

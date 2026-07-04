@@ -194,7 +194,11 @@ pub trait LocaleProvider: Sync {
     /// Recurrence phrase for a fixed calendar day, e.g. `"28th day of the month"`.
     fn day_of_month_recurrence(&self, ordinal_suffix: &str) -> String;
     /// Short relative time for a positive/negative second delta until an event,
-    /// e.g. `"soon"`, `"13 mins"`, `"2d"`, `"1.4y"`.
+    /// e.g. `"soon"`, `"13 mins"`, `"2d"`, `"1.4y"`. Rounds to the nearest
+    /// unit: `"soon"` covers ≤30 s, and a remainder over half the next unit
+    /// rounds up (59 min 31 s → `"1h"`). Values just past an hour or a week
+    /// keep the smaller unit instead of showing a bare `"1h"`/`"1w"`:
+    /// 61–90 min → `"90m"`, 8–13 d → `"10d"`.
     fn format_relative(&self, secs: i64) -> String;
     /// [`Self::format_relative`] phrased as a full "time until" clause, e.g.
     /// `"in 13 mins"` — but bare `"soon"` (no preposition) when the delta is

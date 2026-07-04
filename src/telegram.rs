@@ -1072,12 +1072,26 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         assert_eq!(at(now, Duration::seconds(30)), "soon");
         assert_eq!(at(now, Duration::seconds(-5)), "soon");
+        assert_eq!(at(now, Duration::seconds(31)), "1 min");
         assert_eq!(at(now, Duration::minutes(1)), "1 min");
+        assert_eq!(at(now, Duration::seconds(90)), "1 min"); // exactly half stays
+        assert_eq!(at(now, Duration::seconds(91)), "2 mins");
         assert_eq!(at(now, Duration::minutes(13)), "13 mins");
+        assert_eq!(at(now, Duration::seconds(59 * 60 + 31)), "1h"); // rounds through 60 min
         assert_eq!(at(now, Duration::hours(1)), "1h");
+        assert_eq!(at(now, Duration::minutes(90)), "90m");
+        assert_eq!(at(now, Duration::minutes(110)), "2h");
         assert_eq!(at(now, Duration::hours(23)), "23h");
+        assert_eq!(at(now, Duration::minutes(23 * 60 + 30)), "23h"); // exactly half stays
+        assert_eq!(at(now, Duration::minutes(23 * 60 + 31)), "1d");
         assert_eq!(at(now, Duration::days(2)), "2d");
+        assert_eq!(at(now, Duration::hours(36)), "1d"); // exactly half stays
+        assert_eq!(at(now, Duration::hours(37)), "2d");
+        assert_eq!(at(now, Duration::hours(6 * 24 + 13)), "1w"); // rounds through 7 days
         assert_eq!(at(now, Duration::days(7)), "1w");
+        assert_eq!(at(now, Duration::days(10)), "10d");
+        assert_eq!(at(now, Duration::days(11)), "11d");
+        assert_eq!(at(now, Duration::days(14)), "2w");
         assert_eq!(at(now, Duration::days(21)), "3w");
         assert_eq!(at(now, Duration::days(51 * 7)), "51w"); // just under a year
         assert_eq!(at(now, Duration::days(52 * 7)), "1y"); // 364 days
