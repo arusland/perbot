@@ -196,6 +196,10 @@ pub trait LocaleProvider: Sync {
     /// Short relative time for a positive/negative second delta until an event,
     /// e.g. `"soon"`, `"13 mins"`, `"2d"`, `"1.4y"`.
     fn format_relative(&self, secs: i64) -> String;
+    /// [`Self::format_relative`] phrased as a full "time until" clause, e.g.
+    /// `"in 13 mins"` — but bare `"soon"` (no preposition) when the delta is
+    /// under a minute. The locale owns the preposition and word order.
+    fn format_relative_in(&self, secs: i64) -> String;
     /// An absolute datetime line, e.g. `"13:05 31.12.2027"`.
     fn format_datetime(&self, dt: NaiveDateTime) -> String;
     /// Bold header above the upcoming-launches preview (`"Next launches:"`).

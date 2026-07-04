@@ -180,6 +180,15 @@ impl LocaleProvider for English {
         }
     }
 
+    fn format_relative_in(&self, secs: i64) -> String {
+        let rel = self.format_relative(secs);
+        if rel == "soon" {
+            rel
+        } else {
+            format!("in {rel}")
+        }
+    }
+
     fn format_datetime(&self, dt: NaiveDateTime) -> String {
         dt.format("%H:%M %d.%m.%Y").to_string()
     }
@@ -224,5 +233,13 @@ mod tests {
             r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b"
         );
         assert_eq!(g.years.as_str(), r"\b(\d{4}(?:\s*,\s*\d{4})*)\b");
+    }
+
+    #[test]
+    fn format_relative_in_drops_preposition_for_soon() {
+        assert_eq!(English.format_relative_in(30), "soon");
+        assert_eq!(English.format_relative_in(-5), "soon");
+        assert_eq!(English.format_relative_in(13 * 60), "in 13 mins");
+        assert_eq!(English.format_relative_in(2 * 3600), "in 2h");
     }
 }

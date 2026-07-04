@@ -260,7 +260,8 @@ fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String
 }
 
 /// The bold datetime/relative line shared by the `/events` two-line row and the
-/// single-event detail view: `• <b>HH:MM dd.mm.yyyy (in <rel>[, <recurrence>])</b>`.
+/// single-event detail view: `• <b>HH:MM dd.mm.yyyy (in <rel>[, <recurrence>])</b>`
+/// (`(soon[, …])` when under a minute away — the locale owns the preposition).
 /// `, <recurrence>` is appended inside the parentheses, next to the relative time,
 /// when the event repeats. Datetime/relative/recurrence parts contain no HTML
 /// specials. Returns `• <b>—</b>` for an event with no upcoming launch.
@@ -270,9 +271,9 @@ fn event_when_line(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) 
         .unwrap_or_default();
     let when = match e.next_datetime {
         Some(dt) => html::escape(&format!(
-            "{} (in {}{})",
+            "{} ({}{})",
             loc.format_datetime(dt),
-            format_relative(now, dt, loc),
+            loc.format_relative_in((dt - now).num_seconds()),
             recurrence
         )),
         None => "—".to_string(),
@@ -1008,6 +1009,24 @@ mod tests {
         assert!(text.contains("<b>call</b> the office and bring the documents"));
         // One-off: no upcoming-launches block.
         assert!(!text.contains("Next launches:"));
+    }
+
+    #[test]
+    fn event_when_line_imminent_says_soon_without_in() {
+        use crate::types::{Repetition, TimeUnit};
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let dt = now + Duration::seconds(30);
+        let mut e = sample_event("standup", Some(dt));
+        e.time = Some(dt.time());
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        let text = event_detail(&e, now, &EN);
+        // Under a minute away: bare "soon", never "in soon".
+        assert!(text.starts_with("• <b>12:00 15.06.2026 (soon, every hour)</b>\n"));
+        assert!(!text.contains("in soon"));
     }
 
     #[test]
