@@ -107,11 +107,15 @@ pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
 }
 
 /// The confirmation row shown after the Delete button is tapped: a confirm
-/// (`eid:<id>:delyes`) and a cancel (`eid:<id>:delno`) button.
-fn delete_confirm_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+/// (`eid:<id>:delyes`) and a cancel (`eid:<id>:delno`) button. When the flow
+/// started from a fired notification (`from_notification`), both callbacks
+/// carry a trailing `:n` so the follow-up handlers keep the notification text
+/// and restore the notification keyboard instead of the detail-view one.
+fn delete_confirm_keyboard(event_id: i64, from_notification: bool) -> InlineKeyboardMarkup {
+    let suffix = if from_notification { ":n" } else { "" };
     InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("✅ Yes, delete", format!("eid:{event_id}:delyes")),
-        InlineKeyboardButton::callback("❌ Cancel", format!("eid:{event_id}:delno")),
+        InlineKeyboardButton::callback("✅ Yes, delete", format!("eid:{event_id}:delyes{suffix}")),
+        InlineKeyboardButton::callback("❌ Cancel", format!("eid:{event_id}:delno{suffix}")),
     ]])
 }
 
@@ -128,9 +132,10 @@ pub(super) fn parse_event_callback(data: &str) -> Option<(i64, &str)> {
 /// handler: dismiss (`dis` → advance past the current occurrence), dismiss
 /// repetition (`disr` → skip the interval fills to the next anchor), snooze
 /// (`sn:<minutes>`), the delete flow (`del` → confirm prompt, `delyes` → delete,
-/// `delno` → restore the action buttons), or the edit flow (`ed` → start editing,
-/// `edno` → cancel editing). Unknown actions are acknowledged and ignored. Routed
-/// from `main`'s `eid:`-prefixed callback branch.
+/// `delno` → restore the action buttons; the `:n`-suffixed variants are the
+/// notification-keyboard flavor that preserves the fired message), or the edit
+/// flow (`ed` → start editing, `edno` → cancel editing). Unknown actions are
+/// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
     bot: &TgBot,
     provider: &EventProvider,
@@ -140,9 +145,12 @@ pub async fn handle_event_callback(
     match q.data.as_deref().and_then(parse_event_callback) {
         Some((id, "dis")) => handle_dismiss(bot, provider, id, q).await,
         Some((id, "disr")) => handle_dismiss_repetition(bot, provider, id, q).await,
-        Some((id, "del")) => handle_delete_prompt(bot, id, q).await,
-        Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, q).await,
-        Some((id, "delno")) => handle_delete_cancel(bot, provider, id, q).await,
+        Some((id, "del")) => handle_delete_prompt(bot, id, false, q).await,
+        Some((id, "del:n")) => handle_delete_prompt(bot, id, true, q).await,
+        Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, false, q).await,
+        Some((id, "delyes:n")) => handle_delete_confirm(bot, provider, id, true, q).await,
+        Some((id, "delno")) => handle_delete_cancel(bot, provider, id, false, q).await,
+        Some((id, "delno:n")) => handle_delete_cancel(bot, provider, id, true, q).await,
         Some((id, "ed")) => handle_edit_prompt(bot, provider, pending_edit, id, q).await,
         Some((_, "edno")) => handle_edit_cancel(bot, pending_edit, q).await,
         Some((_, action)) if action.starts_with("sn:") => {
@@ -312,12 +320,23 @@ async fn handle_edit_cancel(
     Ok(())
 }
 
-/// Handles the `🗑 Delete` press (`eid:<id>:del`): swaps the keyboard in place for
-/// the confirm/cancel row, leaving the detail text untouched.
-async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow::Result<()> {
+/// Handles the `🗑 Delete` press (`eid:<id>:del` / `eid:<id>:del:n`): swaps the
+/// keyboard in place for the confirm/cancel row, leaving the message text
+/// untouched. `from_notification` is carried into the confirm keyboard so the
+/// follow-up presses know which flavor of the flow they belong to.
+async fn handle_delete_prompt(
+    bot: &TgBot,
+    id: i64,
+    from_notification: bool,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message()
         && let Err(e) = bot
-            .edit_markup(message.chat.id, message.id, delete_confirm_keyboard(id))
+            .edit_markup(
+                message.chat.id,
+                message.id,
+                delete_confirm_keyboard(id, from_notification),
+            )
             .await
     {
         log::warn!("Failed to show delete confirmation for event {id}: {e}");
@@ -326,30 +345,31 @@ async fn handle_delete_prompt(bot: &TgBot, id: i64, q: CallbackQuery) -> anyhow:
     Ok(())
 }
 
-/// Handles the `❌ Cancel` press (`eid:<id>:delno`): restores the original
-/// Dismiss/Edit/Delete action buttons, leaving the detail text untouched. The
-/// event is reloaded so the restored keyboard reflects its current active state
-/// (whether the Dismiss button belongs there).
+/// Handles the `❌ Cancel` press (`eid:<id>:delno` / `eid:<id>:delno:n`): restores
+/// the keyboard the flow started from — the full notification keyboard for the
+/// `:n` variant, otherwise the Dismiss/Edit/Delete action buttons — leaving the
+/// message text untouched. For the detail view the event is reloaded so the
+/// restored keyboard reflects its current active state (whether the Dismiss
+/// button belongs there).
 async fn handle_delete_cancel(
     bot: &TgBot,
     provider: &EventProvider,
     id: i64,
+    from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
-        let event = provider.get_event(id)?;
-        let active = event.as_ref().is_some_and(|e| e.active);
-        let is_repetition = event
-            .as_ref()
-            .is_some_and(|e| e.source == Some(NextSource::Repetition));
-        if let Err(e) = bot
-            .edit_markup(
-                message.chat.id,
-                message.id,
-                event_actions_keyboard(id, active, is_repetition),
-            )
-            .await
-        {
+        let markup = if from_notification {
+            crate::state::notification_keyboard(id)
+        } else {
+            let event = provider.get_event(id)?;
+            let active = event.as_ref().is_some_and(|e| e.active);
+            let is_repetition = event
+                .as_ref()
+                .is_some_and(|e| e.source == Some(NextSource::Repetition));
+            event_actions_keyboard(id, active, is_repetition)
+        };
+        if let Err(e) = bot.edit_markup(message.chat.id, message.id, markup).await {
             log::warn!("Failed to restore delete button for event {id}: {e}");
         }
     }
@@ -357,14 +377,17 @@ async fn handle_delete_cancel(
     Ok(())
 }
 
-/// Handles the `✅ Yes, delete` press (`eid:<id>:delyes`): access-checks the event
-/// against the chat the button was pressed in (callback ids are
-/// user-influenceable), deletes it, and edits the message to a confirmation
-/// (clearing the keyboard). Replies "Event not found." for a missing or foreign id.
+/// Handles the `✅ Yes, delete` press (`eid:<id>:delyes` / `eid:<id>:delyes:n`):
+/// access-checks the event against the chat the button was pressed in (callback
+/// ids are user-influenceable) and deletes it. On the detail view the message is
+/// edited to a confirmation (clearing the keyboard); from a notification the
+/// fired reminder text is kept — only the keyboard is removed and the outcome is
+/// delivered as a toast. Replies "Event not found." for a missing or foreign id.
 async fn handle_delete_confirm(
     bot: &TgBot,
     provider: &EventProvider,
     id: i64,
+    from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
@@ -381,9 +404,19 @@ async fn handle_delete_confirm(
         "Event not found."
     };
 
-    bot.answer_callback(q.id, None).await?;
-    if let Err(e) = bot.edit_text(chat_id, message_id, text).await {
-        log::warn!("Failed to edit deleted-event message for event {id}: {e}");
+    if from_notification {
+        bot.answer_callback(q.id, Some(text.to_owned())).await?;
+        if let Err(e) = bot
+            .edit_markup(chat_id, message_id, InlineKeyboardMarkup::default())
+            .await
+        {
+            log::warn!("Failed to clear deleted-event notification keyboard for event {id}: {e}");
+        }
+    } else {
+        bot.answer_callback(q.id, None).await?;
+        if let Err(e) = bot.edit_text(chat_id, message_id, text).await {
+            log::warn!("Failed to edit deleted-event message for event {id}: {e}");
+        }
     }
     Ok(())
 }
@@ -397,6 +430,12 @@ mod tests {
         assert_eq!(parse_event_callback("eid:42:sn:30"), Some((42, "sn:30")));
         assert_eq!(parse_event_callback("eid:-7:del"), Some((-7, "del")));
         assert_eq!(parse_event_callback("eid:5:delyes"), Some((5, "delyes")));
+        assert_eq!(parse_event_callback("eid:5:del:n"), Some((5, "del:n")));
+        assert_eq!(
+            parse_event_callback("eid:5:delyes:n"),
+            Some((5, "delyes:n"))
+        );
+        assert_eq!(parse_event_callback("eid:5:delno:n"), Some((5, "delno:n")));
         assert_eq!(parse_event_callback("eid:42:dis"), Some((42, "dis")));
         assert_eq!(parse_event_callback("eid:42:disr"), Some((42, "disr")));
 
@@ -440,8 +479,13 @@ mod tests {
             ["eid:42:ed", "eid:42:del"]
         );
         assert_eq!(
-            datas(delete_confirm_keyboard(42)),
+            datas(delete_confirm_keyboard(42, false)),
             ["eid:42:delyes", "eid:42:delno"]
+        );
+        // Started from a notification → the `:n` suffix rides along.
+        assert_eq!(
+            datas(delete_confirm_keyboard(42, true)),
+            ["eid:42:delyes:n", "eid:42:delno:n"]
         );
         assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
 

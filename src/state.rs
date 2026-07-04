@@ -36,12 +36,15 @@ const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 /// memory at once.
 const MISSED_MOVE_BATCH: usize = 100;
 
-/// Inline keyboard attached to a fired reminder, offering to re-send it after a
-/// fixed delay. Each button carries `eid:<id>:sn:<minutes>` callback data, where
-/// `<id>` is the fired event's DB id (used to load the event when pressed).
-fn snooze_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+/// Inline keyboard attached to a fired reminder: snooze rows (each button
+/// carries `eid:<id>:sn:<minutes>` callback data, where `<id>` is the fired
+/// event's DB id, used to load the event when pressed) plus an Edit/Delete row
+/// (`eid:<id>:ed` starts the edit flow; `eid:<id>:del:n` starts the
+/// notification-aware delete flow, whose Cancel restores this keyboard).
+/// Public so the delete-cancel handler in `commands::event` can rebuild it.
+pub fn notification_keyboard(event_id: i64) -> InlineKeyboardMarkup {
     // Four buttons on the first row, the rest on the second, to fit narrow screens.
-    let rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
         .chunks(4)
         .map(|chunk| {
             chunk
@@ -52,6 +55,10 @@ fn snooze_keyboard(event_id: i64) -> InlineKeyboardMarkup {
                 .collect()
         })
         .collect();
+    rows.push(vec![
+        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
+        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del:n")),
+    ]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -539,7 +546,7 @@ impl EventProvider {
                                     preview,
                                     html::escape(SNOOZE_HINT)
                                 ),
-                                reply_markup: Some(snooze_keyboard(e.id)),
+                                reply_markup: Some(notification_keyboard(e.id)),
                             }
                         })
                         .collect();
@@ -757,28 +764,35 @@ mod tests {
     }
 
     #[test]
-    fn snooze_keyboard_has_a_button_per_option() {
-        let kb = snooze_keyboard(42);
+    fn notification_keyboard_has_snooze_buttons_plus_edit_delete_row() {
+        let kb = notification_keyboard(42);
         let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len());
+        assert_eq!(count, SNOOZE_OPTIONS.len() + 2);
+        assert_eq!(kb.inline_keyboard.last().unwrap().len(), 2);
     }
 
     #[test]
-    fn snooze_keyboard_embeds_event_id_in_callback_data() {
+    fn notification_keyboard_embeds_event_id_in_callback_data() {
         use teloxide::types::InlineKeyboardButtonKind;
 
-        let kb = snooze_keyboard(42);
-        for (button, (_, minutes)) in kb
+        let kb = notification_keyboard(42);
+        let expected: Vec<String> = SNOOZE_OPTIONS
+            .iter()
+            .map(|(_, minutes)| format!("eid:42:sn:{minutes}"))
+            .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
+            .collect();
+        let datas: Vec<&String> = kb
             .inline_keyboard
             .iter()
             .flatten()
-            .zip(SNOOZE_OPTIONS.iter())
-        {
-            let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
-                panic!("expected callback-data button");
-            };
-            assert_eq!(data, &format!("eid:42:sn:{minutes}"));
-        }
+            .map(|button| {
+                let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
+                    panic!("expected callback-data button");
+                };
+                data
+            })
+            .collect();
+        assert_eq!(datas, expected.iter().collect::<Vec<_>>());
     }
 
     #[test]
