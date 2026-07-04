@@ -132,10 +132,11 @@ pub(super) fn parse_event_callback(data: &str) -> Option<(i64, &str)> {
 /// handler: dismiss (`dis` → advance past the current occurrence), dismiss
 /// repetition (`disr` → skip the interval fills to the next anchor), snooze
 /// (`sn:<minutes>`), the delete flow (`del` → confirm prompt, `delyes` → delete,
-/// `delno` → restore the action buttons; the `:n`-suffixed variants are the
-/// notification-keyboard flavor that preserves the fired message), or the edit
-/// flow (`ed` → start editing, `edno` → cancel editing). Unknown actions are
-/// acknowledged and ignored. Routed from `main`'s `eid:`-prefixed callback branch.
+/// `delno` → restore the action buttons), or the edit flow (`ed` → start
+/// editing, `edno` → cancel editing). The `:n`-suffixed dismiss/delete variants
+/// are the notification-keyboard flavor that preserves the fired message.
+/// Unknown actions are acknowledged and ignored. Routed from `main`'s
+/// `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
     bot: &TgBot,
     provider: &EventProvider,
@@ -143,8 +144,10 @@ pub async fn handle_event_callback(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
-        Some((id, "dis")) => handle_dismiss(bot, provider, id, q).await,
-        Some((id, "disr")) => handle_dismiss_repetition(bot, provider, id, q).await,
+        Some((id, "dis")) => handle_dismiss(bot, provider, id, false, q).await,
+        Some((id, "dis:n")) => handle_dismiss(bot, provider, id, true, q).await,
+        Some((id, "disr")) => handle_dismiss_repetition(bot, provider, id, false, q).await,
+        Some((id, "disr:n")) => handle_dismiss_repetition(bot, provider, id, true, q).await,
         Some((id, "del")) => handle_delete_prompt(bot, id, false, q).await,
         Some((id, "del:n")) => handle_delete_prompt(bot, id, true, q).await,
         Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, false, q).await,
@@ -163,15 +166,17 @@ pub async fn handle_event_callback(
     }
 }
 
-/// Handles the `⏭ Dismiss` press (`eid:<id>:dis`): delegates to
-/// [`EventProvider::dismiss`] (which advances the event past its current
+/// Handles the `⏭ Dismiss` press (`eid:<id>:dis` / `eid:<id>:dis:n`): delegates
+/// to [`EventProvider::dismiss`] (which advances the event past its current
 /// occurrence and access-checks the chat), then re-renders the detail view in
-/// place. Replies with a toast for a missing/foreign id or an already-inactive
-/// event.
+/// place — or, for the notification flavor (`from_notification`), keeps the
+/// fired text and refreshes only the keyboard. Replies with a toast for a
+/// missing/foreign id or an already-inactive event.
 async fn handle_dismiss(
     bot: &TgBot,
     provider: &EventProvider,
     id: i64,
+    from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
@@ -193,17 +198,8 @@ async fn handle_dismiss(
         DismissOutcome::Dismissed(updated) => {
             bot.answer_callback(q.id, Some("Dismissed.".to_owned()))
                 .await?;
-            let loc = crate::locale::for_chat(chat_id.0);
-            let text = event_detail(&updated, Local::now().naive_local(), loc);
-            let is_repetition = updated.source == Some(NextSource::Repetition);
-            if let Err(e) = bot
-                .edit_html(
-                    chat_id,
-                    message_id,
-                    text.as_str(),
-                    Some(event_actions_keyboard(id, updated.active, is_repetition)),
-                )
-                .await
+            if let Err(e) =
+                refresh_dismissed_view(bot, chat_id, message_id, &updated, from_notification).await
             {
                 log::warn!("Failed to refresh dismissed event {id}: {e}");
             }
@@ -212,15 +208,17 @@ async fn handle_dismiss(
     Ok(())
 }
 
-/// Handles the `⏩ Dismiss repetition` press (`eid:<id>:disr`): delegates to
-/// [`EventProvider::dismiss_repetition`] (which skips the event's repetition fills
-/// to the next anchor and access-checks the chat), then re-renders the detail view
-/// in place. Replies with a toast for a missing/foreign id or an already-inactive
-/// event.
+/// Handles the `⏩ Dismiss repetition` press (`eid:<id>:disr` / `eid:<id>:disr:n`):
+/// delegates to [`EventProvider::dismiss_repetition`] (which skips the event's
+/// repetition fills to the next anchor and access-checks the chat), then
+/// re-renders the detail view in place — or, for the notification flavor
+/// (`from_notification`), keeps the fired text and refreshes only the keyboard.
+/// Replies with a toast for a missing/foreign id or an already-inactive event.
 async fn handle_dismiss_repetition(
     bot: &TgBot,
     provider: &EventProvider,
     id: i64,
+    from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
@@ -242,23 +240,50 @@ async fn handle_dismiss_repetition(
         DismissOutcome::Dismissed(updated) => {
             bot.answer_callback(q.id, Some("Repetition dismissed.".to_owned()))
                 .await?;
-            let loc = crate::locale::for_chat(chat_id.0);
-            let text = event_detail(&updated, Local::now().naive_local(), loc);
-            let is_repetition = updated.source == Some(NextSource::Repetition);
-            if let Err(e) = bot
-                .edit_html(
-                    chat_id,
-                    message_id,
-                    text.as_str(),
-                    Some(event_actions_keyboard(id, updated.active, is_repetition)),
-                )
-                .await
+            if let Err(e) =
+                refresh_dismissed_view(bot, chat_id, message_id, &updated, from_notification).await
             {
                 log::warn!("Failed to refresh dismissed-repetition event {id}: {e}");
             }
         }
     }
     Ok(())
+}
+
+/// Refreshes the message a dismiss was pressed on so its buttons match the
+/// advanced schedule: on the detail view the whole message is re-rendered with
+/// fresh action buttons; on a fired notification (`from_notification`) the
+/// fired text is kept and only the keyboard is rebuilt.
+async fn refresh_dismissed_view(
+    bot: &TgBot,
+    chat_id: ChatId,
+    message_id: teloxide::types::MessageId,
+    updated: &crate::types::EventInfo,
+    from_notification: bool,
+) -> teloxide::prelude::ResponseResult<()> {
+    let is_repetition = updated.source == Some(NextSource::Repetition);
+    if from_notification {
+        bot.edit_markup(
+            chat_id,
+            message_id,
+            crate::state::notification_keyboard(updated.id, updated.active, is_repetition),
+        )
+        .await
+    } else {
+        let loc = crate::locale::for_chat(chat_id.0);
+        let text = event_detail(updated, Local::now().naive_local(), loc);
+        bot.edit_html(
+            chat_id,
+            message_id,
+            text.as_str(),
+            Some(event_actions_keyboard(
+                updated.id,
+                updated.active,
+                is_repetition,
+            )),
+        )
+        .await
+    }
 }
 
 /// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
@@ -359,14 +384,14 @@ async fn handle_delete_cancel(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
+        let event = provider.get_event(id)?;
+        let active = event.as_ref().is_some_and(|e| e.active);
+        let is_repetition = event
+            .as_ref()
+            .is_some_and(|e| e.source == Some(NextSource::Repetition));
         let markup = if from_notification {
-            crate::state::notification_keyboard(id)
+            crate::state::notification_keyboard(id, active, is_repetition)
         } else {
-            let event = provider.get_event(id)?;
-            let active = event.as_ref().is_some_and(|e| e.active);
-            let is_repetition = event
-                .as_ref()
-                .is_some_and(|e| e.source == Some(NextSource::Repetition));
             event_actions_keyboard(id, active, is_repetition)
         };
         if let Err(e) = bot.edit_markup(message.chat.id, message.id, markup).await {
@@ -438,6 +463,8 @@ mod tests {
         assert_eq!(parse_event_callback("eid:5:delno:n"), Some((5, "delno:n")));
         assert_eq!(parse_event_callback("eid:42:dis"), Some((42, "dis")));
         assert_eq!(parse_event_callback("eid:42:disr"), Some((42, "disr")));
+        assert_eq!(parse_event_callback("eid:42:dis:n"), Some((42, "dis:n")));
+        assert_eq!(parse_event_callback("eid:42:disr:n"), Some((42, "disr:n")));
 
         // Missing prefix, non-numeric id, no action separator.
         assert_eq!(parse_event_callback("ev:1:del"), None);
