@@ -178,14 +178,16 @@ impl EventStorage {
             [],
         )?;
 
-        // Helper table recording the event ids that were missed at the last
+        // Helper table recording the events that were missed at the last
         // startup, in missed (next_datetime) order — rescheduling wipes their
-        // old next_datetime, so this is what keeps the missed list pageable.
-        // Cleared at every startup before being repopulated.
+        // old next_datetime, so `missed_at` preserves the datetime each event
+        // should have fired at and the autoincrement id keeps the list
+        // pageable. Cleared at every startup before being repopulated.
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS missed_events (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id INTEGER NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id  INTEGER NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE,
+                missed_at TEXT NOT NULL
             )",
             [],
         )?;
@@ -543,15 +545,18 @@ impl EventStorage {
         Ok(())
     }
 
-    /// Records a batch of missed event ids in the `missed_events` table.
-    /// Insertion order is preserved by the autoincrement `id`, so callers must
-    /// pass ids in display (missed) order.
-    pub fn insert_missed_events(&self, event_ids: &[i64]) -> Result<()> {
+    /// Records a batch of missed events in the `missed_events` table as
+    /// `(event id, missed datetime)` pairs — the datetime the event should
+    /// have fired at, captured before rescheduling wipes it. Insertion order
+    /// is preserved by the autoincrement `id`, so callers must pass entries
+    /// in display (missed) order.
+    pub fn insert_missed_events(&self, entries: &[(i64, NaiveDateTime)]) -> Result<()> {
         let mut stmt = self
             .conn
-            .prepare("INSERT INTO missed_events (event_id) VALUES (?1)")?;
-        for id in event_ids {
-            stmt.execute(params![id])?;
+            .prepare("INSERT INTO missed_events (event_id, missed_at) VALUES (?1, ?2)")?;
+        for (id, missed_at) in entries {
+            let missed_str = missed_at.format("%Y-%m-%d %H:%M:%S").to_string();
+            stmt.execute(params![id, missed_str])?;
         }
         Ok(())
     }
@@ -583,7 +588,10 @@ impl EventStorage {
     }
 
     /// Returns one page of a chat's recorded missed events in the order they
-    /// were missed (insertion order of `missed_events`).
+    /// were missed (insertion order of `missed_events`). Each returned event
+    /// carries the snapshot's `missed_at` — the datetime it should have fired
+    /// at — in `next_datetime` instead of its post-reschedule value: the
+    /// snapshot is display-only and the missed list shows the missed moment.
     pub fn get_missed_snapshot_by_chat(
         &self,
         chat_id: i64,
@@ -591,7 +599,7 @@ impl EventStorage {
         offset: usize,
     ) -> Result<Vec<EventInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.chat_id, e.date, e.time, e.year_explicit, e.message, e.active, e.next_datetime, e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, e.legacy, e.snoozed, e.last_next_datetime, e.source
+            "SELECT e.id, e.chat_id, e.date, e.time, e.year_explicit, e.message, e.active, m.missed_at, e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, e.legacy, e.snoozed, e.last_next_datetime, e.source
              FROM missed_events m
              JOIN events e ON e.id = m.event_id
              WHERE e.chat_id = ?1
@@ -1558,28 +1566,28 @@ mod tests {
             .insert_event(&event_at(2, msg2, dt(2026, 1, 15, 10, 0)))
             .unwrap();
 
-        storage.insert_missed_events(&[a, other]).unwrap();
-        storage.insert_missed_events(&[b, c]).unwrap();
+        storage
+            .insert_missed_events(&[(a, dt(2026, 1, 1, 10, 0)), (other, dt(2026, 1, 15, 10, 0))])
+            .unwrap();
+        storage
+            .insert_missed_events(&[(b, dt(2026, 2, 1, 10, 0)), (c, dt(2026, 3, 1, 10, 0))])
+            .unwrap();
 
         assert_eq!(storage.get_missed_chat_ids().unwrap(), vec![1, 2]);
         assert_eq!(storage.count_missed_snapshot_by_chat(1).unwrap(), 3);
         assert_eq!(storage.count_missed_snapshot_by_chat(2).unwrap(), 1);
 
         // Pages keep insertion order and never mix chats.
-        let page0: Vec<i64> = storage
-            .get_missed_snapshot_by_chat(1, 2, 0)
-            .unwrap()
-            .iter()
-            .map(|e| e.id)
-            .collect();
-        let page1: Vec<i64> = storage
-            .get_missed_snapshot_by_chat(1, 2, 2)
-            .unwrap()
-            .iter()
-            .map(|e| e.id)
-            .collect();
-        assert_eq!(page0, vec![a, b]);
-        assert_eq!(page1, vec![c]);
+        let page0 = storage.get_missed_snapshot_by_chat(1, 2, 0).unwrap();
+        let page1 = storage.get_missed_snapshot_by_chat(1, 2, 2).unwrap();
+        let ids0: Vec<i64> = page0.iter().map(|e| e.id).collect();
+        let ids1: Vec<i64> = page1.iter().map(|e| e.id).collect();
+        assert_eq!(ids0, vec![a, b]);
+        assert_eq!(ids1, vec![c]);
+
+        // Snapshot rows carry the recorded missed_at in next_datetime.
+        assert_eq!(page0[0].next_datetime, Some(dt(2026, 1, 1, 10, 0)));
+        assert_eq!(page0[1].next_datetime, Some(dt(2026, 2, 1, 10, 0)));
     }
 
     #[test]
@@ -1594,7 +1602,9 @@ mod tests {
         let b = storage
             .insert_event(&event_at(1, msg, dt(2026, 2, 1, 10, 0)))
             .unwrap();
-        storage.insert_missed_events(&[a, b]).unwrap();
+        storage
+            .insert_missed_events(&[(a, dt(2026, 1, 1, 10, 0)), (b, dt(2026, 2, 1, 10, 0))])
+            .unwrap();
 
         // Deleting the event removes it from the missed list (cascade), so the
         // count and the page shrink together.

@@ -85,8 +85,8 @@ impl ListKind {
     }
 
     /// Per-row layout for this list. `/events` uses the two-line row; the missed
-    /// list shows only a plain preview + `/event<id>` link; the rest use the
-    /// single-line row.
+    /// list shows the missed datetime + plain preview + `/event<id>` link; the
+    /// rest use the single-line row.
     pub fn row_style(self) -> RowStyle {
         match self {
             ListKind::Events => RowStyle::TwoLine,
@@ -106,8 +106,10 @@ pub enum RowStyle {
     /// Bold datetime/recurrence line + `/event<id>` link, then an indented plain
     /// preview underneath (used by `/events`).
     TwoLine,
-    /// `• <plain preview> /event<id>` only — no datetime line (used by the missed
-    /// events list, whose rescheduled `next_datetime` would be misleading).
+    /// `• datetime — <plain preview> /event<id>` — the datetime the event should
+    /// have fired at, absolute only (no relative part: it lies in the past), then
+    /// the preview and the tappable link (used by the missed events list, whose
+    /// snapshot rows carry the missed moment in `next_datetime`).
     PreviewLink,
 }
 
@@ -122,12 +124,22 @@ fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime, loc: &dy
     let _ = writeln!(out, "• {} — {}", when, e.message);
 }
 
-/// Appends a preview-only HTML event row: `• <plain preview> /event<id>` — the
-/// truncated, tag-stripped, HTML-escaped message preview followed by the tappable
-/// `/event<id>` link. No datetime line (see [`RowStyle::PreviewLink`]).
-fn write_event_row_preview_only(out: &mut String, e: &EventInfo) {
+/// Appends a missed-list HTML event row: `• datetime — <plain preview>
+/// /event<id>` — the datetime the event should have fired at (absolute only;
+/// a relative part would render "soon" for past moments), then the truncated,
+/// tag-stripped, HTML-escaped message preview and the tappable `/event<id>`
+/// link (see [`RowStyle::PreviewLink`]).
+fn write_event_row_preview_only(out: &mut String, e: &EventInfo, loc: &dyn LocaleProvider) {
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
-    let _ = writeln!(out, "• {message} /event{}", e.id);
+    match e.next_datetime {
+        Some(dt) => {
+            let when = html::escape(&loc.format_datetime(dt));
+            let _ = writeln!(out, "• {when} — {message} /event{}", e.id);
+        }
+        None => {
+            let _ = writeln!(out, "• {message} /event{}", e.id);
+        }
+    }
 }
 
 /// Appends a two-line HTML event row used by `/events`: the bold datetime/relative
@@ -190,7 +202,7 @@ pub fn format_page_at(
         match style {
             RowStyle::SingleLine => write_event_row(&mut out, e, now, loc),
             RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
-            RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e),
+            RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e, loc),
         }
     }
     (out, pages)
@@ -457,12 +469,15 @@ mod tests {
             &EN,
         );
         assert!(text.starts_with("<b>Missed events:</b>\n"));
-        // Plain preview (tags stripped, truncated) + /event<id>, no datetime/bold.
-        assert!(
-            text.contains("• call the office right now please and bring the doc... /event42\n")
-        );
+        // Missed datetime (absolute, no bold), then the plain preview (tags
+        // stripped, truncated) + /event<id>. No relative part — the moment is
+        // in the past and would render "soon".
+        assert!(text.contains(
+            "• 14:00 15.06.2026 — call the office right now please and bring the doc... /event42\n"
+        ));
         assert!(!text.contains("<b>14:"));
         assert!(!text.contains("(in "));
+        assert!(!text.contains("(soon)"));
     }
 
     #[test]
@@ -539,7 +554,9 @@ mod tests {
 
         let (text, keyboard) = format_missed_page(&[event], 1, now, 0, &EN);
         assert!(text.starts_with("<b>Missed events:</b>\n"));
-        assert!(text.contains("/event7"));
+        // The row leads with the event's datetime (the snapshot puts the
+        // missed moment in `next_datetime`).
+        assert!(text.contains("• 09:00 16.06.2026 — call the office /event7"));
         // One event → single page → no navigation keyboard.
         assert!(keyboard.is_none());
     }

@@ -80,10 +80,11 @@ impl EventProvider {
 
     /// Moves the missed backlog (active events whose datetime is in the past)
     /// into the `missed_events` helper table, one batch at a time: each batch's
-    /// ids are recorded, then the batch is rescheduled (which removes it from
-    /// the missed predicate, so the next fetch returns the next batch). Only
-    /// one batch is ever held in memory. Returns the number of events moved.
-    /// Callers clear the table first (see `start()`).
+    /// ids are recorded together with the datetime they should have fired at,
+    /// then the batch is rescheduled (which removes it from the missed
+    /// predicate, so the next fetch returns the next batch). Only one batch is
+    /// ever held in memory. Returns the number of events moved. Callers clear
+    /// the table first (see `start()`).
     pub fn move_missed_events(&self) -> Result<usize> {
         let mut total = 0;
         loop {
@@ -93,19 +94,26 @@ impl EventProvider {
             if batch.is_empty() {
                 return Ok(total);
             }
-            let ids: Vec<i64> = batch.iter().map(|e| e.id).collect();
-            inner.storage.insert_missed_events(&ids)?;
+            // The missed predicate guarantees `next_datetime` is set.
+            let entries: Vec<(i64, chrono::NaiveDateTime)> = batch
+                .iter()
+                .map(|e| (e.id, e.next_datetime.unwrap_or(now)))
+                .collect();
+            inner.storage.insert_missed_events(&entries)?;
             total += batch.len();
             Self::update_at_and_reload_locked(&mut inner, batch, now)?;
         }
     }
 
     /// Returns one page of the events recorded in the startup missed snapshot
-    /// (the `missed_events` table) for `chat_id`, in missed order and reflecting
-    /// their current, post-reschedule state, plus the snapshot's total size (for
-    /// page-count math). Paging happens in SQL; events deleted since startup
-    /// drop out of both the page and the total. Empty when the chat had no
-    /// missed events. Backs the missed-events list's page-turn callbacks.
+    /// (the `missed_events` table) for `chat_id`, in missed order, plus the
+    /// snapshot's total size (for page-count math). Each event's
+    /// `next_datetime` carries the snapshot's `missed_at` — the datetime it
+    /// should have fired at — not its post-reschedule value (see
+    /// `EventStorage::get_missed_snapshot_by_chat`). Paging happens in SQL;
+    /// events deleted since startup drop out of both the page and the total.
+    /// Empty when the chat had no missed events. Backs the missed-events
+    /// list's page-turn callbacks.
     pub fn get_missed_snapshot_events(
         &self,
         chat_id: i64,
@@ -730,7 +738,10 @@ mod tests {
         let future = provider.insert_event_and_get(future).unwrap();
         {
             let inner = provider.inner.lock().unwrap();
-            inner.storage.insert_missed_events(&[future.id]).unwrap();
+            inner
+                .storage
+                .insert_missed_events(&[(future.id, ndt(2099, 1, 1, 10, 0, 0))])
+                .unwrap();
         }
 
         // One genuinely missed event (past due relative to the real clock).
@@ -810,6 +821,23 @@ mod tests {
             .map(|e| e.id)
             .collect();
         assert_eq!(ids, vec![may.id, june.id, july.id]);
+
+        // Snapshot rows carry the datetime each event should have fired at,
+        // even though the stored one-off events rescheduled to inactive/None.
+        let missed_ats: Vec<_> = page0
+            .events
+            .iter()
+            .chain(page1.events.iter())
+            .map(|e| e.next_datetime)
+            .collect();
+        assert_eq!(
+            missed_ats,
+            vec![
+                Some(ndt(2020, 5, 1, 10, 0, 0)),
+                Some(ndt(2020, 6, 1, 10, 0, 0)),
+                Some(ndt(2020, 7, 1, 10, 0, 0)),
+            ]
+        );
 
         // Other chats see an empty snapshot.
         let other = provider
