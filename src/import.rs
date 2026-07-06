@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{Local, NaiveDateTime};
 
 use crate::converter::{self, Status};
+use crate::locale;
 use crate::state::EventProvider;
 use crate::types::{ChatInfo, ChatType};
 
@@ -63,6 +64,7 @@ pub fn import_zip(
     zip_bytes: &[u8],
 ) -> anyhow::Result<ImportOutcome> {
     let now = Local::now().naive_local();
+    let loc = locale::for_chat(target_user_id);
 
     // Ensure the destination chat exists (FK for events.chat_id).
     provider.upsert_chat(&ChatInfo {
@@ -167,12 +169,12 @@ pub fn import_zip(
         };
 
         rows.push_str(&format!(
-            "<tr{row_style}><td>{idx}</td><td>{file}</td><td>{created}</td><td>{input}</td><td>{summary}</td><td>{next}</td><td>{active}</td><td>{status}</td></tr>\n",
+            "<tr{row_style}><td>{idx}</td><td>{file}</td><td>{created}</td><td>{input}</td><td>{new_input}</td><td>{next}</td><td>{active}</td><td>{status}</td></tr>\n",
             idx = outcome.total,
             file = escape_html(&base),
             created = fmt_dt(Some(created_at)),
             input = escape_html(&input),
-            summary = escape_html(&converted.summary),
+            new_input = escape_html(&event.normalize_time(loc)),
             next = fmt_dt(event.next_datetime),
             active = if event.active { "yes" } else { "no" },
             status = status_cell,
@@ -203,7 +205,7 @@ caption{{text-align:left;margin-bottom:8px;font-size:13px;color:#555}}</style></
 {scheduled} scheduled, {inactive} inactive, {unparsed} unparsed, \
 <span style=\"color:#c00\">{recalc} recalculated</span>.</p>\
 <table><caption>Old data → new event</caption><thead><tr>\
-<th>#</th><th>File</th><th>Created at</th><th>Old input</th><th>Parsed</th>\
+<th>#</th><th>File</th><th>Created at</th><th>Old input</th><th>New input</th>\
 <th>Next datetime</th><th>Active</th><th>Status</th></tr></thead><tbody>\n{rows}</tbody></table>\
 </body></html>",
         chat = target_user_id,
