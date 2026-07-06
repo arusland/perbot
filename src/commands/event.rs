@@ -3,13 +3,16 @@
 //! the edit flow. Snooze (`sn:<minutes>`) is dispatched from here to
 //! [`super::snooze`].
 
-use crate::pending::{self, PendingEdit};
+use crate::pending::PendingEdit;
 use crate::state::{DismissOutcome, EventProvider};
-use crate::telegram::{edit_prompt, event_detail};
 use crate::tgbot::TgBot;
 use crate::types::NextSource;
+use crate::view::{
+    EDIT_ASK_TEXT, delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt,
+    event_actions_keyboard, event_detail, notification_keyboard,
+};
 use chrono::Local;
-use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardMarkup};
 
 /// Parses a `/event<id>` (or `/event<id>@<bot_username>`) command into the event id.
 ///
@@ -59,64 +62,6 @@ pub async fn handle_event_view(
         }
     }
     Ok(())
-}
-
-/// The action buttons shown under the `/event<id>` detail view: an optional
-/// `⏭ Dismiss` (callback `eid:<id>:dis`, advances past the current occurrence —
-/// only shown when the event is `active`), an optional `⏩ Dismiss repetition`
-/// (callback `eid:<id>:disr`, skips the interval fills to the next anchor — only
-/// shown when the event is `active` and its current source is `Repetition`),
-/// `✏️ Edit` (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete`
-/// (callback `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
-fn event_actions_keyboard(
-    event_id: i64,
-    active: bool,
-    is_repetition: bool,
-) -> InlineKeyboardMarkup {
-    let mut rows = Vec::new();
-    // Dismiss actions get their own first row (only for active events).
-    if active {
-        let mut dismiss_row = vec![InlineKeyboardButton::callback(
-            "⏭ Dismiss next",
-            format!("eid:{event_id}:dis"),
-        )];
-        if is_repetition {
-            dismiss_row.push(InlineKeyboardButton::callback(
-                "⏩ Dismiss repetition",
-                format!("eid:{event_id}:disr"),
-            ));
-        }
-        rows.push(dismiss_row);
-    }
-    // Edit / Delete are always present, on their own row.
-    rows.push(vec![
-        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
-        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del")),
-    ]);
-    InlineKeyboardMarkup::new(rows)
-}
-
-/// The single Cancel button shown while the chat is editing an event (callback
-/// `eid:<id>:edno`, drops the pending edit). Public so `main`'s edit-completion
-/// re-prompts can reuse it.
-pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "Cancel",
-        format!("eid:{event_id}:edno"),
-    )]])
-}
-
-/// The confirmation row shown after the Delete button is tapped: a confirm
-/// (`eid:<id>:delyes`) and a cancel (`eid:<id>:delno`) button. When the flow
-/// started from a fired notification (`from_notification`), both callbacks
-/// carry a trailing `:n` so the follow-up handlers keep the notification text
-/// and restore the notification keyboard instead of the detail-view one.
-fn delete_confirm_keyboard(event_id: i64, from_notification: bool) -> InlineKeyboardMarkup {
-    let suffix = if from_notification { ":n" } else { "" };
-    InlineKeyboardMarkup::new(vec![vec![
-        InlineKeyboardButton::callback("✅ Yes, delete", format!("eid:{event_id}:delyes{suffix}")),
-        InlineKeyboardButton::callback("❌ Cancel", format!("eid:{event_id}:delno{suffix}")),
-    ]])
 }
 
 /// Decodes the event-specific callback envelope `eid:<id>:<action>` into the
@@ -266,7 +211,7 @@ async fn refresh_dismissed_view(
         bot.edit_markup(
             chat_id,
             message_id,
-            crate::state::notification_keyboard(updated.id, updated.active, is_repetition),
+            notification_keyboard(updated.id, updated.active, is_repetition),
         )
         .await
     } else {
@@ -311,7 +256,7 @@ async fn handle_edit_prompt(
         let loc = crate::locale::for_chat(chat_id.0);
         bot.send_html(
             chat_id,
-            edit_prompt(pending::EDIT_ASK_TEXT, &event, loc),
+            edit_prompt(EDIT_ASK_TEXT, &event, loc),
             Some(edit_cancel_keyboard(id)),
         )
         .await?;
@@ -390,7 +335,7 @@ async fn handle_delete_cancel(
             .as_ref()
             .is_some_and(|e| e.source == Some(NextSource::Repetition));
         let markup = if from_notification {
-            crate::state::notification_keyboard(id, active, is_repetition)
+            notification_keyboard(id, active, is_repetition)
         } else {
             event_actions_keyboard(id, active, is_repetition)
         };
@@ -470,82 +415,6 @@ mod tests {
         assert_eq!(parse_event_callback("ev:1:del"), None);
         assert_eq!(parse_event_callback("eid:x:del"), None);
         assert_eq!(parse_event_callback("eid:42"), None);
-    }
-
-    #[test]
-    fn event_keyboards_embed_event_id_and_actions() {
-        use teloxide::types::InlineKeyboardButtonKind::CallbackData;
-
-        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
-            kb.inline_keyboard
-                .concat()
-                .iter()
-                .map(|b| match &b.kind {
-                    CallbackData(d) => d.clone(),
-                    _ => panic!("expected callback data"),
-                })
-                .collect()
-        };
-
-        assert_eq!(
-            datas(event_actions_keyboard(42, true, false)),
-            ["eid:42:dis", "eid:42:ed", "eid:42:del"]
-        );
-        // Active + repetition source → the extra Dismiss-repetition button appears.
-        assert_eq!(
-            datas(event_actions_keyboard(42, true, true)),
-            ["eid:42:dis", "eid:42:disr", "eid:42:ed", "eid:42:del"]
-        );
-        assert_eq!(
-            datas(event_actions_keyboard(42, false, false)),
-            ["eid:42:ed", "eid:42:del"]
-        );
-        // Inactive → no dismiss buttons even when the last source was repetition.
-        assert_eq!(
-            datas(event_actions_keyboard(42, false, true)),
-            ["eid:42:ed", "eid:42:del"]
-        );
-        assert_eq!(
-            datas(delete_confirm_keyboard(42, false)),
-            ["eid:42:delyes", "eid:42:delno"]
-        );
-        // Started from a notification → the `:n` suffix rides along.
-        assert_eq!(
-            datas(delete_confirm_keyboard(42, true)),
-            ["eid:42:delyes:n", "eid:42:delno:n"]
-        );
-        assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
-
-        // Row layout: dismiss actions sit on their own first row, Edit/Delete
-        // on the second. Inactive events drop the dismiss row entirely.
-        let rows = |kb: InlineKeyboardMarkup| -> Vec<Vec<String>> {
-            kb.inline_keyboard
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|b| match &b.kind {
-                            CallbackData(d) => d.clone(),
-                            _ => panic!("expected callback data"),
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-        assert_eq!(
-            rows(event_actions_keyboard(42, true, true)),
-            vec![
-                vec!["eid:42:dis", "eid:42:disr"],
-                vec!["eid:42:ed", "eid:42:del"],
-            ]
-        );
-        assert_eq!(
-            rows(event_actions_keyboard(42, true, false)),
-            vec![vec!["eid:42:dis"], vec!["eid:42:ed", "eid:42:del"]]
-        );
-        assert_eq!(
-            rows(event_actions_keyboard(42, false, false)),
-            vec![vec!["eid:42:ed", "eid:42:del"]]
-        );
     }
 
     #[test]

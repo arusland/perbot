@@ -5,9 +5,9 @@ use perbot::parser;
 use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
-use perbot::telegram::{clamp_message, edit_prompt, extract_chat_info, scheduled_message};
 use perbot::tgbot::TgBot;
-use perbot::types::TgMessage;
+use perbot::types::{ChatInfo, TgMessage};
+use perbot::view::{self, clamp_message, edit_prompt, scheduled_message};
 use teloxide::{prelude::*, types::BotCommandScope, utils::command::BotCommands, utils::html};
 use tokio::sync::mpsc;
 
@@ -201,7 +201,7 @@ async fn message_handler_safe(
     // (and a bot handle for the follow-up sends) before handing them over.
     let bot_for_err = bot.clone();
     let chat_id = msg.chat.id;
-    let chat_info = extract_chat_info(&msg.chat);
+    let chat_info = ChatInfo::from_chat(&msg.chat);
     let msg_text = msg.text().map(str::to_owned);
 
     if let Err(e) = message_handler(
@@ -255,7 +255,7 @@ async fn message_handler(
     pending_edit: PendingEdit,
 ) -> anyhow::Result<()> {
     // Save/update chat info
-    let chat_info = extract_chat_info(&msg.chat);
+    let chat_info = ChatInfo::from_chat(&msg.chat);
     if let Err(e) = provider.upsert_chat(&chat_info) {
         log::error!("Failed to save chat info: {}", e);
     }
@@ -334,28 +334,28 @@ async fn message_handler(
                 let stored = provider.update_event_and_get(event)?;
                 pending_edit.lock().unwrap().remove(&msg.chat.id.0);
                 if truncated {
-                    bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                    bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                         .await?;
                 }
                 let reply = if let Some(dt) = stored.next_datetime {
                     let now = chrono::Local::now().naive_local();
                     scheduled_message(now, dt, &stored, loc)
                 } else {
-                    format!("<b>{}</b>", html::escape(text))
+                    view::inactive_event_reply(text)
                 };
                 bot.send_html(msg.chat.id, reply, None).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the copyable current input still attached.
                 let lead = if parser::parse_time_only(text, loc).is_some() {
-                    pending::EDIT_NEED_TEXT
+                    view::EDIT_NEED_TEXT
                 } else {
-                    pending::EDIT_NEED_TIME
+                    view::EDIT_NEED_TIME
                 };
                 bot.send_html(
                     msg.chat.id,
                     edit_prompt(lead, &old, loc),
-                    Some(commands::edit_cancel_keyboard(event_id)),
+                    Some(view::edit_cancel_keyboard(event_id)),
                 )
                 .await?;
             }
@@ -374,12 +374,8 @@ async fn message_handler(
                 // Whitespace-only reply carries no usable body: keep waiting and
                 // re-prompt with the Cancel button.
                 pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
-                bot.send_text(
-                    msg.chat.id,
-                    pending::ASK_TEXT,
-                    Some(pending::cancel_keyboard()),
-                )
-                .await?;
+                bot.send_text(msg.chat.id, view::ASK_TEXT, Some(view::cancel_keyboard()))
+                    .await?;
                 return Ok(());
             }
             event.chat_id = msg.chat.id.0;
@@ -388,14 +384,14 @@ async fn message_handler(
             event.message = clamped;
             let stored = provider.insert_event_and_get(event)?;
             if truncated {
-                bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
             let reply = if let Some(dt) = stored.next_datetime {
                 let now = chrono::Local::now().naive_local();
                 scheduled_message(now, dt, &stored, loc)
             } else {
-                format!("<b>{}</b>", html::escape(text))
+                view::inactive_event_reply(text)
             };
             bot.send_html(msg.chat.id, reply, None).await?;
             return Ok(());
@@ -413,7 +409,7 @@ async fn message_handler(
 
             let stored = provider.insert_event_and_get(event)?;
             if truncated {
-                bot.send_text(msg.chat.id, pending::MESSAGE_TRUNCATED, None)
+                bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
 
@@ -421,21 +417,17 @@ async fn message_handler(
                 let now = chrono::Local::now().naive_local();
                 scheduled_message(now, dt, &stored, loc)
             } else {
-                format!("<b>{}</b>", html::escape(text))
+                view::inactive_event_reply(text)
             }
         } else if let Some(event) = parser::parse_time_only(text, loc) {
             // A time was given but no reminder body: hold the parsed event and ask
             // for the text, offering a Cancel button.
             pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
-            bot.send_text(
-                msg.chat.id,
-                pending::ASK_TEXT,
-                Some(pending::cancel_keyboard()),
-            )
-            .await?;
+            bot.send_text(msg.chat.id, view::ASK_TEXT, Some(view::cancel_keyboard()))
+                .await?;
             return Ok(());
         } else {
-            format!("Unparsable message: <b>{}</b>", html::escape(text))
+            view::unparsable_message(text)
         }
     } else if msg.photo().is_some() {
         "Received a photo!".to_string()

@@ -399,6 +399,47 @@ pub struct ChatInfo {
     pub created_at: Option<NaiveDateTime>,
 }
 
+impl ChatInfo {
+    /// Maps a teloxide [`Chat`](teloxide::types::Chat) into the stored chat row
+    /// (`updated_at`/`created_at` left `None`, as for any value built to upsert).
+    pub fn from_chat(chat: &teloxide::types::Chat) -> Self {
+        use teloxide::types::{ChatKind, PublicChatChannel, PublicChatKind, PublicChatSupergroup};
+
+        let (chat_type, title, username, first_name, last_name) = match &chat.kind {
+            ChatKind::Private(private) => (
+                ChatType::Private,
+                None,
+                private.username.clone(),
+                private.first_name.clone(),
+                private.last_name.clone(),
+            ),
+            ChatKind::Public(public) => {
+                let (chat_type, username) = match &public.kind {
+                    PublicChatKind::Group => (ChatType::Group, None),
+                    PublicChatKind::Supergroup(PublicChatSupergroup { username, .. }) => {
+                        (ChatType::Supergroup, username.clone())
+                    }
+                    PublicChatKind::Channel(PublicChatChannel { username, .. }) => {
+                        (ChatType::Channel, username.clone())
+                    }
+                };
+                (chat_type, public.title.clone(), username, None, None)
+            }
+        };
+
+        ChatInfo {
+            id: chat.id.0,
+            chat_type,
+            title,
+            username,
+            first_name,
+            last_name,
+            updated_at: None,
+            created_at: None,
+        }
+    }
+}
+
 /// An outbound Telegram message: the destination chat, its final (already
 /// formatted, hint already appended) text body, and the inline keyboard the
 /// producer chose for it. `reply_markup` is `Some(..)` when the message should

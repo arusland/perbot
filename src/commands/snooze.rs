@@ -4,9 +4,9 @@
 
 use super::event::parse_event_callback;
 use crate::state::EventProvider;
-use crate::telegram::scheduled_message;
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
+use crate::view::scheduled_message;
 use chrono::{Duration, Local};
 use teloxide::types::CallbackQuery;
 

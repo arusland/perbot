@@ -2,9 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Local, Months, NaiveDate, NaiveDateTime};
 
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-use teloxide::utils::html;
-
 use crate::error::Result;
 use crate::scheduler;
 use crate::storage::EventStorage;
@@ -13,77 +10,10 @@ use crate::types::{
     TgMessage,
 };
 
-/// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
-/// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
-const SNOOZE_OPTIONS: &[(&str, i64)] = &[
-    ("1 min", 1),
-    ("5 mins", 5),
-    ("10 mins", 10),
-    ("30 mins", 30),
-    ("1 hour", 60),
-    ("2 hours", 120),
-    ("8 hours", 480),
-    ("1 day", 1440),
-];
-
-/// Hint appended below a fired reminder, explaining the snooze buttons. Purely
-/// informational — the snooze title is loaded from the stored event, not from
-/// the message text.
-const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
-
 /// How many missed events `move_missed_events` fetches and reschedules per
 /// batch — the upper bound on how much of the missed backlog is ever held in
 /// memory at once.
 const MISSED_MOVE_BATCH: usize = 100;
-
-/// Inline keyboard attached to a fired reminder: snooze rows (each button
-/// carries `eid:<id>:sn:<minutes>` callback data, where `<id>` is the fired
-/// event's DB id, used to load the event when pressed), a dismiss row when the
-/// event stays `active` after the fire (`eid:<id>:dis:n` skips the upcoming
-/// occurrence; `eid:<id>:disr:n` is added when `is_repetition` — the upcoming
-/// `source` is `Repetition` — and skips the interval fills to the next anchor),
-/// plus an Edit/Delete row (`eid:<id>:ed` starts the edit flow;
-/// `eid:<id>:del:n` starts the notification-aware delete flow, whose Cancel
-/// restores this keyboard). The `:n` suffix marks the notification flavor: the
-/// handlers keep the fired text and refresh only the keyboard. Public so the
-/// dismiss and delete-cancel handlers in `commands::event` can rebuild it.
-pub fn notification_keyboard(
-    event_id: i64,
-    active: bool,
-    is_repetition: bool,
-) -> InlineKeyboardMarkup {
-    // Four buttons on the first row, the rest on the second, to fit narrow screens.
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
-        .chunks(4)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|(label, minutes)| {
-                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
-                })
-                .collect()
-        })
-        .collect();
-    // Dismiss actions get their own row (only while a future occurrence remains).
-    if active {
-        let mut dismiss_row = vec![InlineKeyboardButton::callback(
-            "⏭ Dismiss next",
-            format!("eid:{event_id}:dis:n"),
-        )];
-        if is_repetition {
-            dismiss_row.push(InlineKeyboardButton::callback(
-                "⏩ Dismiss repetition",
-                format!("eid:{event_id}:disr:n"),
-            ));
-        }
-        rows.push(dismiss_row);
-    }
-    rows.push(vec![
-        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
-        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del:n")),
-    ]);
-    InlineKeyboardMarkup::new(rows)
-}
 
 struct EventProviderState {
     storage: EventStorage,
@@ -512,12 +442,12 @@ impl EventProvider {
                         chat_id,
                         PageRequest {
                             page: 0,
-                            size: crate::telegram::LIST_PAGE_SIZE,
+                            size: crate::view::LIST_PAGE_SIZE,
                         },
                     )?;
                     let loc = crate::locale::for_chat(chat_id);
                     let (text, reply_markup) =
-                        crate::commands::format_missed_page(&page.events, page.total, now, 0, loc);
+                        crate::view::format_missed_page(&page.events, page.total, now, 0, loc);
                     messages.push(TgMessage {
                         chat_id,
                         text,
@@ -557,28 +487,19 @@ impl EventProvider {
                     let messages: Vec<TgMessage> = events
                         .iter()
                         .map(|e| {
-                            // `e.message` and the preview are HTML fragments; the
-                            // hint is plain text, so escape only the hint for HTML.
                             let loc = crate::locale::for_chat(e.chat_id);
-                            let preview = crate::telegram::next_launches_preview(e, now, dt, loc);
                             // Predict the reschedule `update_and_reload` performs
                             // right after sending, so the dismiss row reflects the
                             // event's post-fire state.
                             let next = scheduler::calc_next_at(e.clone(), now);
-                            TgMessage {
-                                chat_id: e.chat_id,
-                                text: format!(
-                                    "{}{}\n\n{}",
-                                    e.message,
-                                    preview,
-                                    html::escape(SNOOZE_HINT)
-                                ),
-                                reply_markup: Some(notification_keyboard(
-                                    e.id,
-                                    next.active,
-                                    next.source == Some(NextSource::Repetition),
-                                )),
-                            }
+                            crate::view::fired_message(
+                                e,
+                                now,
+                                dt,
+                                next.active,
+                                next.source == Some(NextSource::Repetition),
+                                loc,
+                            )
                         })
                         .collect();
 
@@ -792,75 +713,6 @@ mod tests {
             provider.dismiss_repetition(9999, 1).unwrap(),
             DismissOutcome::NotFound
         ));
-    }
-
-    #[test]
-    fn notification_keyboard_has_snooze_buttons_plus_action_rows() {
-        // Inactive after the fire: snooze rows + Edit/Delete only.
-        let kb = notification_keyboard(42, false, false);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 2);
-        assert_eq!(kb.inline_keyboard.last().unwrap().len(), 2);
-
-        // Still active: a dismiss row appears between snooze and Edit/Delete.
-        let kb = notification_keyboard(42, true, false);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 3);
-
-        // Active with a Repetition source: the dismiss row gains a second button.
-        let kb = notification_keyboard(42, true, true);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 4);
-        let dismiss_row = &kb.inline_keyboard[kb.inline_keyboard.len() - 2];
-        assert_eq!(dismiss_row.len(), 2);
-        assert_eq!(kb.inline_keyboard.last().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn notification_keyboard_embeds_event_id_in_callback_data() {
-        use teloxide::types::InlineKeyboardButtonKind;
-
-        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
-            kb.inline_keyboard
-                .into_iter()
-                .flatten()
-                .map(|button| {
-                    let InlineKeyboardButtonKind::CallbackData(data) = button.kind else {
-                        panic!("expected callback-data button");
-                    };
-                    data
-                })
-                .collect()
-        };
-        let snoozes = || {
-            SNOOZE_OPTIONS
-                .iter()
-                .map(|(_, minutes)| format!("eid:42:sn:{minutes}"))
-        };
-
-        let expected: Vec<String> = snoozes()
-            .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
-            .collect();
-        assert_eq!(datas(notification_keyboard(42, false, false)), expected);
-
-        let expected: Vec<String> = snoozes()
-            .chain([
-                "eid:42:dis:n".to_owned(),
-                "eid:42:disr:n".to_owned(),
-                "eid:42:ed".to_owned(),
-                "eid:42:del:n".to_owned(),
-            ])
-            .collect();
-        assert_eq!(datas(notification_keyboard(42, true, true)), expected);
-
-        let expected: Vec<String> = snoozes()
-            .chain([
-                "eid:42:dis:n".to_owned(),
-                "eid:42:ed".to_owned(),
-                "eid:42:del:n".to_owned(),
-            ])
-            .collect();
-        assert_eq!(datas(notification_keyboard(42, true, false)), expected);
     }
 
     #[test]

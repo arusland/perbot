@@ -4,12 +4,11 @@
 //! the bot asks for the text and shows a Cancel button. The parsed (body-less)
 //! event is held per-chat until the next text message supplies the body, mirroring
 //! the in-memory [`crate::import::PendingImport`] pattern. State is in-memory only;
-//! a restart simply drops pending requests.
+//! a restart simply drops pending requests. The prompt strings and the Cancel
+//! keyboard the flows show live in `crate::view`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 use crate::types::EventInfo;
 
@@ -30,53 +29,4 @@ pub type PendingEdit = Arc<Mutex<HashMap<i64, i64>>>;
 
 pub fn new_pending_edit() -> PendingEdit {
     Arc::new(Mutex::new(HashMap::new()))
-}
-
-/// Prompt shown after a time-only message, asking for the reminder text.
-pub const ASK_TEXT: &str = "🕒 Got the time. Now send the reminder text:";
-
-/// Prompt shown when the user taps Edit, asking for the replacement input.
-pub const EDIT_ASK_TEXT: &str = "✏️ Send the new time and message:";
-
-/// Re-prompt when an edit reply carried a time but no reminder text.
-pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too:";
-
-/// Re-prompt when an edit reply couldn't be parsed into a time.
-pub const EDIT_NEED_TIME: &str = "Couldn't read a time. Send the new time and message:";
-
-/// Warning shown when a submitted reminder body exceeded Telegram's length limit
-/// and was shortened to fit (see [`crate::telegram::clamp_message`]).
-pub const MESSAGE_TRUNCATED: &str =
-    "⚠️ Your message was too long and has been shortened to fit Telegram's limit.";
-
-/// Callback data carried by the Cancel button (routed by the `pm:` prefix).
-pub const CANCEL_DATA: &str = "pm:cancel";
-
-/// Single-button keyboard offering to cancel the pending request.
-pub fn cancel_keyboard() -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
-        "Cancel",
-        CANCEL_DATA,
-    )]])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use teloxide::types::InlineKeyboardButtonKind;
-
-    #[test]
-    fn cancel_keyboard_carries_cancel_data() {
-        let kb = cancel_keyboard();
-        let button = kb
-            .inline_keyboard
-            .iter()
-            .flatten()
-            .next()
-            .expect("one button");
-        let InlineKeyboardButtonKind::CallbackData(data) = &button.kind else {
-            panic!("expected callback-data button");
-        };
-        assert_eq!(data, CANCEL_DATA);
-    }
 }

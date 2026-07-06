@@ -1,0 +1,659 @@
+//! Single-event rendering: the scheduling confirmation, the upcoming-launches
+//! preview, the `/event<id>` detail view, the re-parseable input reconstruction
+//! and edit prompt, plus the event action keyboards.
+
+use super::message::{format_when, html_to_plain};
+use crate::locale::LocaleProvider;
+use crate::scheduler;
+use crate::types::{EventInfo, MonthlyPattern};
+use chrono::{NaiveDateTime, Weekday};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::utils::html;
+
+/// Maximum upcoming launches previewed for a reminder. A further `• ...` bullet
+/// is shown when more launches follow.
+const MAX_NEXT_PREVIEW: usize = 3;
+
+/// Preview block of upcoming launches for a reminder, computed with
+/// `scheduler::calc_next_at`. Lists up to MAX_NEXT_PREVIEW launches as bullets,
+/// plus a trailing `• ...` when more remain. Returns "" for one-off events
+/// (no future occurrence). `after` is the search baseline (the launch being
+/// confirmed or fired), so the listed launches are strictly after it; `now` is
+/// the relative-time origin, so each bullet's relative offset (`(1d)`) is
+/// measured from the current moment rather than from `after`. Output is an HTML
+/// fragment: the `<b>Next launches:</b>` header is bold, the bullets and
+/// datetimes are plain (no HTML specials), so callers embed it verbatim into
+/// their HTML output.
+pub fn next_launches_preview(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    after: NaiveDateTime,
+    loc: &dyn LocaleProvider,
+) -> String {
+    let mut launches: Vec<NaiveDateTime> = Vec::new();
+    let mut current = event.clone();
+    let mut cursor = after;
+    // Probe one beyond the limit so we know whether to show the "..." bullet.
+    while launches.len() <= MAX_NEXT_PREVIEW {
+        current = scheduler::calc_next_at(current, cursor);
+        match current.next_datetime {
+            Some(next) => {
+                launches.push(next);
+                cursor = next;
+            }
+            None => break,
+        }
+    }
+    if launches.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n\n<b>{}</b>", loc.next_launches_header());
+    for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
+        out.push_str(&format!("\n• {}", format_when(now, *dt, loc)));
+    }
+    if launches.len() > MAX_NEXT_PREVIEW {
+        out.push_str("\n• ...");
+    }
+    out
+}
+
+/// Confirmation sent when a reminder is scheduled (new parse or snooze).
+/// HTML: the bolded title shows the absolute datetime plus the relative time
+/// from `now` (e.g. `13:30 22.06.2026 (1d)`), followed by a
+/// `Message: <event.message>` line. `event.message` is already an HTML fragment
+/// (the user's formatting preserved), so it is embedded verbatim. For recurring
+/// events a "Next launches" preview is appended; one-off events (empty preview)
+/// render as just the title plus the message line.
+pub fn scheduled_message(
+    now: NaiveDateTime,
+    dt: NaiveDateTime,
+    event: &EventInfo,
+    loc: &dyn LocaleProvider,
+) -> String {
+    let preview = next_launches_preview(event, now, dt, loc);
+    format!(
+        "Scheduled message for <b>{}</b>\nMessage: {}{}",
+        html::escape(&format_when(now, dt, loc)),
+        event.message,
+        preview
+    )
+}
+
+/// Reconstructs the re-parseable plain-text input for an event: its canonical time
+/// expression ([`EventInfo::normalize_time`]) followed by the plain-text message.
+/// Parsing the result yields the same event, so it can be offered as a copyable
+/// starting point for editing. Plain text; callers targeting HTML must escape it.
+pub fn event_source_input(event: &EventInfo, loc: &dyn LocaleProvider) -> String {
+    let time = event.normalize_time(loc);
+    let message = html_to_plain(&event.message);
+    if message.is_empty() {
+        time
+    } else {
+        format!("{time} {message}")
+    }
+}
+
+/// Builds the HTML edit prompt: the `lead` line followed by the event's current
+/// input wrapped in a `<code>` block, which Telegram clients copy on tap. Both
+/// parts are HTML-escaped.
+pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> String {
+    format!(
+        "{}\n\n<code>{}</code>",
+        html::escape(lead),
+        html::escape(&event_source_input(event, loc))
+    )
+}
+
+/// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
+/// `"every friday"`, `"every first sunday"`, `"last day of the month"`. Returns
+/// `None` for one-off events (no recurrence). The recurrence-bearing fields are
+/// mutually exclusive, checked in priority order. Output is plain text with no
+/// HTML specials.
+fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String> {
+    let every = loc.every_word();
+    if let Some(rep) = &e.repetition {
+        let unit = loc.unit_label(rep.unit, rep.interval != 1);
+        return Some(if rep.interval == 1 {
+            format!("{every} {unit}")
+        } else {
+            format!("{every} {} {unit}", rep.interval)
+        });
+    }
+    if let Some(days) = &e.days {
+        let mut list: Vec<Weekday> = days.iter().copied().collect();
+        list.sort_by_key(|d| d.num_days_from_monday());
+        let names = list
+            .iter()
+            .map(|d| loc.weekday_full(*d))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(format!("{every} {names}"));
+    }
+    if let Some(pattern) = &e.monthly_pattern {
+        return Some(match pattern {
+            MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                format!(
+                    "{every} {} {}",
+                    loc.ordinal_word(*ord),
+                    loc.weekday_full(*wd)
+                )
+            }
+            MonthlyPattern::LastDay => loc.last_day_phrase().to_string(),
+            MonthlyPattern::DayOfMonth(d) => loc.day_of_month_recurrence(&loc.ordinal_suffix(*d)),
+        });
+    }
+    None
+}
+
+/// The bold datetime/relative line shared by the `/events` two-line row and the
+/// single-event detail view: `• <b>HH:MM dd.mm.yyyy (in <rel>[, <recurrence>])</b>`
+/// (`(soon[, …])` when under a minute away — the locale owns the preposition).
+/// `, <recurrence>` is appended inside the parentheses, next to the relative time,
+/// when the event repeats. Datetime/relative/recurrence parts contain no HTML
+/// specials. Returns `• <b>—</b>` for an event with no upcoming launch.
+pub(super) fn event_when_line(
+    e: &EventInfo,
+    now: NaiveDateTime,
+    loc: &dyn LocaleProvider,
+) -> String {
+    let recurrence = describe_recurrence(e, loc)
+        .map(|r| format!(", {r}"))
+        .unwrap_or_default();
+    let when = match e.next_datetime {
+        Some(dt) => html::escape(&format!(
+            "{} ({}{})",
+            loc.format_datetime(dt),
+            loc.format_relative_in((dt - now).num_seconds()),
+            recurrence
+        )),
+        None => "—".to_string(),
+    };
+    format!("• <b>{when}</b>")
+}
+
+/// Detailed single-event view for `/event<id>`: the same bold datetime/recurrence
+/// line as the `/events` two-line row ([`event_when_line`]), the full HTML message
+/// fragment (formatting preserved, not truncated), and the upcoming-launches preview
+/// ([`next_launches_preview`], identical to a fired reminder). The preview is empty
+/// for one-off events. An **inactive** (out-of-date) event instead renders a single
+/// bold notice — "Event is out of date. Last fired at <last_next_datetime>" — above
+/// the message body.
+pub fn event_detail(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+    if !event.active {
+        let notice = match event.last_next_datetime {
+            Some(dt) => html::escape(&format!(
+                "Event is out of date. Last fired at {}",
+                loc.format_datetime(dt)
+            )),
+            None => "Event is out of date.".to_string(),
+        };
+        return format!("• <b>{notice}</b>\n{}", event.message);
+    }
+    let preview = match event.next_datetime {
+        Some(dt) => next_launches_preview(event, now, dt, loc),
+        None => String::new(),
+    };
+    format!(
+        "{}\n{}{}",
+        event_when_line(event, now, loc),
+        event.message,
+        preview
+    )
+}
+
+/// The action buttons shown under the `/event<id>` detail view: an optional
+/// `⏭ Dismiss` (callback `eid:<id>:dis`, advances past the current occurrence —
+/// only shown when the event is `active`), an optional `⏩ Dismiss repetition`
+/// (callback `eid:<id>:disr`, skips the interval fills to the next anchor — only
+/// shown when the event is `active` and its current source is `Repetition`),
+/// `✏️ Edit` (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete`
+/// (callback `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
+pub fn event_actions_keyboard(
+    event_id: i64,
+    active: bool,
+    is_repetition: bool,
+) -> InlineKeyboardMarkup {
+    let mut rows = Vec::new();
+    // Dismiss actions get their own first row (only for active events).
+    if active {
+        let mut dismiss_row = vec![InlineKeyboardButton::callback(
+            "⏭ Dismiss next",
+            format!("eid:{event_id}:dis"),
+        )];
+        if is_repetition {
+            dismiss_row.push(InlineKeyboardButton::callback(
+                "⏩ Dismiss repetition",
+                format!("eid:{event_id}:disr"),
+            ));
+        }
+        rows.push(dismiss_row);
+    }
+    // Edit / Delete are always present, on their own row.
+    rows.push(vec![
+        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
+        InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del")),
+    ]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// The single Cancel button shown while the chat is editing an event (callback
+/// `eid:<id>:edno`, drops the pending edit). Public so `main`'s edit-completion
+/// re-prompts can reuse it.
+pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+        "Cancel",
+        format!("eid:{event_id}:edno"),
+    )]])
+}
+
+/// The confirmation row shown after the Delete button is tapped: a confirm
+/// (`eid:<id>:delyes`) and a cancel (`eid:<id>:delno`) button. When the flow
+/// started from a fired notification (`from_notification`), both callbacks
+/// carry a trailing `:n` so the follow-up handlers keep the notification text
+/// and restore the notification keyboard instead of the detail-view one.
+pub fn delete_confirm_keyboard(event_id: i64, from_notification: bool) -> InlineKeyboardMarkup {
+    let suffix = if from_notification { ":n" } else { "" };
+    InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("✅ Yes, delete", format!("eid:{event_id}:delyes{suffix}")),
+        InlineKeyboardButton::callback("❌ Cancel", format!("eid:{event_id}:delno{suffix}")),
+    ]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::locale::EN;
+    use crate::view::test_support::sample_event;
+    use chrono::{Duration, NaiveDate, NaiveTime};
+
+    #[test]
+    fn scheduled_message_formats_datetime() {
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 30).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
+        // A one-off event has no upcoming launches, so only the title is shown,
+        // with the relative time (1d) appended.
+        let event = sample_event("ring in the new year", Some(dt));
+        assert_eq!(
+            scheduled_message(now, dt, &event, &EN),
+            "Scheduled message for <b>13:05 31.12.2027 (1d)</b>\nMessage: ring in the new year"
+        );
+    }
+
+    #[test]
+    fn scheduled_message_embeds_html_message_verbatim() {
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        // `message` is already an HTML fragment; it is embedded as-is.
+        let event = sample_event("<b>call</b> the office", Some(dt));
+        assert_eq!(
+            scheduled_message(now, dt, &event, &EN),
+            "Scheduled message for <b>10:00 22.06.2026 (1h)</b>\nMessage: <b>call</b> the office"
+        );
+    }
+
+    #[test]
+    fn scheduled_message_appends_preview_for_recurring() {
+        use crate::types::{Repetition, TimeUnit};
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(dt));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        let text = scheduled_message(now, dt, &event, &EN);
+        assert!(text.starts_with("Scheduled message for <b>10:00 22.06.2026 (1h)</b>"));
+        assert!(text.contains("Message: standup"));
+        // Preview lists launches strictly after the confirmed datetime.
+        assert!(text.contains("<b>Next launches:</b>"));
+        assert!(text.contains("• 10:00 23.06.2026"));
+        assert!(text.contains("• ..."));
+    }
+
+    #[test]
+    fn next_launches_preview_one_off_is_empty() {
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("call mom", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        assert_eq!(next_launches_preview(&event, fire, fire, &EN), "");
+    }
+
+    #[test]
+    fn next_launches_preview_recurring_shows_three_plus_ellipsis() {
+        use crate::types::{Repetition, TimeUnit};
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        let preview = next_launches_preview(&event, fire, fire, &EN);
+        assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
+        // Three consecutive days after the firing day, then the overflow bullet.
+        assert!(preview.contains("• 10:00 23.06.2026"));
+        assert!(preview.contains("• 10:00 24.06.2026"));
+        assert!(preview.contains("• 10:00 25.06.2026"));
+        assert!(preview.contains("• ..."));
+        assert_eq!(preview.matches('•').count(), 4);
+    }
+
+    #[test]
+    fn next_launches_preview_relative_measured_from_now_not_after() {
+        use crate::types::{Repetition, TimeUnit};
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("standup", Some(fire));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+
+        // `now` one day before the firing occurrence. The first upcoming launch
+        // is 2026-06-23 10:00 — two days after `now`, so the relative offset must
+        // read `(2d)` (measured from `now`), not `(1d)` (from `after`/`fire`).
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        let preview = next_launches_preview(&event, now, fire, &EN);
+        assert!(preview.contains("• 10:00 23.06.2026 (2d)"));
+    }
+
+    #[test]
+    fn next_launches_preview_fewer_than_three_has_no_ellipsis() {
+        use std::collections::HashSet;
+        // Year-restricted to 2027; firing on its second-to-last day leaves a single
+        // future launch (2027-12-31 23:00) before the schedule is exhausted.
+        let fire = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 30).unwrap(),
+            NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
+        );
+        let mut event = sample_event("year end", Some(fire));
+        event.time = NaiveTime::from_hms_opt(23, 0, 0);
+        event.years = Some(HashSet::from([2027]));
+
+        let preview = next_launches_preview(&event, fire, fire, &EN);
+        assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
+        assert!(preview.contains("• 23:00 31.12.2027"));
+        assert!(!preview.contains("• ..."));
+        assert_eq!(preview.matches('•').count(), 1);
+    }
+
+    #[test]
+    fn event_source_input_reconstructs_reparseable_text() {
+        use crate::parser;
+
+        // Clock time + message.
+        let mut e = sample_event("call the office", None);
+        e.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
+        assert_eq!(event_source_input(&e, &EN), "13:30 call the office");
+        // Round-trips: parsing yields the same time/message.
+        let parsed = parser::parse(&event_source_input(&e, &EN), &EN).unwrap();
+        assert_eq!(parsed.time, e.time);
+        assert_eq!(parsed.message, "call the office");
+
+        // Recurrence (weekday set) is included via normalize_time.
+        let mut r = sample_event("standup", None);
+        r.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        r.days = Some(std::collections::HashSet::from([
+            chrono::Weekday::Mon,
+            chrono::Weekday::Tue,
+            chrono::Weekday::Wed,
+            chrono::Weekday::Thu,
+            chrono::Weekday::Fri,
+        ]));
+        assert_eq!(event_source_input(&r, &EN), "09:00 Mon-Fri standup");
+
+        // HTML formatting in the message is reduced to plain text.
+        let mut b = sample_event("<b>call</b> her", None);
+        b.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        assert_eq!(event_source_input(&b, &EN), "08:00 call her");
+    }
+
+    #[test]
+    fn edit_prompt_wraps_input_in_code_and_escapes() {
+        let mut e = sample_event("a &amp; b &lt;c&gt;", None);
+        e.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        let prompt = edit_prompt("Edit:", &e, &EN);
+        // The copyable block is a <code> span...
+        assert!(prompt.contains("<code>"));
+        assert!(prompt.contains("</code>"));
+        // ...holding the plain input with HTML specials re-escaped for HTML output.
+        assert!(prompt.contains("<code>10:00 a &amp; b &lt;c&gt;</code>"));
+        assert!(prompt.starts_with("Edit:\n\n"));
+    }
+
+    #[test]
+    fn describe_recurrence_variants() {
+        use crate::types::{Ordinal, Repetition, TimeUnit};
+        use std::collections::HashSet;
+
+        let mut e = sample_event("x", None);
+        // One-off → no recurrence.
+        assert_eq!(describe_recurrence(&e, &EN), None);
+
+        // Interval repetition: plural and singular (n == 1).
+        e.repetition = Some(Repetition {
+            interval: 2,
+            unit: TimeUnit::Days,
+        });
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every 2 days")
+        );
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        assert_eq!(describe_recurrence(&e, &EN).as_deref(), Some("every hour"));
+        e.repetition = None;
+
+        // Single weekday, then a sorted multi-day set (Mon before Fri).
+        e.days = Some(HashSet::from([Weekday::Fri]));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every Friday")
+        );
+        e.days = Some(HashSet::from([Weekday::Fri, Weekday::Mon]));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every Monday, Friday")
+        );
+        e.days = None;
+
+        // Monthly patterns.
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every first Sunday")
+        );
+        e.monthly_pattern = Some(MonthlyPattern::LastDay);
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("last day of the month")
+        );
+        e.monthly_pattern = Some(MonthlyPattern::DayOfMonth(28));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("28th day of the month")
+        );
+    }
+
+    #[test]
+    fn event_detail_one_off_has_no_launches_block() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let e = sample_event(
+            "<b>call</b> the office and bring the documents",
+            Some(now + Duration::hours(2)),
+        );
+        let text = event_detail(&e, now, &EN);
+        // Bold when-line, then the full untruncated HTML message verbatim.
+        assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h)</b>\n"));
+        assert!(text.contains("<b>call</b> the office and bring the documents"));
+        // One-off: no upcoming-launches block.
+        assert!(!text.contains("Next launches:"));
+    }
+
+    #[test]
+    fn event_when_line_imminent_says_soon_without_in() {
+        use crate::types::{Repetition, TimeUnit};
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let dt = now + Duration::seconds(30);
+        let mut e = sample_event("standup", Some(dt));
+        e.time = Some(dt.time());
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        let text = event_detail(&e, now, &EN);
+        // Under a minute away: bare "soon", never "in soon".
+        assert!(text.starts_with("• <b>12:00 15.06.2026 (soon, every hour)</b>\n"));
+        assert!(!text.contains("in soon"));
+    }
+
+    #[test]
+    fn event_detail_recurring_shows_launches_block() {
+        use crate::types::{Repetition, TimeUnit};
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let dt = now + Duration::hours(2);
+        let mut e = sample_event("standup", Some(dt));
+        e.time = Some(dt.time());
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        let text = event_detail(&e, now, &EN);
+        assert!(text.starts_with("• <b>14:00 15.06.2026 (in 2h, every day)</b>\n"));
+        assert!(text.contains("standup"));
+        // Recurring: launches block present, listing dates after the upcoming one.
+        assert!(text.contains("<b>Next launches:</b>"));
+        assert!(text.contains("• 14:00 16.06.2026"));
+    }
+
+    #[test]
+    fn event_detail_inactive_shows_last_fired_notice() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let mut e = sample_event("expired reminder", None);
+        e.last_next_datetime = Some(
+            NaiveDateTime::parse_from_str("2026-06-10 09:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        let text = event_detail(&e, now, &EN);
+        assert!(
+            text.starts_with("• <b>Event is out of date. Last fired at 09:30 10.06.2026</b>\n")
+        );
+        assert!(text.contains("expired reminder"));
+        // Inactive: no when-line relative time, no launches block.
+        assert!(!text.contains("Next launches:"));
+    }
+
+    #[test]
+    fn event_keyboards_embed_event_id_and_actions() {
+        use teloxide::types::InlineKeyboardButtonKind::CallbackData;
+
+        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
+            kb.inline_keyboard
+                .concat()
+                .iter()
+                .map(|b| match &b.kind {
+                    CallbackData(d) => d.clone(),
+                    _ => panic!("expected callback data"),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            datas(event_actions_keyboard(42, true, false)),
+            ["eid:42:dis", "eid:42:ed", "eid:42:del"]
+        );
+        // Active + repetition source → the extra Dismiss-repetition button appears.
+        assert_eq!(
+            datas(event_actions_keyboard(42, true, true)),
+            ["eid:42:dis", "eid:42:disr", "eid:42:ed", "eid:42:del"]
+        );
+        assert_eq!(
+            datas(event_actions_keyboard(42, false, false)),
+            ["eid:42:ed", "eid:42:del"]
+        );
+        // Inactive → no dismiss buttons even when the last source was repetition.
+        assert_eq!(
+            datas(event_actions_keyboard(42, false, true)),
+            ["eid:42:ed", "eid:42:del"]
+        );
+        assert_eq!(
+            datas(delete_confirm_keyboard(42, false)),
+            ["eid:42:delyes", "eid:42:delno"]
+        );
+        // Started from a notification → the `:n` suffix rides along.
+        assert_eq!(
+            datas(delete_confirm_keyboard(42, true)),
+            ["eid:42:delyes:n", "eid:42:delno:n"]
+        );
+        assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
+
+        // Row layout: dismiss actions sit on their own first row, Edit/Delete
+        // on the second. Inactive events drop the dismiss row entirely.
+        let rows = |kb: InlineKeyboardMarkup| -> Vec<Vec<String>> {
+            kb.inline_keyboard
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|b| match &b.kind {
+                            CallbackData(d) => d.clone(),
+                            _ => panic!("expected callback data"),
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows(event_actions_keyboard(42, true, true)),
+            vec![
+                vec!["eid:42:dis", "eid:42:disr"],
+                vec!["eid:42:ed", "eid:42:del"],
+            ]
+        );
+        assert_eq!(
+            rows(event_actions_keyboard(42, true, false)),
+            vec![vec!["eid:42:dis"], vec!["eid:42:ed", "eid:42:del"]]
+        );
+        assert_eq!(
+            rows(event_actions_keyboard(42, false, false)),
+            vec![vec!["eid:42:ed", "eid:42:del"]]
+        );
+    }
+}

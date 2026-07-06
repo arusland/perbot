@@ -10,6 +10,6 @@ pub mod richtext;
 pub mod scheduler;
 pub mod state;
 pub mod storage;
-pub mod telegram;
 pub mod tgbot;
 pub mod types;
+pub mod view;

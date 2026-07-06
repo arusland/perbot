@@ -16,17 +16,15 @@ mod logs;
 mod snooze;
 
 pub use cancel::handle_cancel_pending;
-pub use event::{
-    edit_cancel_keyboard, handle_event_callback, handle_event_view, parse_event_command,
-};
+pub use event::{handle_event_callback, handle_event_view, parse_event_command};
 pub use import::handle_import_zip;
-pub use list::{format_missed_page, handle_list_callback};
+pub use list::handle_list_callback;
 pub use snooze::handle_snooze_callback;
 
 use crate::import::PendingImport;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
-use list::ListKind;
+use crate::view::ListKind;
 use teloxide::types::ChatId;
 use teloxide::utils::command::BotCommands;
 
