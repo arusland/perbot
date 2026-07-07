@@ -213,6 +213,9 @@ impl LocaleProvider for English {
     fn next_launches_header(&self) -> &'static str {
         "Next launches:"
     }
+    fn time_label(&self) -> &'static str {
+        "Time"
+    }
 }
 
 #[cfg(test)]

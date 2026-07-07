@@ -208,6 +208,9 @@ pub trait LocaleProvider: Sync {
     fn format_datetime(&self, dt: NaiveDateTime) -> String;
     /// Bold header above the upcoming-launches preview (`"Next launches:"`).
     fn next_launches_header(&self) -> &'static str;
+    /// Label prefixed to the first-fire datetime in the single-event detail
+    /// view (`"Time"`, rendered as `Time: <datetime>`).
+    fn time_label(&self) -> &'static str;
 }
 
 #[cfg(test)]

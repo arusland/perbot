@@ -6,7 +6,7 @@ use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
 use perbot::tgbot::TgBot;
-use perbot::types::{ChatInfo, TgMessage};
+use perbot::types::{ChatInfo, EventInfo, NextSource, TgMessage};
 use perbot::view::{self, clamp_message, edit_prompt, scheduled_message};
 use teloxide::{prelude::*, types::BotCommandScope, utils::command::BotCommands, utils::html};
 use tokio::sync::mpsc;
@@ -240,6 +240,37 @@ async fn message_handler_safe(
     Ok(())
 }
 
+/// Confirms a freshly stored event: the captioned detail view
+/// (`view::scheduled_message`) with the same action keyboard as `/event<id>`
+/// when a launch is scheduled, or the inactive-event notice (echoing the
+/// user's `input`) with no keyboard.
+async fn send_schedule_confirmation(
+    bot: &TgBot,
+    chat_id: ChatId,
+    stored: &EventInfo,
+    input: &str,
+    loc: &dyn perbot::locale::LocaleProvider,
+) -> anyhow::Result<()> {
+    if stored.next_datetime.is_some() {
+        let now = chrono::Local::now().naive_local();
+        let is_repetition = stored.source == Some(NextSource::Repetition);
+        bot.send_html(
+            chat_id,
+            scheduled_message(stored, now, loc),
+            Some(view::event_actions_keyboard(
+                stored.id,
+                stored.active,
+                is_repetition,
+            )),
+        )
+        .await?;
+    } else {
+        bot.send_html(chat_id, view::inactive_event_reply(input), None)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Handles a single incoming message: stores chat/message info, dispatches
 /// commands, parses event text, or acknowledges other media types.
 // Dependencies are injected individually by dptree, so the arg count is expected.
@@ -337,13 +368,7 @@ async fn message_handler(
                     bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                         .await?;
                 }
-                let reply = if let Some(dt) = stored.next_datetime {
-                    let now = chrono::Local::now().naive_local();
-                    scheduled_message(now, dt, &stored, loc)
-                } else {
-                    view::inactive_event_reply(text)
-                };
-                bot.send_html(msg.chat.id, reply, None).await?;
+                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the copyable current input still attached.
@@ -387,13 +412,7 @@ async fn message_handler(
                 bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
-            let reply = if let Some(dt) = stored.next_datetime {
-                let now = chrono::Local::now().naive_local();
-                scheduled_message(now, dt, &stored, loc)
-            } else {
-                view::inactive_event_reply(text)
-            };
-            bot.send_html(msg.chat.id, reply, None).await?;
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
             return Ok(());
         }
 
@@ -413,12 +432,8 @@ async fn message_handler(
                     .await?;
             }
 
-            if let Some(dt) = stored.next_datetime {
-                let now = chrono::Local::now().naive_local();
-                scheduled_message(now, dt, &stored, loc)
-            } else {
-                view::inactive_event_reply(text)
-            }
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
+            return Ok(());
         } else if let Some(event) = parser::parse_time_only(text, loc) {
             // A time was given but no reminder body: hold the parsed event and ask
             // for the text, offering a Cancel button.

@@ -6,7 +6,7 @@ use super::event::parse_event_callback;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
-use crate::view::scheduled_message;
+use crate::view::{event_actions_keyboard, snoozed_message};
 use chrono::{Duration, Local};
 use teloxide::types::CallbackQuery;
 
@@ -107,18 +107,30 @@ pub async fn handle_snooze_callback(
         }
     };
 
-    let event = snoozed_event(chat_id.0, msg_id, title, next);
-    if let Err(e) = provider.insert_prebuilt_event(&event) {
-        log::error!("Failed to insert snoozed event for chat {}: {e}", chat_id.0);
-        bot.answer_callback(q.id, Some("Failed to snooze.".to_owned()))
-            .await?;
-        return Ok(());
+    let mut event = snoozed_event(chat_id.0, msg_id, title, next);
+    match provider.insert_prebuilt_event(&event) {
+        Ok(id) => event.id = id,
+        Err(e) => {
+            log::error!("Failed to insert snoozed event for chat {}: {e}", chat_id.0);
+            bot.answer_callback(q.id, Some("Failed to snooze.".to_owned()))
+                .await?;
+            return Ok(());
+        }
     }
 
     bot.answer_callback(q.id, None).await?;
     let loc = crate::locale::for_chat(chat_id.0);
-    bot.send_html(chat_id, scheduled_message(now, next, &event, loc), None)
-        .await?;
+    let is_repetition = event.source == Some(NextSource::Repetition);
+    bot.send_html(
+        chat_id,
+        snoozed_message(&event, now, loc),
+        Some(event_actions_keyboard(
+            event.id,
+            event.active,
+            is_repetition,
+        )),
+    )
+    .await?;
     Ok(())
 }
 
