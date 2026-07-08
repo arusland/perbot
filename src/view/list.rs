@@ -3,7 +3,7 @@
 //! [`ListKind`] — each list's tag, title, empty text, and row style.
 
 use super::event::event_when_line;
-use super::message::{MESSAGE_PREVIEW_MAX, format_when, message_preview};
+use super::message::{MESSAGE_PREVIEW_MAX, message_preview};
 use crate::locale::LocaleProvider;
 use crate::types::EventInfo;
 use chrono::NaiveDateTime;
@@ -84,16 +84,17 @@ impl ListKind {
         }
     }
 
-    /// Per-row layout for this list. `/events` uses the two-line row; the missed
-    /// list shows the missed datetime + plain preview + `/event<id>` link; the
-    /// rest use the single-line row.
+    /// Per-row layout for this list. Every user-typed list uses the two-line
+    /// row; the missed list shows the missed datetime + plain preview +
+    /// `/event<id>` link.
     pub fn row_style(self) -> RowStyle {
         match self {
-            ListKind::Events => RowStyle::TwoLine,
             ListKind::Missed => RowStyle::PreviewLink,
-            ListKind::Today | ListKind::Tomorrow | ListKind::Week | ListKind::Month => {
-                RowStyle::SingleLine
-            }
+            ListKind::Events
+            | ListKind::Today
+            | ListKind::Tomorrow
+            | ListKind::Week
+            | ListKind::Month => RowStyle::TwoLine,
         }
     }
 }
@@ -101,27 +102,14 @@ impl ListKind {
 /// How each event renders in a paginated list row.
 #[derive(Clone, Copy)]
 pub enum RowStyle {
-    /// `• datetime (relative) — message` (used by `/today`/`/tomorrow`/`/week`/`/month`).
-    SingleLine,
     /// Bold datetime/recurrence line + `/event<id>` link, then an indented plain
-    /// preview underneath (used by `/events`).
+    /// preview underneath (used by every user-typed list command).
     TwoLine,
     /// `• datetime — <plain preview> /event<id>` — the datetime the event should
     /// have fired at, absolute only (no relative part: it lies in the past), then
     /// the preview and the tappable link (used by the missed events list, whose
     /// snapshot rows carry the missed moment in `next_datetime`).
     PreviewLink,
-}
-
-/// Appends a single HTML event row (`• datetime (relative) — message`). The
-/// datetime/relative parts contain no HTML specials; `e.message` is already an
-/// HTML fragment, so it is embedded verbatim.
-fn write_event_row(out: &mut String, e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) {
-    let when = match e.next_datetime {
-        Some(dt) => html::escape(&format_when(now, dt, loc)),
-        None => "—".to_string(),
-    };
-    let _ = writeln!(out, "• {} — {}", when, e.message);
 }
 
 /// Appends a missed-list HTML event row: `• datetime — <plain preview>
@@ -200,7 +188,6 @@ pub fn format_page_at(
     let mut out = format!("<b>{}:</b>\n", html::escape(title));
     for e in page_events {
         match style {
-            RowStyle::SingleLine => write_event_row(&mut out, e, now, loc),
             RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
             RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e, loc),
         }
@@ -296,7 +283,7 @@ mod tests {
             10,
             "Upcoming events",
             "No upcoming events.",
-            RowStyle::SingleLine,
+            RowStyle::TwoLine,
             &EN,
         );
         assert_eq!(text, "No upcoming events.");
@@ -309,8 +296,6 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
         let events = vec![
             sample_event("call mom", Some(now + Duration::hours(2))),
-            // `message` is an HTML fragment, embedded verbatim (parens are not
-            // HTML specials).
             sample_event("pay rent (urgent)", Some(now + Duration::days(3))),
         ];
         let (text, pages) = format_page_at(
@@ -320,14 +305,14 @@ mod tests {
             10,
             "Upcoming events",
             "none",
-            RowStyle::SingleLine,
+            RowStyle::TwoLine,
             &EN,
         );
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
-        assert!(text.contains("14:00 15.06.2026 (2h)"));
-        assert!(text.contains("pay rent (urgent)"));
-        assert!(text.contains("(3d)"));
+        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b> /event0\n  call mom"));
+        assert!(text.contains("(in 3d)"));
+        assert!(text.contains("  pay rent (urgent)"));
     }
 
     #[test]
@@ -342,12 +327,11 @@ mod tests {
             10,
             "Today's events",
             "none",
-            RowStyle::SingleLine,
+            RowStyle::TwoLine,
             &EN,
         );
         assert!(text.starts_with("<b>Today's events:</b>\n"));
-        assert!(text.contains("10:00 16.06.2026 (1h)"));
-        assert!(text.contains("standup"));
+        assert!(text.contains("• <b>10:00 16.06.2026 (in 1h)</b> /event0\n  standup"));
     }
 
     #[test]
@@ -367,7 +351,7 @@ mod tests {
             10,
             "Upcoming events",
             "none",
-            RowStyle::SingleLine,
+            RowStyle::TwoLine,
             &EN,
         );
         assert_eq!(pages, 3);
@@ -384,14 +368,15 @@ mod tests {
             10,
             "Upcoming events",
             "none",
-            RowStyle::SingleLine,
+            RowStyle::TwoLine,
             &EN,
         );
         assert_eq!(pages, 3);
         assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
-        assert_eq!(p_last.lines().count(), 1 + 5);
+        // Title line + two lines per row.
+        assert_eq!(p_last.lines().count(), 1 + 5 * 2);
     }
 
     #[test]
