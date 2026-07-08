@@ -39,6 +39,8 @@ pub struct EventInfo {
     /// text as a transient value; `main` replaces it with the HTML rendering
     /// (`crate::richtext::render_html`) before persisting. Every consumer
     /// (confirmation, lists, fired reminder, snooze) reads the HTML form.
+    /// Snoozed children persist `""` — storage resolves their message from the
+    /// parent at query time, so a loaded event always carries the effective text.
     pub message: String,
     pub id: i64,
     pub chat_id: i64,
@@ -56,11 +58,21 @@ pub struct EventInfo {
     pub msg_id: i64,
     /// `true` for events imported from the legacy MateBot `.alert` files.
     pub legacy: bool,
-    /// `true` for one-off events created by the snooze flow.
-    pub snoozed: bool,
+    /// Id of the original event this snooze was created from (`None` for
+    /// ordinary events; always the root — snoozing a snooze re-points at the
+    /// original parent, never chains). A snoozed event owns only its time: its
+    /// message is resolved from the parent at query time, and deleting the
+    /// parent cascade-deletes it.
+    pub parent: Option<i64>,
 }
 
 impl EventInfo {
+    /// `true` when this event was created by the snooze flow (it references a
+    /// parent event that owns the message text).
+    pub fn is_snoozed(&self) -> bool {
+        self.parent.is_some()
+    }
+
     /// Canonical, **re-parseable** rendering of this event's time/recurrence
     /// expression (the message body is *not* included). Re-parsing the returned
     /// string and calling `normalize_time` again yields the byte-identical string
@@ -576,7 +588,7 @@ mod tests {
                 .unwrap(),
             msg_id: 0,
             legacy: false,
-            snoozed: false,
+            parent: None,
         }
     }
 

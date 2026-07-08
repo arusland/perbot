@@ -1,6 +1,8 @@
 //! The snooze buttons under a fired reminder (`eid:<id>:sn:<minutes>`): each
-//! press inserts a one-off `snoozed` copy of the event scheduled at
-//! `now + <minutes>`, leaving the original untouched.
+//! press inserts a one-off child event scheduled at `now + <minutes>` whose
+//! `parent` points at the original (root) event, leaving the original
+//! untouched. The child owns only its time — its message is resolved from the
+//! parent by storage, and deleting the parent cascade-deletes it.
 
 use super::event::parse_event_callback;
 use crate::state::EventProvider;
@@ -18,17 +20,15 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
     Some((id, minutes.parse::<i64>().ok()?))
 }
 
-/// Builds the one-off event a snooze creates: an explicit-year reminder scheduled
-/// exactly at `next`, already marked active. It is inserted via
+/// Builds the one-off child event a snooze creates: an explicit-year reminder
+/// scheduled exactly at `next`, already marked active, whose `parent` points at
+/// `source`'s root (`source.parent` when `source` is itself a snooze — snoozes
+/// never chain). The child stores an empty message and reuses the parent's
+/// `msg_id`; the effective text always comes from the parent. It is inserted via
 /// `insert_prebuilt_event` (no scheduler run), and after it fires
 /// `scheduler::calc_next_at` returns `None` (no repetition, year explicit), so it
 /// goes inactive instead of repeating.
-fn snoozed_event(
-    chat_id: i64,
-    msg_id: i64,
-    title: String,
-    next: chrono::NaiveDateTime,
-) -> EventInfo {
+fn snoozed_event(source: &EventInfo, next: chrono::NaiveDateTime) -> EventInfo {
     EventInfo {
         date: Some(next.date()),
         time: Some(next.time()),
@@ -39,24 +39,24 @@ fn snoozed_event(
         in_offset: None,
         bare_hour: None,
         monthly_pattern: None,
-        message: title,
+        message: String::new(),
         id: 0,
-        chat_id,
+        chat_id: source.chat_id,
         active: true,
         next_datetime: Some(next),
         source: Some(NextSource::Date),
         last_next_datetime: Some(next),
         created_at: next,
-        msg_id,
+        msg_id: source.msg_id,
         legacy: false,
-        snoozed: true,
+        parent: Some(source.parent.unwrap_or(source.id)),
     }
 }
 
-/// Handles a snooze-button press: creates a new one-off event with the same title
-/// as the fired reminder, scheduled at `now + <minutes>`. The original event is
-/// left untouched. Driven from `main`'s callback-query branch for `eid:`-prefixed
-/// callback data.
+/// Handles a snooze-button press: creates a new one-off child event referencing
+/// the fired reminder (its root parent), scheduled at `now + <minutes>`. The
+/// original event is left untouched. Driven from `main`'s callback-query branch
+/// for `eid:`-prefixed callback data.
 ///
 /// The target event is identified by id from the callback data
 /// (`eid:<id>:sn:<minutes>`) and loaded from storage. Because callback ids are
@@ -81,10 +81,8 @@ pub async fn handle_snooze_callback(
     let chat_id = message.chat.id;
 
     // Load the event and verify it belongs to this chat before acting on it.
-    // `event.message` is an HTML fragment, so the snoozed copy keeps the user's
-    // formatting verbatim.
-    let title = match provider.get_event(event_id)? {
-        Some(event) if event.chat_id == chat_id.0 => event.message,
+    let source = match provider.get_event(event_id)? {
+        Some(event) if event.chat_id == chat_id.0 => event,
         _ => {
             bot.answer_callback(q.id, Some("Can't snooze this reminder.".to_owned()))
                 .await?;
@@ -94,20 +92,8 @@ pub async fn handle_snooze_callback(
 
     let now = Local::now().naive_local();
     let next = now + Duration::minutes(minutes);
-    let user_id = q.from.id.0 as i64;
 
-    // Backing message row (events.msg_id is a NOT NULL FK to messages).
-    let msg_id = match provider.insert_message(Some(user_id), chat_id.0, &title) {
-        Ok(id) => id,
-        Err(e) => {
-            log::error!("Failed to save snooze message for chat {}: {e}", chat_id.0);
-            bot.answer_callback(q.id, Some("Failed to snooze.".to_owned()))
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let mut event = snoozed_event(chat_id.0, msg_id, title, next);
+    let mut event = snoozed_event(&source, next);
     match provider.insert_prebuilt_event(&event) {
         Ok(id) => event.id = id,
         Err(e) => {
@@ -117,6 +103,9 @@ pub async fn handle_snooze_callback(
             return Ok(());
         }
     }
+    // The local struct stores an empty message; reload so the confirmation
+    // carries the parent-resolved text.
+    let event = provider.get_event(event.id)?.unwrap_or(event);
 
     bot.answer_callback(q.id, None).await?;
     let loc = crate::locale::for_chat(chat_id.0);
@@ -157,13 +146,30 @@ mod tests {
         // The snoozed event is scheduled at `next`; once "now" reaches it (firing),
         // calc_next_at must return inactive so it does not repeat.
         let next = Local::now().naive_local() + Duration::minutes(5);
-        let event = snoozed_event(42, 7, "call mom".to_string(), next);
+        let mut source = crate::view::test_support::sample_event("call mom", Some(next));
+        source.id = 42;
+        source.msg_id = 7;
+        let event = snoozed_event(&source, next);
         assert!(event.active);
-        assert!(event.snoozed);
+        assert!(event.is_snoozed());
+        assert_eq!(event.parent, Some(42));
+        assert_eq!(event.msg_id, 7);
+        assert!(event.message.is_empty());
         assert_eq!(event.next_datetime, Some(next));
 
         let fired = scheduler::calc_next_at(event, next);
         assert!(!fired.active);
         assert!(fired.next_datetime.is_none());
+    }
+
+    #[test]
+    fn snoozing_a_snoozed_event_reparents_to_root() {
+        // Snoozes never chain: a snooze of a snooze points at the original root.
+        let next = Local::now().naive_local() + Duration::minutes(5);
+        let mut source = crate::view::test_support::sample_event("call mom", Some(next));
+        source.id = 42;
+        source.parent = Some(7);
+        let event = snoozed_event(&source, next);
+        assert_eq!(event.parent, Some(7));
     }
 }

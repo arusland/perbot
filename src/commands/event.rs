@@ -6,7 +6,7 @@
 use crate::pending::PendingEdit;
 use crate::state::{DismissOutcome, EventProvider};
 use crate::tgbot::TgBot;
-use crate::types::NextSource;
+use crate::types::{EventInfo, NextSource};
 use crate::view::{
     EDIT_ASK_TEXT, delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt,
     event_actions_keyboard, event_detail, notification_keyboard,
@@ -203,7 +203,7 @@ async fn refresh_dismissed_view(
     bot: &TgBot,
     chat_id: ChatId,
     message_id: teloxide::types::MessageId,
-    updated: &crate::types::EventInfo,
+    updated: &EventInfo,
     from_notification: bool,
 ) -> teloxide::prelude::ResponseResult<()> {
     let is_repetition = updated.source == Some(NextSource::Repetition);
@@ -231,11 +231,32 @@ async fn refresh_dismissed_view(
     }
 }
 
+/// Resolves which event an Edit press on `id` actually targets: the event
+/// itself, or its parent when `id` is a snoozed child (a snooze owns only its
+/// time — its text lives on the parent, so edits go there). Both the pressed
+/// event and the resolved parent are access-checked against `chat_id`; a
+/// missing or foreign event (or dangling parent) resolves to `None`.
+fn resolve_edit_target(
+    provider: &EventProvider,
+    id: i64,
+    chat_id: i64,
+) -> crate::error::Result<Option<EventInfo>> {
+    let Some(event) = provider.get_event(id)?.filter(|e| e.chat_id == chat_id) else {
+        return Ok(None);
+    };
+    match event.parent {
+        Some(pid) => Ok(provider.get_event(pid)?.filter(|p| p.chat_id == chat_id)),
+        None => Ok(Some(event)),
+    }
+}
+
 /// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
 /// the chat the button was pressed in (callback ids are user-influenceable),
 /// records the chat as editing that event, and prompts for the replacement input
 /// with the event's current input as a copyable `<code>` block ([`edit_prompt`])
-/// and a Cancel button. Replies "Event not found." for a missing or foreign id.
+/// and a Cancel button. An Edit press on a snoozed event starts the flow for its
+/// parent instead ([`resolve_edit_target`]). Replies "Event not found." for a
+/// missing or foreign id.
 async fn handle_edit_prompt(
     bot: &TgBot,
     provider: &EventProvider,
@@ -249,15 +270,15 @@ async fn handle_edit_prompt(
     };
     let chat_id = message.chat.id;
 
-    let event = provider.get_event(id)?.filter(|e| e.chat_id == chat_id.0);
+    let event = resolve_edit_target(provider, id, chat_id.0)?;
     bot.answer_callback(q.id, None).await?;
     if let Some(event) = event {
-        pending_edit.lock().unwrap().insert(chat_id.0, id);
+        pending_edit.lock().unwrap().insert(chat_id.0, event.id);
         let loc = crate::locale::for_chat(chat_id.0);
         bot.send_html(
             chat_id,
             edit_prompt(EDIT_ASK_TEXT, &event, loc),
-            Some(edit_cancel_keyboard(id)),
+            Some(edit_cancel_keyboard(event.id)),
         )
         .await?;
     } else {
@@ -394,6 +415,66 @@ async fn handle_delete_confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an in-memory provider with one chat, a backing message row, and a
+    /// parent event, returning the provider plus the parent's id.
+    fn provider_with_parent(chat_id: i64) -> (EventProvider, i64) {
+        use crate::storage::EventStorage;
+        use crate::types::{ChatInfo, ChatType};
+        let provider = EventProvider::new(EventStorage::open_in_memory().unwrap());
+        provider
+            .upsert_chat(&ChatInfo {
+                id: chat_id,
+                chat_type: ChatType::Private,
+                title: None,
+                username: None,
+                first_name: None,
+                last_name: None,
+                updated_at: None,
+                created_at: None,
+            })
+            .unwrap();
+        let msg_id = provider.insert_message(None, chat_id, "call mom").unwrap();
+        let mut parent = crate::view::test_support::sample_event("call mom", None);
+        parent.chat_id = chat_id;
+        parent.msg_id = msg_id;
+        let parent_id = provider.insert_prebuilt_event(&parent).unwrap();
+        (provider, parent_id)
+    }
+
+    #[test]
+    fn resolve_edit_target_follows_parent() {
+        let chat_id = 42;
+        let (provider, parent_id) = provider_with_parent(chat_id);
+        let mut child = crate::view::test_support::sample_event("", None);
+        child.chat_id = chat_id;
+        child.msg_id = provider.get_event(parent_id).unwrap().unwrap().msg_id;
+        child.parent = Some(parent_id);
+        let child_id = provider.insert_prebuilt_event(&child).unwrap();
+
+        // A root event resolves to itself; a snoozed child resolves to its parent.
+        let target = resolve_edit_target(&provider, parent_id, chat_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.id, parent_id);
+        let target = resolve_edit_target(&provider, child_id, chat_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.id, parent_id);
+
+        // Foreign chats never resolve.
+        assert!(
+            resolve_edit_target(&provider, child_id, chat_id + 1)
+                .unwrap()
+                .is_none()
+        );
+        // A missing id resolves to None.
+        assert!(
+            resolve_edit_target(&provider, 9999, chat_id)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn parse_event_callback_splits_id_and_action() {

@@ -333,7 +333,7 @@ fn parse_components(
         created_at: Local::now().naive_local(),
         msg_id: 0,
         legacy: false,
-        snoozed: false,
+        parent: None,
     };
     Some((event, rem.spans))
 }

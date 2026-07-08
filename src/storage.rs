@@ -74,6 +74,29 @@ fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
     Some(MonthlyPattern::OrdinalWeekday(ord, wd))
 }
 
+// --- Shared event-query fragments ---
+
+/// The event column list in the exact positional order [`EventStorage::row_to_event`]
+/// reads. `next_expr` fills the `next_datetime` slot (position 7): `e.next_datetime`
+/// normally, `m.missed_at` for the missed snapshot. `message` resolves through the
+/// parent (see [`EVENT_FROM`]) so snoozed events always carry their parent's text;
+/// the `COALESCE` degrades to the child's own (empty) message if the parent row is
+/// somehow gone.
+fn event_cols(next_expr: &str) -> String {
+    format!(
+        "e.id, e.chat_id, e.date, e.time, e.year_explicit, \
+         COALESCE(p.message, e.message) AS message, e.active, {next_expr}, \
+         e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, \
+         e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, \
+         e.legacy, e.parent, e.last_next_datetime, e.source"
+    )
+}
+
+/// The FROM clause every event SELECT uses: the self-join `p` supplies the parent's
+/// message for snoozed events. WHERE/ORDER BY columns must be `e.`-qualified —
+/// bare names are ambiguous against the join.
+const EVENT_FROM: &str = "FROM events e LEFT JOIN events p ON e.parent = p.id";
+
 /// SQLite-based storage for parsed events.
 pub struct EventStorage {
     conn: Connection,
@@ -157,7 +180,7 @@ impl EventStorage {
                 msg_id          INTEGER NOT NULL REFERENCES messages(id),
                 years           TEXT,
                 legacy          INTEGER NOT NULL DEFAULT 0,
-                snoozed         INTEGER NOT NULL DEFAULT 0,
+                parent          INTEGER REFERENCES events(id) ON DELETE CASCADE,
                 source          TEXT
             )",
             [],
@@ -175,6 +198,13 @@ impl EventStorage {
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_next_datetime ON events(next_datetime)",
+            [],
+        )?;
+
+        // Without this, deleting a parent scans the whole table for cascading
+        // children.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_parent ON events(parent)",
             [],
         )?;
 
@@ -227,7 +257,7 @@ impl EventStorage {
         let source_str = event.source.map(|s| s.as_str());
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, last_next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, source)
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, last_next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, parent, source)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 event.chat_id,
@@ -248,7 +278,7 @@ impl EventStorage {
                 event.msg_id,
                 years_str,
                 event.legacy as i32,
-                event.snoozed as i32,
+                event.parent,
                 source_str,
             ],
         )?;
@@ -258,10 +288,10 @@ impl EventStorage {
 
     /// Retrieves all events for a given chat.
     pub fn get_by_chat(&self, chat_id: i64) -> Result<Vec<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE chat_id = ?1 ORDER BY next_datetime ASC",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.chat_id = ?1 ORDER BY e.next_datetime ASC",
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map(params![chat_id], Self::row_to_event)?;
 
@@ -270,10 +300,10 @@ impl EventStorage {
 
     /// Retrieves all active events.
     pub fn get_active_events(&self) -> Result<Vec<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE active = 1 ORDER BY next_datetime ASC",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1 ORDER BY e.next_datetime ASC",
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map([], Self::row_to_event)?;
 
@@ -289,11 +319,12 @@ impl EventStorage {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE chat_id = ?1 AND active = 1 ORDER BY next_datetime ASC
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM}
+             WHERE e.chat_id = ?1 AND e.active = 1 ORDER BY e.next_datetime ASC
              LIMIT ?2 OFFSET ?3",
-        )?;
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map(
             params![chat_id, limit as i64, offset as i64],
@@ -357,11 +388,12 @@ impl EventStorage {
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3
-             ORDER BY next_datetime ASC LIMIT ?4 OFFSET ?5",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM}
+             WHERE e.chat_id = ?1 AND e.active = 1 AND e.next_datetime >= ?2 AND e.next_datetime < ?3
+             ORDER BY e.next_datetime ASC LIMIT ?4 OFFSET ?5",
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map(
             params![chat_id, start_str, end_str, limit as i64, offset as i64],
@@ -399,7 +431,7 @@ impl EventStorage {
 
     /// Replaces every parsed field of an event (time/recurrence + message) plus the
     /// recomputed `active`/`next_datetime`. Identity columns (`chat_id`, `msg_id`,
-    /// `created_at`, `legacy`, `snoozed`) are left untouched. Used by the `/event<id>`
+    /// `created_at`, `legacy`, `parent`) are left untouched. Used by the `/event<id>`
     /// edit flow. Returns `true` when a row was updated.
     pub fn update_event(&self, event: &EventInfo) -> Result<bool> {
         let date_str = event.date.map(|d| d.format("%Y-%m-%d").to_string());
@@ -481,7 +513,8 @@ impl EventStorage {
         Ok(rows_affected > 0)
     }
 
-    /// Deletes an event by its ID.
+    /// Deletes an event by its ID. Deleting a parent cascade-deletes its
+    /// snoozed children.
     pub fn delete(&self, id: i64) -> Result<bool> {
         let rows_affected = self
             .conn
@@ -492,10 +525,10 @@ impl EventStorage {
 
     /// Returns an event by its ID.
     pub fn get_event(&self, id: i64) -> Result<Option<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE id = ?1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.id = ?1",
+            event_cols("e.next_datetime")
+        ))?;
 
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
@@ -507,11 +540,11 @@ impl EventStorage {
 
     /// Returns the single nearest active event from `now`.
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE active = 1
-             ORDER BY next_datetime ASC LIMIT 1",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1
+             ORDER BY e.next_datetime ASC LIMIT 1",
+            event_cols("e.next_datetime")
+        ))?;
 
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -528,11 +561,11 @@ impl EventStorage {
     pub fn get_missed_events(&self, now: NaiveDateTime, limit: usize) -> Result<Vec<EventInfo>> {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE active = 1 AND next_datetime < ?1
-             ORDER BY next_datetime ASC LIMIT ?2",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime < ?1
+             ORDER BY e.next_datetime ASC LIMIT ?2",
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map(params![now_str, limit as i64], Self::row_to_event)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -598,13 +631,15 @@ impl EventStorage {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<EventInfo>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.chat_id, e.date, e.time, e.year_explicit, e.message, e.active, m.missed_at, e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, e.legacy, e.snoozed, e.last_next_datetime, e.source
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {}
              FROM missed_events m
              JOIN events e ON e.id = m.event_id
+             LEFT JOIN events p ON e.parent = p.id
              WHERE e.chat_id = ?1
              ORDER BY m.id ASC LIMIT ?2 OFFSET ?3",
-        )?;
+            event_cols("m.missed_at")
+        ))?;
 
         let rows = stmt.query_map(
             params![chat_id, limit as i64, offset as i64],
@@ -617,17 +652,18 @@ impl EventStorage {
     pub fn get_events_at(&self, dt: NaiveDateTime) -> Result<Vec<EventInfo>> {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, date, time, year_explicit, message, active, next_datetime, created_at, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, snoozed, last_next_datetime, source
-             FROM events WHERE active = 1 AND next_datetime = ?1
-             ORDER BY id ASC",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime = ?1
+             ORDER BY e.id ASC",
+            event_cols("e.next_datetime")
+        ))?;
 
         let rows = stmt.query_map(params![dt_str], Self::row_to_event)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Deletes all inactive events.
+    /// Deletes all inactive events. Deleting an inactive parent cascades to its
+    /// snoozed children, including still-active ones.
     pub fn delete_inactive(&self) -> Result<usize> {
         let rows_affected = self
             .conn
@@ -792,7 +828,7 @@ impl EventStorage {
             monthly_pattern,
             msg_id: row.get(16)?,
             legacy: row.get::<_, i32>(18)? != 0,
-            snoozed: row.get::<_, i32>(19)? != 0,
+            parent: row.get(19)?,
         })
     }
 }
@@ -859,7 +895,7 @@ mod tests {
             monthly_pattern: None,
             msg_id: 0,
             legacy: false,
-            snoozed: false,
+            parent: None,
         }
     }
 
@@ -1055,6 +1091,90 @@ mod tests {
         assert_eq!(stored.chat_id, original.chat_id);
         assert_eq!(stored.msg_id, original.msg_id);
         assert_eq!(stored.created_at, original.created_at);
+        assert_eq!(stored.parent, original.parent);
+    }
+
+    /// Inserts a parent + snoozed child pair for the parent-resolution tests:
+    /// the child stores an empty message and points at the parent.
+    fn insert_parent_and_child(storage: &EventStorage, chat_id: i64) -> (i64, i64) {
+        ensure_chat(storage, chat_id);
+        let mut parent = make_event("call mom");
+        parent.chat_id = chat_id;
+        parent.msg_id = ensure_message(storage, chat_id);
+        let parent_id = storage.insert_event(&parent).unwrap();
+
+        let mut child = make_event("");
+        child.chat_id = chat_id;
+        child.msg_id = parent.msg_id;
+        child.parent = Some(parent_id);
+        let child_id = storage.insert_event(&child).unwrap();
+        (parent_id, child_id)
+    }
+
+    #[test]
+    fn test_parent_round_trips_and_resolves_message() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let (parent_id, child_id) = insert_parent_and_child(&storage, 900);
+
+        let parent = storage.get_event(parent_id).unwrap().unwrap();
+        assert_eq!(parent.parent, None);
+        assert!(!parent.is_snoozed());
+        assert_eq!(parent.message, "call mom");
+
+        // The child's stored message is empty; every read resolves the parent's.
+        let child = storage.get_event(child_id).unwrap().unwrap();
+        assert_eq!(child.parent, Some(parent_id));
+        assert!(child.is_snoozed());
+        assert_eq!(child.message, "call mom");
+
+        // The list-shaped queries resolve through the same join.
+        let listed = storage.get_by_chat(900).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|e| e.message == "call mom"));
+    }
+
+    #[test]
+    fn test_editing_parent_message_propagates_to_child() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let (parent_id, child_id) = insert_parent_and_child(&storage, 901);
+
+        let mut parent = storage.get_event(parent_id).unwrap().unwrap();
+        parent.message = "call dad".to_string();
+        assert!(storage.update_event(&parent).unwrap());
+
+        let child = storage.get_event(child_id).unwrap().unwrap();
+        assert_eq!(child.message, "call dad");
+    }
+
+    #[test]
+    fn test_delete_parent_cascades_to_children() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let (parent_id, child_id) = insert_parent_and_child(&storage, 902);
+
+        // Deleting a child leaves the parent intact.
+        assert!(storage.delete(child_id).unwrap());
+        assert!(storage.get_event(parent_id).unwrap().is_some());
+
+        // Deleting the parent takes its remaining children with it.
+        let (parent_id, child_id) = insert_parent_and_child(&storage, 902);
+        assert!(storage.delete(parent_id).unwrap());
+        assert!(storage.get_event(child_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_missed_snapshot_resolves_parent_message() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        let (_, child_id) = insert_parent_and_child(&storage, 903);
+        let missed_at = dt(2027, 6, 1, 10, 0);
+        storage
+            .insert_missed_events(&[(child_id, missed_at)])
+            .unwrap();
+
+        let snapshot = storage.get_missed_snapshot_by_chat(903, 10, 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, child_id);
+        assert_eq!(snapshot[0].message, "call mom");
+        assert_eq!(snapshot[0].next_datetime, Some(missed_at));
     }
 
     #[test]

@@ -357,7 +357,7 @@ async fn message_handler(
                 event.created_at = old.created_at;
                 event.msg_id = msg_id;
                 event.legacy = old.legacy;
-                event.snoozed = old.snoozed;
+                event.parent = old.parent;
                 let rendered = perbot::richtext::render_html(text, &spans, &entities);
                 let (clamped, truncated) = clamp_message(&rendered);
                 event.message = clamped;

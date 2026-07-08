@@ -243,7 +243,7 @@ fn base_event(chat_id: i64, created_at: NaiveDateTime, message: String) -> Event
         created_at,
         msg_id: 0,
         legacy: true,
-        snoozed: false,
+        parent: None,
     }
 }
 

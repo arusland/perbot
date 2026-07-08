@@ -61,7 +61,7 @@ pub(crate) mod test_support {
             ),
             msg_id: 0,
             legacy: false,
-            snoozed: false,
+            parent: None,
         }
     }
 }

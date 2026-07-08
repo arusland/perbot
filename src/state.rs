@@ -593,7 +593,7 @@ mod tests {
             monthly_pattern: None,
             msg_id,
             legacy: false,
-            snoozed: false,
+            parent: None,
         }
     }
 
