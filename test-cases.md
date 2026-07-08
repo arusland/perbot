@@ -800,3 +800,16 @@ is independent of when the suite runs.
 | 2026-02-20 15:30:01 | SYSTEM | 2026-02-23 15:30:00            | source=repetition |             |
 | 2026-02-21 09:00:00 | USER   | !Dismiss repetition            |            |                    |
 | 2026-02-21 09:00:00 | SYSTEM | 2026-02-26 15:30:00            | source=repetition |             |
+
+### Case 50: In-offset "mins" spelling with minute repetition
+
+| Current Time        | Actor  | Input / Expected Next              | Message / Source     | Normalized           |
+|---------------------|--------|------------------------------------|--------------|------------------------------|
+| 2026-02-20 10:00:00 | USER   | in 2 min every 6 mins Do something | Do something | in 2 minutes every 6 minutes |
+| 2026-02-20 10:00:00 | SYSTEM | 2026-02-20 10:02:00                | source=in_offset |                          |
+| 2026-02-20 10:02:01 | SYSTEM | 2026-02-20 10:08:00                | source=repetition |                         |
+| 2026-02-20 10:08:01 | SYSTEM | 2026-02-20 10:14:00                | source=repetition |                         |
+| 2026-02-20 10:08:02 | USER   | !Dismiss repetition                |                   |                         |
+| 2026-02-20 10:08:03 | SYSTEM | 2026-02-20 10:20:00                | source=repetition |                         |
+| 2026-02-20 10:08:04 | USER   | !Dismiss                           |                   |                         |
+| 2026-02-20 10:08:05 | SYSTEM | 2026-02-20 10:26:00                | source=repetition |                         |
