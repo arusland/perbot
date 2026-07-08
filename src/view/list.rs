@@ -168,7 +168,7 @@ pub fn total_pages(len: usize, per_page: usize) -> usize {
 /// button, not in the title. `empty` is the full message shown when the page
 /// has no events. Returns the rendered text and the total number of pages, so
 /// the caller can decide whether to attach navigation buttons. `style` selects
-/// the per-row layout (see [`RowStyle`]).
+/// the per-row layout (see [`RowStyle`]); rows are separated by a blank line.
 #[allow(clippy::too_many_arguments)]
 pub fn format_page_at(
     page_events: &[EventInfo],
@@ -186,7 +186,10 @@ pub fn format_page_at(
     }
 
     let mut out = format!("<b>{}:</b>\n", html::escape(title));
-    for e in page_events {
+    for (i, e) in page_events.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
         match style {
             RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
             RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e, loc),
@@ -313,6 +316,8 @@ mod tests {
         assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b> /event0\n  call mom"));
         assert!(text.contains("(in 3d)"));
         assert!(text.contains("  pay rent (urgent)"));
+        // Events are separated by a blank line.
+        assert!(text.contains("  call mom\n\n• <b>"));
     }
 
     #[test]
@@ -375,8 +380,8 @@ mod tests {
         assert!(p_last.starts_with("<b>Upcoming events:</b>\n"));
         assert!(p_last.contains("event 20"));
         assert!(p_last.contains("event 24"));
-        // Title line + two lines per row.
-        assert_eq!(p_last.lines().count(), 1 + 5 * 2);
+        // Title line + two lines per row + a blank separator between rows.
+        assert_eq!(p_last.lines().count(), 1 + 5 * 2 + 4);
     }
 
     #[test]
