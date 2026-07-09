@@ -3,7 +3,7 @@
 //! [`ListKind`] — each list's tag, title, empty text, and row style.
 
 use super::event::event_when_line;
-use super::message::{MESSAGE_PREVIEW_MAX, message_preview};
+use super::message::{BULLET, MESSAGE_PREVIEW_MAX, message_preview};
 use crate::locale::LocaleProvider;
 use crate::types::EventInfo;
 use chrono::NaiveDateTime;
@@ -105,14 +105,14 @@ pub enum RowStyle {
     /// Bold datetime/recurrence line + `/event<id>` link, then an indented plain
     /// preview underneath (used by every user-typed list command).
     TwoLine,
-    /// `• datetime — <plain preview> /event<id>` — the datetime the event should
+    /// `▪ datetime — <plain preview> /event<id>` — the datetime the event should
     /// have fired at, absolute only (no relative part: it lies in the past), then
     /// the preview and the tappable link (used by the missed events list, whose
     /// snapshot rows carry the missed moment in `next_datetime`).
     PreviewLink,
 }
 
-/// Appends a missed-list HTML event row: `• datetime — <plain preview>
+/// Appends a missed-list HTML event row: `▪ datetime — <plain preview>
 /// /event<id>` — the datetime the event should have fired at (absolute only;
 /// a relative part would render "soon" for past moments), then the truncated,
 /// tag-stripped, HTML-escaped message preview and the tappable `/event<id>`
@@ -122,10 +122,10 @@ fn write_event_row_preview_only(out: &mut String, e: &EventInfo, loc: &dyn Local
     match e.next_datetime {
         Some(dt) => {
             let when = html::escape(&loc.format_datetime(dt));
-            let _ = writeln!(out, "• {when} — {message} /event{}", e.id);
+            let _ = writeln!(out, "{BULLET} {when} — {message} /event{}", e.id);
         }
         None => {
-            let _ = writeln!(out, "• {message} /event{}", e.id);
+            let _ = writeln!(out, "{BULLET} {message} /event{}", e.id);
         }
     }
 }
@@ -313,11 +313,11 @@ mod tests {
         );
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
-        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b> /event0\n  call mom"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h)</b> /event0\n  call mom"));
         assert!(text.contains("(in 3d)"));
         assert!(text.contains("  pay rent (urgent)"));
         // Events are separated by a blank line.
-        assert!(text.contains("  call mom\n\n• <b>"));
+        assert!(text.contains("  call mom\n\n▪ <b>"));
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             &EN,
         );
         assert!(text.starts_with("<b>Today's events:</b>\n"));
-        assert!(text.contains("• <b>10:00 16.06.2026 (in 1h)</b> /event0\n  standup"));
+        assert!(text.contains("▪ <b>10:00 16.06.2026 (in 1h)</b> /event0\n  standup"));
     }
 
     #[test]
@@ -411,7 +411,7 @@ mod tests {
         // One-off event: no recurrence suffix on the datetime line.
         assert!(!text.contains(", every"));
         // The /event<id> link ends the bold datetime line (id 0 for sample events).
-        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h)</b> /event0\n"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h)</b> /event0\n"));
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         );
         // Recurrence sits inside the parentheses, next to the relative time; the
         // /event<id> link ends the line.
-        assert!(text.contains("• <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
         // stripped, truncated) + /event<id>. No relative part — the moment is
         // in the past and would render "soon".
         assert!(text.contains(
-            "• 14:00 15.06.2026 — call the office right now please and bring the doc... /event42\n"
+            "▪ 14:00 15.06.2026 — call the office right now please and bring the doc... /event42\n"
         ));
         assert!(!text.contains("<b>14:"));
         assert!(!text.contains("(in "));
@@ -546,7 +546,7 @@ mod tests {
         assert!(text.starts_with("<b>Missed events:</b>\n"));
         // The row leads with the event's datetime (the snapshot puts the
         // missed moment in `next_datetime`).
-        assert!(text.contains("• 09:00 16.06.2026 — call the office /event7"));
+        assert!(text.contains("▪ 09:00 16.06.2026 — call the office /event7"));
         // One event → single page → no navigation keyboard.
         assert!(keyboard.is_none());
     }

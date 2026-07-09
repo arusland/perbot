@@ -2,7 +2,7 @@
 //! preview, the `/event<id>` detail view, the re-parseable input reconstruction
 //! and edit prompt, plus the event action keyboards.
 
-use super::message::{format_when, html_to_plain};
+use super::message::{BULLET, format_when, html_to_plain};
 use crate::locale::LocaleProvider;
 use crate::scheduler;
 use crate::types::{EventInfo, MonthlyPattern};
@@ -10,13 +10,13 @@ use chrono::{NaiveDateTime, Weekday};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
 
-/// Maximum upcoming launches previewed for a reminder. A further `• ...` bullet
+/// Maximum upcoming launches previewed for a reminder. A further `▪ ...` bullet
 /// is shown when more launches follow.
 const MAX_NEXT_PREVIEW: usize = 3;
 
 /// Preview block of upcoming launches for a reminder, computed with
 /// `scheduler::calc_next_at`. Lists up to MAX_NEXT_PREVIEW launches as bullets,
-/// plus a trailing `• ...` when more remain. Returns "" for one-off events
+/// plus a trailing `▪ ...` when more remain. Returns "" for one-off events
 /// (no future occurrence). `after` is the search baseline (the launch being
 /// confirmed or fired), so the listed launches are strictly after it; `now` is
 /// the relative-time origin, so each bullet's relative offset (`(1d)`) is
@@ -49,10 +49,10 @@ pub fn next_launches_preview(
     }
     let mut out = format!("\n\n<b>{}</b>", loc.next_launches_header());
     for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
-        out.push_str(&format!("\n• {}", format_when(now, *dt, loc)));
+        out.push_str(&format!("\n{BULLET} {}", format_when(now, *dt, loc)));
     }
     if launches.len() > MAX_NEXT_PREVIEW {
-        out.push_str("\n• ...");
+        out.push_str(&format!("\n{BULLET} ..."));
     }
     out
 }
@@ -163,13 +163,13 @@ fn when_text(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> Str
 }
 
 /// The bold datetime/relative bullet line of the `/events` two-line row:
-/// `• <b><when_text></b>` (see [`when_text`]).
+/// `▪ <b><when_text></b>` (see [`when_text`]).
 pub(super) fn event_when_line(
     e: &EventInfo,
     now: NaiveDateTime,
     loc: &dyn LocaleProvider,
 ) -> String {
-    format!("• <b>{}</b>", when_text(e, now, loc))
+    format!("{BULLET} <b>{}</b>", when_text(e, now, loc))
 }
 
 /// The shared single-event detail body: an optional bold caption first line,
@@ -347,8 +347,8 @@ mod tests {
         assert!(text.contains("</b>\n\nstandup"));
         // Preview lists launches strictly after the confirmed datetime.
         assert!(text.contains("<b>Next launches:</b>"));
-        assert!(text.contains("• 10:00 23.06.2026"));
-        assert!(text.contains("• ..."));
+        assert!(text.contains("▪ 10:00 23.06.2026"));
+        assert!(text.contains("▪ ..."));
     }
 
     #[test]
@@ -396,11 +396,11 @@ mod tests {
         let preview = next_launches_preview(&event, fire, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
-        assert!(preview.contains("• 10:00 23.06.2026"));
-        assert!(preview.contains("• 10:00 24.06.2026"));
-        assert!(preview.contains("• 10:00 25.06.2026"));
-        assert!(preview.contains("• ..."));
-        assert_eq!(preview.matches('•').count(), 4);
+        assert!(preview.contains("▪ 10:00 23.06.2026"));
+        assert!(preview.contains("▪ 10:00 24.06.2026"));
+        assert!(preview.contains("▪ 10:00 25.06.2026"));
+        assert!(preview.contains("▪ ..."));
+        assert_eq!(preview.matches('▪').count(), 4);
     }
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         );
         let preview = next_launches_preview(&event, now, fire, &EN);
-        assert!(preview.contains("• 10:00 23.06.2026 (2d)"));
+        assert!(preview.contains("▪ 10:00 23.06.2026 (2d)"));
     }
 
     #[test]
@@ -443,9 +443,9 @@ mod tests {
 
         let preview = next_launches_preview(&event, fire, fire, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
-        assert!(preview.contains("• 23:00 31.12.2027"));
-        assert!(!preview.contains("• ..."));
-        assert_eq!(preview.matches('•').count(), 1);
+        assert!(preview.contains("▪ 23:00 31.12.2027"));
+        assert!(!preview.contains("▪ ..."));
+        assert_eq!(preview.matches('▪').count(), 1);
     }
 
     #[test]
@@ -599,7 +599,7 @@ mod tests {
         assert!(text.contains("standup"));
         // Recurring: launches block present, listing dates after the upcoming one.
         assert!(text.contains("<b>Next launches:</b>"));
-        assert!(text.contains("• 14:00 16.06.2026"));
+        assert!(text.contains("▪ 14:00 16.06.2026"));
     }
 
     #[test]

@@ -67,6 +67,10 @@ pub(super) fn message_preview(html_fragment: &str, max: usize) -> String {
     }
 }
 
+/// List-row marker used by every bulleted line the bot renders (launch
+/// previews, list rows, the when-line).
+pub const BULLET: &str = "▪";
+
 /// Telegram's hard message limit, in UTF-16 code units, measured on the rendered
 /// text (after entities parsing — HTML tags don't count toward it).
 pub const TELEGRAM_MAX_LEN: usize = 4096;
