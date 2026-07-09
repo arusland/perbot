@@ -501,6 +501,9 @@ impl EventStorage {
             "UPDATE events SET active = ?1, next_datetime = ?2, last_next_datetime = ?3, source = ?4 WHERE id = ?5",
             params![active as i32, next_str, last_next_str, source_str, id],
         )?;
+        log::info!(
+            "Schedule updated for event {id}: active={active}, next_datetime={next_datetime:?}, source={source:?}"
+        );
         Ok(())
     }
 
@@ -520,6 +523,7 @@ impl EventStorage {
             .conn
             .execute("DELETE FROM events WHERE id = ?1", params![id])?;
 
+        log::info!("Event {id} deleted: {}", rows_affected > 0);
         Ok(rows_affected > 0)
     }
 

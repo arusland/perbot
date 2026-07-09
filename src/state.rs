@@ -519,7 +519,12 @@ impl EventProvider {
                     }
                 } else if next_date.is_none() || next_date.unwrap() != dt {
                     next_date = Some(dt);
-                    log::info!("Next event: {}", dt);
+                    log::info!(
+                        "Next event: {} (event {}, source={:?})",
+                        dt,
+                        event.id,
+                        event.source
+                    );
                 }
             }
         });
