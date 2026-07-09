@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     perbot::logger::init();
-    log::info!("Starting bot...");
+    log::info!("Starting bot... (pid {})", std::process::id());
+
+    // Held for the whole process lifetime; dropping it would release the lock.
+    let _instance_lock = acquire_instance_lock(std::path::Path::new("/tmp/perbot.lock"))?;
 
     let admin_id = ChatId(
         std::env::var("TG_ADMIN_ID")
@@ -121,6 +124,53 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     Ok(())
+}
+
+/// Takes an exclusive advisory lock on `path` so only one bot instance runs at
+/// a time, and writes our PID into it so the next contender can report who
+/// holds the lock. The returned handle must stay alive for the process
+/// lifetime — the lock is released when it drops (or the process dies).
+fn acquire_instance_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use std::io::{Read as _, Seek as _, Write as _};
+
+    // No truncation on open: if another instance holds the lock, its PID must
+    // survive so we can read it below.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("Failed to open lock file {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {
+            file.set_len(0)?;
+            file.rewind()?;
+            write!(file, "{}", std::process::id())?;
+            file.flush()?;
+            Ok(file)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut contents = String::new();
+            let _ = file.read_to_string(&mut contents);
+            let holder = contents
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&pid| pid != std::process::id())
+                .map_or_else(String::new, |pid| format!(" (pid {})", pid));
+            let msg = format!(
+                "Another instance is already running{}: lock file {} is held",
+                holder,
+                path.display()
+            );
+            log::error!("{}", msg);
+            anyhow::bail!(msg)
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("Failed to lock {}", path.display()))
+        }
+    }
 }
 
 /// Wraps `callback_handler` so a failure can never bubble up to the dispatcher's
