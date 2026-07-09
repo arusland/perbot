@@ -557,10 +557,45 @@ pub fn day_to_str(d: Weekday) -> &'static str {
     }
 }
 
+/// Renders the time left until an upcoming datetime for log lines, e.g.
+/// "1h 2m 3s"; zero units are skipped ("2d 5s"), a non-positive delta is "0s".
+pub fn format_time_left(delta: chrono::Duration) -> String {
+    let secs = delta.num_seconds().max(0);
+    let units = [
+        (secs / 86_400, "d"),
+        ((secs % 86_400) / 3_600, "h"),
+        ((secs % 3_600) / 60, "m"),
+        (secs % 60, "s"),
+    ];
+    let parts: Vec<String> = units
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{n}{label}"))
+        .collect();
+    if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::locale::EN;
+
+    #[test]
+    fn format_time_left_breaks_down_units_and_skips_zeros() {
+        use chrono::Duration;
+        assert_eq!(
+            format_time_left(Duration::seconds(2 * 86_400 + 3 * 3_600 + 4 * 60 + 5)),
+            "2d 3h 4m 5s"
+        );
+        assert_eq!(format_time_left(Duration::seconds(3_600 + 5)), "1h 5s");
+        assert_eq!(format_time_left(Duration::seconds(59)), "59s");
+        assert_eq!(format_time_left(Duration::seconds(0)), "0s");
+        assert_eq!(format_time_left(Duration::seconds(-10)), "0s");
+    }
 
     /// A blank `EventInfo` with every time/recurrence field cleared; tests set
     /// only the fields they exercise.

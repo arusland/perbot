@@ -90,6 +90,12 @@ pub fn fired_message(
     post_fire_is_repetition: bool,
     loc: &dyn LocaleProvider,
 ) -> TgMessage {
+    log::info!(
+        "Firing event {} due {} (source={:?})",
+        event.id,
+        due,
+        event.source
+    );
     // `event.message` and the preview are HTML fragments; the hint is plain
     // text, so escape only the hint for HTML.
     let preview = next_launches_preview(event, now, due, loc);

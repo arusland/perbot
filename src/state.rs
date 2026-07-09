@@ -87,11 +87,12 @@ impl EventProvider {
     /// the table first (see `start()`).
     pub fn move_missed_events(&self) -> Result<usize> {
         let mut total = 0;
+        let now = Local::now().naive_local();
         loop {
             let mut inner = self.inner.lock().unwrap();
-            let now = Local::now().naive_local();
             let batch = inner.storage.get_missed_events(now, MISSED_MOVE_BATCH)?;
             if batch.is_empty() {
+                log::info!("Moved {} missed events (now {})", total, now);
                 return Ok(total);
             }
             // The missed predicate guarantees `next_datetime` is set.
@@ -469,6 +470,12 @@ impl EventProvider {
             }
         }
 
+        {
+            // Load the next event into memory
+            let mut inner = self.inner.lock().unwrap();
+            Self::load_next_event(&mut inner)?;
+        }
+
         // Polling loop
         let provider = self.clone();
         std::thread::spawn(move || {
@@ -520,8 +527,9 @@ impl EventProvider {
                 } else if next_date.is_none() || next_date.unwrap() != dt {
                     next_date = Some(dt);
                     log::info!(
-                        "Next event: {} (event {}, source={:?})",
+                        "Next event: {} in {} (event {}, source={:?})",
                         dt,
+                        crate::types::format_time_left(dt - now),
                         event.id,
                         event.source
                     );

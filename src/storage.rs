@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::types::{
     ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, NextSource, Ordinal, Repetition,
-    day_to_str, parse_days, unit_from_str,
+    day_to_str, format_time_left, parse_days, unit_from_str,
 };
 
 // --- Private serialization helpers ---
@@ -501,8 +501,16 @@ impl EventStorage {
             "UPDATE events SET active = ?1, next_datetime = ?2, last_next_datetime = ?3, source = ?4 WHERE id = ?5",
             params![active as i32, next_str, last_next_str, source_str, id],
         )?;
+        let time_left = next_datetime
+            .map(|dt| {
+                format!(
+                    " (in {})",
+                    format_time_left(dt - Local::now().naive_local())
+                )
+            })
+            .unwrap_or_default();
         log::info!(
-            "Schedule updated for event {id}: active={active}, next_datetime={next_datetime:?}, source={source:?}"
+            "Updated event {id}: active={active}, next_datetime={next_datetime:?}{time_left}, source={source:?}"
         );
         Ok(())
     }
