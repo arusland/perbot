@@ -6,7 +6,7 @@ use super::message::{BULLET, format_when, html_to_plain};
 use crate::locale::LocaleProvider;
 use crate::scheduler;
 use crate::types::{EventInfo, MonthlyPattern};
-use chrono::{NaiveDateTime, Weekday};
+use chrono::NaiveDateTime;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
 
@@ -102,10 +102,12 @@ pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> S
 }
 
 /// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
-/// `"every friday"`, `"every first sunday"`, `"last day of the month"`. Returns
-/// `None` for one-off events (no recurrence). The recurrence-bearing fields are
-/// mutually exclusive, checked in priority order. Output is plain text with no
-/// HTML specials.
+/// `"every Friday"`, `"every first Sunday"`, `"last day of the month"`. Weekday
+/// sets collapse contiguous runs of ≥3 days into full-name ranges
+/// ([`crate::types::weekday_runs`]): `"every Monday-Sunday"`,
+/// `"every Monday-Wednesday, Friday"`. Returns `None` for one-off events (no
+/// recurrence). The recurrence-bearing fields are mutually exclusive, checked in
+/// priority order. Output is plain text with no HTML specials.
 fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String> {
     let every = loc.every_word();
     if let Some(rep) = &e.repetition {
@@ -117,11 +119,16 @@ fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String
         });
     }
     if let Some(days) = &e.days {
-        let mut list: Vec<Weekday> = days.iter().copied().collect();
-        list.sort_by_key(|d| d.num_days_from_monday());
-        let names = list
-            .iter()
-            .map(|d| loc.weekday_full(*d))
+        let names = crate::types::weekday_runs(days)
+            .into_iter()
+            .map(|(first, last)| {
+                let name = loc.weekday_full(first);
+                if first == last {
+                    name.to_string()
+                } else {
+                    format!("{name}-{}", loc.weekday_full(last))
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         return Some(format!("{every} {names}"));
@@ -280,7 +287,7 @@ mod tests {
     use super::*;
     use crate::locale::EN;
     use crate::view::test_support::sample_event;
-    use chrono::{Duration, NaiveDate, NaiveTime};
+    use chrono::{Duration, NaiveDate, NaiveTime, Weekday};
 
     #[test]
     fn scheduled_message_formats_datetime() {
@@ -527,6 +534,31 @@ mod tests {
         assert_eq!(
             describe_recurrence(&e, &EN).as_deref(),
             Some("every Monday, Friday")
+        );
+
+        // Contiguous runs of ≥3 days collapse into full-name ranges.
+        e.days = Some(HashSet::from([
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Thu,
+            Weekday::Fri,
+            Weekday::Sat,
+            Weekday::Sun,
+        ]));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every Monday-Sunday")
+        );
+        e.days = Some(HashSet::from([
+            Weekday::Mon,
+            Weekday::Tue,
+            Weekday::Wed,
+            Weekday::Fri,
+        ]));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every Monday-Wednesday, Friday")
         );
         e.days = None;
 

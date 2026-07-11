@@ -177,10 +177,29 @@ impl EventInfo {
 /// all joined with `,`. E.g. `{Mon..Sat}` → `"Mon-Sat"`, `{Mon,Tue,Wed,Fri}` →
 /// `"Mon-Wed,Fri"`, `{Thu,Sun}` → `"Thu,Sun"`.
 fn format_weekday_set(days: &HashSet<Weekday>, loc: &dyn LocaleProvider) -> String {
+    let groups: Vec<String> = weekday_runs(days)
+        .into_iter()
+        .map(|(first, last)| {
+            let name = loc.weekday_abbrev_cap(first);
+            if first == last {
+                name.to_string()
+            } else {
+                format!("{name}-{}", loc.weekday_abbrev_cap(last))
+            }
+        })
+        .collect();
+    groups.join(",")
+}
+
+/// Groups a weekday set into maximal runs of consecutive days, Monday-first.
+/// Runs of length ≥3 become one `(first, last)` range; shorter runs are emitted
+/// as individual `(day, day)` entries, matching the canonical/display rendering
+/// rule (a range needs at least 3 consecutive days).
+pub(crate) fn weekday_runs(days: &HashSet<Weekday>) -> Vec<(Weekday, Weekday)> {
     let mut idx: Vec<u32> = days.iter().map(|d| d.num_days_from_monday()).collect();
     idx.sort_unstable();
 
-    let mut groups: Vec<String> = Vec::new();
+    let mut runs = Vec::new();
     let mut i = 0;
     while i < idx.len() {
         // Extend the run while indices stay consecutive.
@@ -188,19 +207,17 @@ fn format_weekday_set(days: &HashSet<Weekday>, loc: &dyn LocaleProvider) -> Stri
         while j + 1 < idx.len() && idx[j + 1] == idx[j] + 1 {
             j += 1;
         }
-        let run_len = j - i + 1;
-        let first = loc.weekday_abbrev_cap(weekday_from_monday(idx[i]));
-        if run_len >= 3 {
-            let last = loc.weekday_abbrev_cap(weekday_from_monday(idx[j]));
-            groups.push(format!("{first}-{last}"));
+        if j - i + 1 >= 3 {
+            runs.push((weekday_from_monday(idx[i]), weekday_from_monday(idx[j])));
         } else {
             for &day in &idx[i..=j] {
-                groups.push(loc.weekday_abbrev_cap(weekday_from_monday(day)).to_string());
+                let day = weekday_from_monday(day);
+                runs.push((day, day));
             }
         }
         i = j + 1;
     }
-    groups.join(",")
+    runs
 }
 
 fn weekday_from_monday(i: u32) -> Weekday {
