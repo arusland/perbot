@@ -57,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
         log::error!("Failed to register bot commands: {}", e);
     }
 
-    let storage = EventStorage::open("perbot.db").context("Failed to open database")?;
+    std::fs::create_dir_all("data").context("Failed to create data directory")?;
+    let storage = EventStorage::open("data/perbot.db").context("Failed to open database")?;
     let provider = EventProvider::new(storage);
 
     // Channel for sending scheduled messages to Telegram

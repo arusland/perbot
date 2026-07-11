@@ -1,0 +1,9 @@
+target/
+logs/
+data/
+.env
+*.sh
+*.db
+.git/
+Dockerfile
+.dockerignore
