@@ -227,6 +227,19 @@ impl EventStorage {
             [],
         )?;
 
+        // Per-chat key/value settings: one value per (chat_id, name).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                chat_id    INTEGER NOT NULL REFERENCES chats(id),
+                name       TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (chat_id, name)
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -709,6 +722,38 @@ impl EventStorage {
         log::debug!("Chat information upserted: {:?}", chat);
 
         Ok(())
+    }
+
+    /// Inserts or updates a per-chat setting. Overwriting an existing
+    /// `(chat_id, name)` pair replaces the value and bumps `updated_at`,
+    /// leaving `created_at` untouched.
+    pub fn set_setting(&self, chat_id: i64, name: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (chat_id, name, value)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_id, name) DO UPDATE SET
+                value = excluded.value,
+                updated_at = datetime('now')",
+            params![chat_id, name, value],
+        )?;
+
+        log::debug!("Setting {name} set for chat {chat_id}");
+
+        Ok(())
+    }
+
+    /// Returns the value of a per-chat setting, or `None` when unset.
+    pub fn get_setting(&self, chat_id: i64, name: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM settings WHERE chat_id = ?1 AND name = ?2")?;
+
+        let mut rows = stmt.query(params![chat_id, name])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Inserts a user message and returns its ID.
@@ -1303,6 +1348,69 @@ mod tests {
 
         let chats = storage.get_all_chats().unwrap();
         assert_eq!(chats.len(), 2);
+    }
+
+    #[test]
+    fn test_get_setting_missing_returns_none() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+
+        assert_eq!(storage.get_setting(123, "locale").unwrap(), None);
+    }
+
+    #[test]
+    fn test_set_and_get_setting_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+
+        storage.set_setting(123, "locale", "en").unwrap();
+        assert_eq!(
+            storage.get_setting(123, "locale").unwrap(),
+            Some("en".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_setting_overwrites_existing() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+
+        storage.set_setting(123, "locale", "en").unwrap();
+        storage.set_setting(123, "locale", "ru").unwrap();
+
+        assert_eq!(
+            storage.get_setting(123, "locale").unwrap(),
+            Some("ru".to_string())
+        );
+        // The upsert replaced the row rather than adding a second one.
+        let count: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE chat_id = ?1 AND name = ?2",
+                params![123, "locale"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_settings_are_per_chat() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 111);
+        ensure_chat(&storage, 222);
+
+        storage.set_setting(111, "locale", "en").unwrap();
+        storage.set_setting(222, "locale", "ru").unwrap();
+
+        assert_eq!(
+            storage.get_setting(111, "locale").unwrap(),
+            Some("en".to_string())
+        );
+        assert_eq!(
+            storage.get_setting(222, "locale").unwrap(),
+            Some("ru".to_string())
+        );
     }
 
     #[test]

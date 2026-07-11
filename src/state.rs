@@ -59,6 +59,18 @@ impl EventProvider {
         inner.storage.upsert_chat(chat)
     }
 
+    /// Inserts or updates a per-chat setting (see `EventStorage::set_setting`).
+    pub fn set_setting(&self, chat_id: i64, name: &str, value: &str) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.set_setting(chat_id, name, value)
+    }
+
+    /// Returns the value of a per-chat setting, or `None` when unset.
+    pub fn get_setting(&self, chat_id: i64, name: &str) -> Result<Option<String>> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.get_setting(chat_id, name)
+    }
+
     /// Writes a consistent snapshot of the database to `dest` (see
     /// `EventStorage::backup_to`). Used by the admin `/database` command.
     pub fn backup_database<P: AsRef<std::path::Path>>(&self, dest: P) -> Result<()> {
