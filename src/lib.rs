@@ -12,4 +12,5 @@ pub mod state;
 pub mod storage;
 pub mod tgbot;
 pub mod types;
+pub mod tz;
 pub mod view;

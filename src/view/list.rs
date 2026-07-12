@@ -7,6 +7,7 @@ use super::message::{BULLET, MESSAGE_PREVIEW_MAX, message_preview};
 use crate::locale::LocaleProvider;
 use crate::types::EventInfo;
 use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use std::fmt::Write as _;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
@@ -14,7 +15,7 @@ use teloxide::utils::html;
 /// Callback data for non-interactive buttons (e.g. the page indicator). It has
 /// no `:`-prefixed envelope and matches no list tag, so `main`'s router hands it
 /// to `handle_list_callback`, which answers the query and ignores it.
-const NOOP_DATA: &str = "noop";
+pub(super) const NOOP_DATA: &str = "noop";
 
 /// The paginated list commands. Each variant knows how to title its reply, tag
 /// its inline-button callbacks (`<tag>:<page>`), and lay out its rows; fetching
@@ -117,11 +118,11 @@ pub enum RowStyle {
 /// a relative part would render "soon" for past moments), then the truncated,
 /// tag-stripped, HTML-escaped message preview and the tappable `/event<id>`
 /// link (see [`RowStyle::PreviewLink`]).
-fn write_event_row_preview_only(out: &mut String, e: &EventInfo, loc: &dyn LocaleProvider) {
+fn write_event_row_preview_only(out: &mut String, e: &EventInfo, tz: Tz, loc: &dyn LocaleProvider) {
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
     match e.next_datetime {
         Some(dt) => {
-            let when = html::escape(&loc.format_datetime(dt));
+            let when = html::escape(&loc.format_datetime(crate::tz::to_local(dt, tz)));
             let _ = writeln!(out, "{BULLET} {when} — {message} /event{}", e.id);
         }
         None => {
@@ -138,13 +139,14 @@ fn write_event_row_two_line(
     out: &mut String,
     e: &EventInfo,
     now: NaiveDateTime,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) {
     let message = html::escape(&message_preview(&e.message, MESSAGE_PREVIEW_MAX));
     let _ = writeln!(
         out,
         "{} /event{}\n  {message}",
-        event_when_line(e, now, loc),
+        event_when_line(e, now, tz, loc),
         e.id
     );
 }
@@ -174,6 +176,7 @@ pub fn format_page_at(
     page_events: &[EventInfo],
     total: usize,
     now: NaiveDateTime,
+    tz: Tz,
     per_page: usize,
     title: &str,
     empty: &str,
@@ -191,8 +194,8 @@ pub fn format_page_at(
             out.push('\n');
         }
         match style {
-            RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, loc),
-            RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e, loc),
+            RowStyle::TwoLine => write_event_row_two_line(&mut out, e, now, tz, loc),
+            RowStyle::PreviewLink => write_event_row_preview_only(&mut out, e, tz, loc),
         }
     }
     (out, pages)
@@ -244,6 +247,7 @@ pub fn format_missed_page(
     page_events: &[EventInfo],
     total: usize,
     now: chrono::NaiveDateTime,
+    tz: Tz,
     page: usize,
     loc: &dyn LocaleProvider,
 ) -> (String, Option<InlineKeyboardMarkup>) {
@@ -252,6 +256,7 @@ pub fn format_missed_page(
         page_events,
         total,
         now,
+        tz,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
@@ -267,7 +272,7 @@ mod tests {
     use crate::locale::EN;
     use crate::scheduler;
     use crate::view::test_support::sample_event;
-    use chrono::{Duration, Local};
+    use chrono::{Duration, Utc};
 
     #[test]
     fn total_pages_counts() {
@@ -282,7 +287,8 @@ mod tests {
         let (text, pages) = format_page_at(
             &[],
             0,
-            Local::now().naive_local(),
+            Utc::now().naive_utc(),
+            Tz::UTC,
             10,
             "Upcoming events",
             "No upcoming events.",
@@ -305,6 +311,7 @@ mod tests {
             &events,
             events.len(),
             now,
+            Tz::UTC,
             10,
             "Upcoming events",
             "none",
@@ -329,6 +336,7 @@ mod tests {
             &events,
             events.len(),
             now,
+            Tz::UTC,
             10,
             "Today's events",
             "none",
@@ -353,6 +361,7 @@ mod tests {
             &events[..10],
             25,
             now,
+            Tz::UTC,
             10,
             "Upcoming events",
             "none",
@@ -370,6 +379,7 @@ mod tests {
             &events[20..],
             25,
             now,
+            Tz::UTC,
             10,
             "Upcoming events",
             "none",
@@ -397,6 +407,7 @@ mod tests {
             &events,
             events.len(),
             now,
+            Tz::UTC,
             10,
             "Upcoming events",
             "none",
@@ -428,6 +439,7 @@ mod tests {
             &[e],
             1,
             now,
+            Tz::UTC,
             10,
             "Upcoming events",
             "none",
@@ -452,6 +464,7 @@ mod tests {
             &[e],
             1,
             now,
+            Tz::UTC,
             10,
             "Missed events",
             "No missed events.",
@@ -539,10 +552,11 @@ mod tests {
                 e
             },
             now,
+            Tz::UTC,
         );
         event.id = 7;
 
-        let (text, keyboard) = format_missed_page(&[event], 1, now, 0, &EN);
+        let (text, keyboard) = format_missed_page(&[event], 1, now, Tz::UTC, 0, &EN);
         assert!(text.starts_with("<b>Missed events:</b>\n"));
         // The row leads with the event's datetime (the snapshot puts the
         // missed moment in `next_datetime`).

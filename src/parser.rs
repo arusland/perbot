@@ -1,4 +1,5 @@
-use chrono::{Datelike, Local, NaiveDate, NaiveTime, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveTime, Utc, Weekday};
+use chrono_tz::Tz;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -67,14 +68,21 @@ impl Remaining {
     }
 }
 
-/// Parses a natural-language reminder from `input`.
+/// Parses a natural-language reminder from `input`, interpreting bare dates
+/// relative to the current day in the chat's timezone.
 ///
 /// Extracts the time/date components (see module regexes) and returns an
 /// [`EventInfo`] whose `message` is the leftover text. Returns `None` when no
 /// time component is found or nothing is left for the message body. The
 /// DB-tracking fields are left at their defaults (zero/false/None).
-pub fn parse(input: &str, loc: &dyn LocaleProvider) -> Option<EventInfo> {
-    parse_full(input, loc).map(|(event, _)| event)
+pub fn parse(input: &str, loc: &dyn LocaleProvider, tz: Tz) -> Option<EventInfo> {
+    parse_full(input, loc, tz).map(|(event, _)| event)
+}
+
+/// Like [`parse`] but with an explicit chat-local `today`, for deterministic
+/// testing (it only drives short-date year inference).
+pub fn parse_at(input: &str, loc: &dyn LocaleProvider, today: NaiveDate) -> Option<EventInfo> {
+    parse_full_at(input, loc, today).map(|(event, _)| event)
 }
 
 /// Like [`parse`] but also returns the byte ranges of `input` that compose the
@@ -85,8 +93,21 @@ pub fn parse(input: &str, loc: &dyn LocaleProvider) -> Option<EventInfo> {
 /// Returns `None` when no time component is found or when the message body is
 /// empty (a time was given but no reminder text). To detect the latter case on
 /// its own, use [`parse_time_only`].
-pub fn parse_full(input: &str, loc: &dyn LocaleProvider) -> Option<(EventInfo, Vec<Range<usize>>)> {
-    let (event, spans) = parse_components(input, loc)?;
+pub fn parse_full(
+    input: &str,
+    loc: &dyn LocaleProvider,
+    tz: Tz,
+) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    parse_full_at(input, loc, today_in(tz))
+}
+
+/// Like [`parse_full`] but with an explicit chat-local `today`.
+pub fn parse_full_at(
+    input: &str,
+    loc: &dyn LocaleProvider,
+    today: NaiveDate,
+) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    let (event, spans) = parse_components(input, loc, today)?;
     if event.message.is_empty() {
         return None;
     }
@@ -98,8 +119,17 @@ pub fn parse_full(input: &str, loc: &dyn LocaleProvider) -> Option<(EventInfo, V
 /// `None` when there is no time component or when a body was supplied (in which
 /// case [`parse_full`] handles it). Used by the interactive "send me the reminder
 /// text" flow.
-pub fn parse_time_only(input: &str, loc: &dyn LocaleProvider) -> Option<EventInfo> {
-    let (event, _) = parse_components(input, loc)?;
+pub fn parse_time_only(input: &str, loc: &dyn LocaleProvider, tz: Tz) -> Option<EventInfo> {
+    parse_time_only_at(input, loc, today_in(tz))
+}
+
+/// Like [`parse_time_only`] but with an explicit chat-local `today`.
+pub fn parse_time_only_at(
+    input: &str,
+    loc: &dyn LocaleProvider,
+    today: NaiveDate,
+) -> Option<EventInfo> {
+    let (event, _) = parse_components(input, loc, today)?;
     if event.message.is_empty() {
         Some(event)
     } else {
@@ -107,12 +137,19 @@ pub fn parse_time_only(input: &str, loc: &dyn LocaleProvider) -> Option<EventInf
     }
 }
 
+/// The current calendar date as read on a wall clock in `tz`.
+fn today_in(tz: Tz) -> NaiveDate {
+    Utc::now().with_timezone(&tz).date_naive()
+}
+
 /// Extracts the time/date components and leftover message body. Returns `None`
 /// only when no time component is found; the returned `message` may be empty (the
-/// callers [`parse_full`] / [`parse_time_only`] decide how to treat that).
+/// callers [`parse_full_at`] / [`parse_time_only_at`] decide how to treat that).
+/// `today` (chat-local) supplies the year a short date omits.
 fn parse_components(
     input: &str,
     loc: &dyn LocaleProvider,
+    today: NaiveDate,
 ) -> Option<(EventInfo, Vec<Range<usize>>)> {
     let g = loc.grammar();
     let mut rem = Remaining::new(input);
@@ -205,7 +242,7 @@ fn parse_components(
         } else if let Some(caps) = g.date_short.captures(&rem.text) {
             let day: u32 = caps[1].parse().ok()?;
             let month: u32 = caps[2].parse().ok()?;
-            let year = Local::now().year();
+            let year = today.year();
             let m = caps.get(0).unwrap();
             let (start, end) = (m.start(), m.end());
 
@@ -330,7 +367,7 @@ fn parse_components(
         next_datetime: None,
         source: None,
         last_next_datetime: None,
-        created_at: Local::now().naive_local(),
+        created_at: Utc::now().naive_utc(),
         msg_id: 0,
         legacy: false,
         parent: None,
@@ -346,15 +383,20 @@ mod tests {
     use chrono::Datelike;
 
     // Thin English-locale wrappers so the many parse call sites stay terse; they
-    // shadow the `super::*` glob imports of the same names.
+    // shadow the `super::*` glob imports of the same names. `TODAY` pins the
+    // short-date year inference so the tests don't drift with the wall clock.
+    const TODAY_YEAR: i32 = 2026;
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(TODAY_YEAR, 7, 12).unwrap()
+    }
     fn parse(input: &str) -> Option<EventInfo> {
-        super::parse(input, &EN)
+        super::parse_at(input, &EN, today())
     }
     fn parse_full(input: &str) -> Option<(EventInfo, Vec<Range<usize>>)> {
-        super::parse_full(input, &EN)
+        super::parse_full_at(input, &EN, today())
     }
     fn parse_time_only(input: &str) -> Option<EventInfo> {
-        super::parse_time_only(input, &EN)
+        super::parse_time_only_at(input, &EN, today())
     }
 
     /// Concatenates the surviving spans back out of the original input.
@@ -740,7 +782,7 @@ mod tests {
         ] {
             let e = parse(input).unwrap();
             assert_eq!(e.time, NaiveTime::from_hms_opt(12, 0, 0));
-            assert_eq!(e.date, NaiveDate::from_ymd_opt(Local::now().year(), 1, 1));
+            assert_eq!(e.date, NaiveDate::from_ymd_opt(TODAY_YEAR, 1, 1));
             assert!(!e.year_explicit);
             assert!(e.repetition.is_none(), "{input}");
             assert_eq!(e.message, "happy new year");
@@ -755,7 +797,7 @@ mod tests {
         // so the canonical form keeps the trailing "yearly".
         let e = parse("11:07 05.11 every 2 days take meds").unwrap();
         assert_eq!(e.time, NaiveTime::from_hms_opt(11, 7, 0));
-        assert_eq!(e.date, NaiveDate::from_ymd_opt(Local::now().year(), 11, 5));
+        assert_eq!(e.date, NaiveDate::from_ymd_opt(TODAY_YEAR, 11, 5));
         assert!(!e.year_explicit);
         let rep = e.repetition.as_ref().unwrap();
         assert_eq!(rep.interval, 2);

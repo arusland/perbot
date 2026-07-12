@@ -305,36 +305,48 @@ fn run_table(table_idx: usize, table: &Table) {
                     }
                     continue;
                 }
-                current_id = parser::parse(&row.value, &perbot::locale::EN).map(|mut event| {
-                    if let Some(expected) = &row.message
-                        && &event.message != expected
-                    {
-                        fail_at(
-                            table_idx,
-                            table,
-                            step,
-                            &format!("expected message {:?}, got {:?}", expected, event.message),
-                            &event.message,
-                        );
-                    }
-                    if let Some(expected) = &row.normalized {
-                        let actual = event.normalize_time(&perbot::locale::EN);
-                        if &actual != expected {
+                // Short-date year inference uses the row's own timestamp, keeping
+                // tables deterministic against the wall clock. The test chat has
+                // no timezone setting, so everything runs in UTC and every table
+                // timestamp is chat-local and UTC at once.
+                current_id = parser::parse_at(&row.value, &perbot::locale::EN, row.ts.date()).map(
+                    |mut event| {
+                        if let Some(expected) = &row.message
+                            && &event.message != expected
+                        {
                             fail_at(
                                 table_idx,
                                 table,
                                 step,
-                                &format!("expected normalized {:?}, got {:?}", expected, actual),
-                                &actual,
+                                &format!(
+                                    "expected message {:?}, got {:?}",
+                                    expected, event.message
+                                ),
+                                &event.message,
                             );
                         }
-                    }
-                    let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
-                    event.chat_id = CHAT_ID;
-                    event.msg_id = msg_id;
-                    let event = provider.insert_event_and_get_at(event, row.ts).unwrap();
-                    event.id
-                });
+                        if let Some(expected) = &row.normalized {
+                            let actual = event.normalize_time(&perbot::locale::EN);
+                            if &actual != expected {
+                                fail_at(
+                                    table_idx,
+                                    table,
+                                    step,
+                                    &format!(
+                                        "expected normalized {:?}, got {:?}",
+                                        expected, actual
+                                    ),
+                                    &actual,
+                                );
+                            }
+                        }
+                        let msg_id = provider.insert_message(None, CHAT_ID, &row.value).unwrap();
+                        event.chat_id = CHAT_ID;
+                        event.msg_id = msg_id;
+                        let event = provider.insert_event_and_get_at(event, row.ts).unwrap();
+                        event.id
+                    },
+                );
             }
             "SYSTEM" => {
                 let id = match current_id {

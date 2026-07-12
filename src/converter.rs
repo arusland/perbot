@@ -9,7 +9,8 @@
 
 use std::collections::HashSet;
 
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono_tz::Tz;
 use regex::Regex;
 use teloxide::utils::html;
 
@@ -215,11 +216,11 @@ fn parse_legacy(input: &str) -> Option<LegacyParse> {
     })
 }
 
-fn ms_to_naive_local(ms: i64) -> Option<NaiveDateTime> {
-    Local
+fn ms_to_naive_utc(ms: i64) -> Option<NaiveDateTime> {
+    chrono::Utc
         .timestamp_millis_opt(ms)
         .single()
-        .map(|dt| dt.naive_local())
+        .map(|dt| dt.naive_utc())
 }
 
 fn base_event(chat_id: i64, created_at: NaiveDateTime, message: String) -> EventInfo {
@@ -253,12 +254,16 @@ fn base_event(chat_id: i64, created_at: NaiveDateTime, message: String) -> Event
 /// alerts: when present it is used directly as `next_datetime` and the scheduler
 /// is *not* run; an event whose stored activation is already past is inactive.
 /// Otherwise the next occurrence is computed with [`scheduler::calc_next_at`].
+///
+/// `now` and `created_at` are UTC; `tz` is the target chat's timezone, in which
+/// the legacy wall-clock fields (time/date/day-month) are interpreted.
 pub fn convert(
     input: &str,
     created_at: NaiveDateTime,
     last_active_ms: Option<i64>,
     chat_id: i64,
     now: NaiveDateTime,
+    tz: Tz,
 ) -> Converted {
     let parse = parse_legacy(input);
     let message = parse
@@ -282,10 +287,10 @@ pub fn convert(
             event.date = NaiveDate::from_ymd_opt(y, mo, d);
             event.year_explicit = true;
         } else if let (Some(d), Some(mo)) = (p.day, p.month) {
-            // Day + month: recurs yearly. Stamp the current year so the scheduler
-            // (which only wraps a short date forward by one year) lands on the next
-            // occurrence rather than the creation year.
-            event.date = NaiveDate::from_ymd_opt(now.year(), mo, d);
+            // Day + month: recurs yearly. Stamp the current chat-local year so the
+            // scheduler (which only wraps a short date forward by one year) lands on
+            // the next occurrence rather than the creation year.
+            event.date = NaiveDate::from_ymd_opt(crate::tz::to_local(now, tz).year(), mo, d);
         } else if let Some(d) = p.day {
             // Day-of-month (with or without a legacy period): recurring monthly anchor.
             event.monthly_pattern = Some(MonthlyPattern::DayOfMonth(d));
@@ -298,14 +303,14 @@ pub fn convert(
     // flag the recalculation for the report.
     let mut recalculated = false;
     if let Some(ms) = last_active_ms {
-        match ms_to_naive_local(ms) {
+        match ms_to_naive_utc(ms) {
             Some(dt) if dt > now => {
                 event.next_datetime = Some(dt);
                 event.active = true;
             }
             Some(stale) => {
                 event.next_datetime = Some(stale);
-                let scheduled = scheduler::calc_next_at(event.clone(), now);
+                let scheduled = scheduler::calc_next_at(event.clone(), now, tz);
                 event.next_datetime = scheduled.next_datetime;
                 event.active = scheduled.active;
                 recalculated = event.active;
@@ -313,7 +318,7 @@ pub fn convert(
             None => event.active = false,
         }
     } else if parse.is_some() {
-        let scheduled = scheduler::calc_next_at(event.clone(), now);
+        let scheduled = scheduler::calc_next_at(event.clone(), now, tz);
         event.next_datetime = scheduled.next_datetime;
         event.active = scheduled.active;
     }
@@ -430,7 +435,7 @@ mod tests {
     fn birthday_short_date_recurs_yearly_and_is_active() {
         // Created 2017, day+month only -> next 2026-09-26.
         let created = created_at_from_filename("20170925_124839_126.alert").unwrap();
-        let c = convert("10:00 26:09 birthday", created, None, 42, now());
+        let c = convert("10:00 26:09 birthday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Scheduled);
         let next = c.event.next_datetime.unwrap();
         assert_eq!(next.date(), NaiveDate::from_ymd_opt(2026, 9, 26).unwrap());
@@ -443,7 +448,14 @@ mod tests {
     #[test]
     fn full_date_in_past_is_inactive() {
         let created = created_at_from_filename("20260407_131907_140.alert").unwrap();
-        let c = convert("08:22 09:04:2026 take laptop", created, None, 42, now());
+        let c = convert(
+            "08:22 09:04:2026 take laptop",
+            created,
+            None,
+            42,
+            now(),
+            Tz::UTC,
+        );
         assert_eq!(c.status, Status::Inactive);
         assert!(!c.event.active);
         assert!(c.event.year_explicit);
@@ -454,7 +466,7 @@ mod tests {
     #[test]
     fn full_date_in_future_is_active() {
         let created = created_at_from_filename("20260612_143809_036.alert").unwrap();
-        let c = convert("18:50 20:06:2026 match", created, None, 42, now());
+        let c = convert("18:50 20:06:2026 match", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Scheduled);
         assert_eq!(
             c.event.next_datetime.unwrap().date(),
@@ -466,7 +478,7 @@ mod tests {
     #[test]
     fn weekdays_recur_weekly() {
         let created = created_at_from_filename("20230620_140142_480.alert").unwrap();
-        let c = convert("17:00 1-5 snack", created, None, 42, now());
+        let c = convert("17:00 1-5 snack", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Scheduled);
         let days = c.event.days.as_ref().unwrap();
         assert_eq!(days.len(), 5);
@@ -480,7 +492,7 @@ mod tests {
     fn day_only_maps_to_monthly_pattern() {
         // Created 2024-10-12; day 27 -> recurring "each 27th day of the month".
         let created = created_at_from_filename("20241012_105344_580.alert").unwrap();
-        let c = convert("16:33 27: concert", created, None, 42, now());
+        let c = convert("16:33 27: concert", created, None, 42, now(), Tz::UTC);
         assert_eq!(
             c.event.next_datetime,
             Some(NaiveDateTime::new(
@@ -499,7 +511,7 @@ mod tests {
     fn period_maps_to_repetition() {
         let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
         // "28/1:" -> each 28th day of the month, every 1 day.
-        let c = convert("22:15 28/1: rent", created, None, 42, now());
+        let c = convert("22:15 28/1: rent", created, None, 42, now(), Tz::UTC);
         assert_eq!(
             c.event.monthly_pattern,
             Some(MonthlyPattern::DayOfMonth(28))
@@ -516,7 +528,7 @@ mod tests {
             "22:15 each 28th day of the month every day"
         );
         // "05/2:11:" -> day 5 of month 11 (start anchor), every 2 days.
-        let c = convert("11:07 05/2:11: bday", created, None, 42, now());
+        let c = convert("11:07 05/2:11: bday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Days);
         assert_eq!(
@@ -524,7 +536,7 @@ mod tests {
             "11:07 05.11 every 2 days yearly"
         );
         // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
-        let c = convert("11:36/90 4: pay", created, None, 42, now());
+        let c = convert("11:36/90 4: pay", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
         assert_eq!(c.event.repetition.as_ref().unwrap().unit, TimeUnit::Minutes);
         assert_eq!(
@@ -537,7 +549,7 @@ mod tests {
     fn colon_date_without_period_is_yearly() {
         let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
         // Legacy colon date "05:11:" with no period -> day 5 of month 11, recurs yearly.
-        let c = convert("11:07 05:11: bday", created, None, 42, now());
+        let c = convert("11:07 05:11: bday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.time, NaiveTime::from_hms_opt(11, 7, 0));
         assert!(!c.event.year_explicit);
@@ -551,7 +563,7 @@ mod tests {
         let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
         // Legacy colon date "05/2:11:" -> day 5 of month 11 as the start anchor,
         // then every 2 days (the period governs, so it is not a yearly event).
-        let c = convert("11:07 05/2:11: bday", created, None, 42, now());
+        let c = convert("11:07 05/2:11: bday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
         assert_eq!(c.event.time, NaiveTime::from_hms_opt(11, 7, 0));
         assert!(!c.event.year_explicit);
@@ -573,12 +585,17 @@ mod tests {
     fn periodic_uses_last_active_time() {
         let created = created_at_from_filename("20180131_143625_667.alert").unwrap();
         // 1782764100000 ms = 2026-07-... (future relative to test now).
-        let future_ms = Local
-            .from_local_datetime(&(now() + chrono::Duration::days(10)))
-            .single()
-            .unwrap()
+        let future_ms = chrono::Utc
+            .from_utc_datetime(&(now() + chrono::Duration::days(10)))
             .timestamp_millis();
-        let c = convert("22:15 28/1: rent", created, Some(future_ms), 42, now());
+        let c = convert(
+            "22:15 28/1: rent",
+            created,
+            Some(future_ms),
+            42,
+            now(),
+            Tz::UTC,
+        );
         assert_eq!(c.status, Status::Scheduled);
         assert!(c.event.next_datetime.is_some());
         assert_eq!(
@@ -587,12 +604,17 @@ mod tests {
         );
 
         // Stale activation is rolled forward using the input's period (every 1 day).
-        let past_ms = Local
-            .from_local_datetime(&(now() - chrono::Duration::days(10)))
-            .single()
-            .unwrap()
+        let past_ms = chrono::Utc
+            .from_utc_datetime(&(now() - chrono::Duration::days(10)))
             .timestamp_millis();
-        let c = convert("22:15 28/1: rent", created, Some(past_ms), 42, now());
+        let c = convert(
+            "22:15 28/1: rent",
+            created,
+            Some(past_ms),
+            42,
+            now(),
+            Tz::UTC,
+        );
         assert_eq!(c.status, Status::Scheduled);
         assert!(c.event.active);
         assert!(c.recalculated);
@@ -606,7 +628,7 @@ mod tests {
     #[test]
     fn unparsable_keeps_raw_text_inactive() {
         let created = now();
-        let c = convert("no time here at all", created, None, 42, now());
+        let c = convert("no time here at all", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Unparsed);
         assert_eq!(c.event.message, "no time here at all");
         assert!(c.event.time.is_none());

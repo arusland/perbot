@@ -1,19 +1,33 @@
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
+use chrono_tz::Tz;
 
 use crate::types::{EventInfo, MonthlyPattern, NextSource, Ordinal, TimeUnit};
 
 /// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
 /// future datetime can be determined, otherwise `active = false` and
-/// `next_datetime = None`.
-pub fn calc_next(event: EventInfo) -> EventInfo {
-    calc_next_at(event, Local::now().naive_local())
+/// `next_datetime = None`. `tz` is the chat's timezone: wall-clock fields are
+/// read in it, `next_datetime` is UTC.
+pub fn calc_next(event: EventInfo, tz: Tz) -> EventInfo {
+    calc_next_at(event, Utc::now().naive_utc(), tz)
 }
 
-/// Like [`calc_next`] but with an explicit `now`, for deterministic testing.
-pub fn calc_next_at(event: EventInfo, now: NaiveDateTime) -> EventInfo {
-    let computed = calculate_next_datetime(&event, now);
-    let next_datetime = computed.map(|(dt, _)| dt);
+/// Like [`calc_next`] but with an explicit UTC `now`, for deterministic
+/// testing. This is the only place instants cross the UTC↔chat-local
+/// boundary on the scheduling side: the recurrence math itself runs entirely
+/// in the chat's wall-clock frame, so `every day` stays at the same local
+/// time across DST (an hour/minute interval accordingly stretches or shrinks
+/// by the offset delta once per transition).
+pub fn calc_next_at(event: EventInfo, now: NaiveDateTime, tz: Tz) -> EventInfo {
+    // The repetition base is the stored (UTC) next_datetime; move it into the
+    // local frame for the math, keeping the original UTC values for the
+    // last_next_datetime bookkeeping below.
+    let local_event = EventInfo {
+        next_datetime: event.next_datetime.map(|dt| crate::tz::to_local(dt, tz)),
+        ..event.clone()
+    };
+    let computed = calculate_next_datetime(&local_event, crate::tz::to_local(now, tz));
+    let next_datetime = computed.map(|(dt, _)| crate::tz::to_utc(dt, tz));
     let source = computed.map(|(_, src)| src);
     let last_next_datetime = next_datetime
         .or(event.next_datetime)
@@ -426,10 +440,10 @@ mod tests {
     #[test]
     fn play_time_only_future_today() {
         let t = NaiveTime::from_hms_opt(23, 59, 0).unwrap();
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(t);
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert!(dt > now || dt.date() == now.date().succ_opt().unwrap());
@@ -441,7 +455,7 @@ mod tests {
         event.date = NaiveDate::from_ymd_opt(2020, 1, 1);
         event.time = NaiveTime::from_hms_opt(12, 0, 0);
         event.year_explicit = true;
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(!result.active);
         assert!(result.next_datetime.is_none());
     }
@@ -453,13 +467,13 @@ mod tests {
         event.date = NaiveDate::from_ymd_opt(2027, 6, 1);
         event.time = NaiveTime::from_hms_opt(12, 0, 0);
         event.year_explicit = true;
-        let scheduled = calc_next_at(event, dt(2027, 1, 1, 0, 0));
+        let scheduled = calc_next_at(event, dt(2027, 1, 1, 0, 0), Tz::UTC);
         let fired = scheduled.next_datetime.unwrap();
         assert_eq!(scheduled.last_next_datetime, Some(fired));
 
         // Recomputing after the fire time: now inactive, but the last fired
         // datetime is preserved.
-        let after = calc_next_at(scheduled, dt(2027, 6, 2, 0, 0));
+        let after = calc_next_at(scheduled, dt(2027, 6, 2, 0, 0), Tz::UTC);
         assert!(!after.active);
         assert!(after.next_datetime.is_none());
         assert_eq!(after.last_next_datetime, Some(fired));
@@ -474,12 +488,12 @@ mod tests {
 
     #[test]
     fn play_short_date_past_wraps_to_next_year() {
-        let past = Local::now().naive_local() - chrono::Duration::days(2);
+        let past = Utc::now().naive_utc() - chrono::Duration::days(2);
         let mut event = make_play_event();
         event.date = Some(past.date());
         event.time = Some(past.time());
         event.year_explicit = false;
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert_eq!(dt.date().year(), past.date().year() + 1);
@@ -488,14 +502,14 @@ mod tests {
     #[test]
     fn play_skips_disallowed_day() {
         let t = NaiveTime::from_hms_opt(23, 59, 0).unwrap();
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let today = now.date();
         let target_day = today.weekday().succ();
 
         let mut event = make_play_event();
         event.time = Some(t);
         event.days = Some(HashSet::from([target_day]));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert_eq!(dt.date().weekday(), target_day);
@@ -504,10 +518,10 @@ mod tests {
 
     #[test]
     fn play_in_offset_minutes() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.in_offset = Some((10, TimeUnit::Minutes));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         let diff = dt.signed_duration_since(now).num_minutes();
@@ -516,10 +530,10 @@ mod tests {
 
     #[test]
     fn play_in_offset_hours() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.in_offset = Some((2, TimeUnit::Hours));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         let diff = dt.signed_duration_since(now).num_hours();
@@ -528,11 +542,11 @@ mod tests {
 
     #[test]
     fn play_monthly_first_sunday() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert!(dt > now);
@@ -542,11 +556,11 @@ mod tests {
 
     #[test]
     fn play_monthly_last_monday() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
         event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert!(dt > now);
@@ -557,11 +571,11 @@ mod tests {
 
     #[test]
     fn play_monthly_last_day() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap());
         event.monthly_pattern = Some(MonthlyPattern::LastDay);
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert!(dt > now);
@@ -579,7 +593,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
             NaiveTime::from_hms_opt(19, 36, 0).unwrap(),
         );
-        let result = calc_next_at(event, now);
+        let result = calc_next_at(event, now, Tz::UTC);
         assert!(result.active);
         assert_eq!(
             result.next_datetime,
@@ -600,7 +614,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 2, 15).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         );
-        let result = calc_next_at(event, now);
+        let result = calc_next_at(event, now, Tz::UTC);
         assert_eq!(
             result.next_datetime,
             Some(NaiveDateTime::new(
@@ -630,18 +644,18 @@ mod tests {
         };
 
         // First scheduling: the 28th anchor.
-        event = calc_next_at(event, at(2026, 6, 24, 19, 36, 0));
+        event = calc_next_at(event, at(2026, 6, 24, 19, 36, 0), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2026, 6, 28, 22, 15, 0)));
         // After the anchor fires, the interval takes over: +2 days.
-        event = calc_next_at(event, at(2026, 6, 28, 22, 15, 1));
+        event = calc_next_at(event, at(2026, 6, 28, 22, 15, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2026, 6, 30, 22, 15, 0)));
-        event = calc_next_at(event, at(2026, 6, 30, 22, 15, 1));
+        event = calc_next_at(event, at(2026, 6, 30, 22, 15, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2026, 7, 2, 22, 15, 0)));
         // Jumping ahead: the next 28th anchor wins over the interval step.
-        event = calc_next_at(event, at(2026, 7, 28, 22, 14, 1));
+        event = calc_next_at(event, at(2026, 7, 28, 22, 14, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2026, 7, 28, 22, 15, 0)));
         // Interval resumes from the anchor.
-        event = calc_next_at(event, at(2026, 7, 28, 22, 15, 1));
+        event = calc_next_at(event, at(2026, 7, 28, 22, 15, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2026, 7, 30, 22, 15, 0)));
     }
 
@@ -668,24 +682,24 @@ mod tests {
         });
 
         // First scheduling: the next future Nov 5 at 11:07.
-        event = calc_next_at(event, at(2099, 10, 1, 9, 0, 0));
+        event = calc_next_at(event, at(2099, 10, 1, 9, 0, 0), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2099, 11, 5, 11, 7, 0)));
         // After it fires, the repetition takes over: +2 days (not a yearly wrap).
-        event = calc_next_at(event, at(2099, 11, 5, 11, 7, 1));
+        event = calc_next_at(event, at(2099, 11, 5, 11, 7, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2099, 11, 7, 11, 7, 0)));
-        event = calc_next_at(event, at(2099, 11, 7, 11, 7, 1));
+        event = calc_next_at(event, at(2099, 11, 7, 11, 7, 1), Tz::UTC);
         assert_eq!(event.next_datetime, Some(at(2099, 11, 9, 11, 7, 0)));
     }
 
     #[test]
     fn play_monthly_no_time_uses_midnight() {
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
             Ordinal::Second,
             Weekday::Wed,
         ));
-        let result = calc_next(event);
+        let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
         assert!(dt > now);
@@ -702,7 +716,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         );
-        let result = calc_next_at(event, now);
+        let result = calc_next_at(event, now, Tz::UTC);
         assert!(result.active);
         assert_eq!(
             result.next_datetime,
@@ -722,7 +736,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         );
-        let result = calc_next_at(event, now);
+        let result = calc_next_at(event, now, Tz::UTC);
         assert!(!result.active);
         assert!(result.next_datetime.is_none());
     }
@@ -738,7 +752,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
         );
-        let result = calc_next_at(event, now);
+        let result = calc_next_at(event, now, Tz::UTC);
         let dt = result.next_datetime.unwrap();
         assert_eq!(dt.date().weekday(), Weekday::Sun);
         assert_eq!(dt.date().year(), 2027);
@@ -809,5 +823,89 @@ mod tests {
             last_day_of_month_date(2026, 12),
             NaiveDate::from_ymd_opt(2026, 12, 31)
         );
+    }
+
+    // --- Timezone / DST tests. Inputs and outputs of calc_next_at are UTC;
+    // --- the wall-clock math runs in the given zone (see tz::to_utc's policy).
+
+    #[test]
+    fn tz_daily_event_lands_in_dst_gap_fires_at_gap_end() {
+        // Europe/Amsterdam springs 02:00 → 03:00 on 2026-03-29: a daily 02:30
+        // reminder has no 02:30 that day and fires at the gap end (03:00 local
+        // = 01:00 UTC).
+        let tz = chrono_tz::Tz::Europe__Amsterdam;
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(2, 30, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        // now = 2026-03-28 12:00 local (CET, +1) = 11:00 UTC.
+        let result = calc_next_at(event, dt(2026, 3, 28, 11, 0), tz);
+        assert_eq!(result.next_datetime, Some(dt(2026, 3, 29, 1, 0)));
+        assert_eq!(
+            crate::tz::to_local(result.next_datetime.unwrap(), tz),
+            dt(2026, 3, 29, 3, 0)
+        );
+    }
+
+    #[test]
+    fn tz_daily_event_in_dst_fold_takes_earliest_offset() {
+        // Europe/Amsterdam falls back 03:00 → 02:00 on 2026-10-25: 02:30
+        // happens twice; the earliest (CEST, +2) reading wins = 00:30 UTC.
+        let tz = chrono_tz::Tz::Europe__Amsterdam;
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(2, 30, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        // now = 2026-10-24 12:00 local (CEST, +2) = 10:00 UTC.
+        let result = calc_next_at(event, dt(2026, 10, 24, 10, 0), tz);
+        assert_eq!(result.next_datetime, Some(dt(2026, 10, 25, 0, 30)));
+    }
+
+    #[test]
+    fn tz_daily_repetition_keeps_wall_clock_across_dst() {
+        // "09:00 every day" scheduled before the spring-forward transition:
+        // advancing past 2026-03-28 09:00 CET (08:00 UTC) lands on
+        // 2026-03-29 09:00 CEST (07:00 UTC) — same wall clock, different offset.
+        let tz = chrono_tz::Tz::Europe__Amsterdam;
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(9, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        event.next_datetime = Some(dt(2026, 3, 28, 8, 0));
+        event.active = true;
+        event.source = Some(NextSource::Repetition);
+
+        let result = calc_next_at(
+            event,
+            dt(2026, 3, 28, 8, 0) + chrono::Duration::seconds(1),
+            tz,
+        );
+        assert_eq!(result.next_datetime, Some(dt(2026, 3, 29, 7, 0)));
+        assert_eq!(
+            crate::tz::to_local(result.next_datetime.unwrap(), tz).time(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn tz_time_only_first_schedule_uses_chat_wall_clock() {
+        // 09:00 in Tokyo (+9, no DST): with "now" at 2026-07-01 05:00 UTC
+        // (14:00 local), today's 09:00 has passed — the next is tomorrow's,
+        // 2026-07-02 09:00 JST = 00:00 UTC.
+        let tz = chrono_tz::Tz::Asia__Tokyo;
+        let mut event = make_play_event();
+        event.time = NaiveTime::from_hms_opt(9, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        let result = calc_next_at(event, dt(2026, 7, 1, 5, 0), tz);
+        assert_eq!(result.next_datetime, Some(dt(2026, 7, 2, 0, 0)));
     }
 }

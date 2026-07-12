@@ -11,7 +11,7 @@ use crate::view::{
     EDIT_ASK_TEXT, delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt,
     event_actions_keyboard, event_detail, notification_keyboard,
 };
-use chrono::Local;
+use chrono::Utc;
 use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardMarkup};
 
 /// Parses a `/event<id>` (or `/event<id>@<bot_username>`) command into the event id.
@@ -47,12 +47,13 @@ pub async fn handle_event_view(
 ) -> anyhow::Result<()> {
     match provider.get_event(id)? {
         Some(event) if event.chat_id == chat_id.0 => {
-            let now = Local::now().naive_local();
+            let now = Utc::now().naive_utc();
             let loc = crate::locale::for_chat(chat_id.0);
+            let tz = provider.tz_or_utc(chat_id.0);
             let is_repetition = event.source == Some(NextSource::Repetition);
             bot.send_html(
                 chat_id,
-                event_detail(&event, now, loc),
+                event_detail(&event, now, tz, loc),
                 Some(event_actions_keyboard(id, event.active, is_repetition)),
             )
             .await?;
@@ -143,8 +144,10 @@ async fn handle_dismiss(
         DismissOutcome::Dismissed(updated) => {
             bot.answer_callback(q.id, Some("Dismissed.".to_owned()))
                 .await?;
+            let tz = provider.tz_or_utc(chat_id.0);
             if let Err(e) =
-                refresh_dismissed_view(bot, chat_id, message_id, &updated, from_notification).await
+                refresh_dismissed_view(bot, chat_id, message_id, &updated, tz, from_notification)
+                    .await
             {
                 log::warn!("Failed to refresh dismissed event {id}: {e}");
             }
@@ -185,8 +188,10 @@ async fn handle_dismiss_repetition(
         DismissOutcome::Dismissed(updated) => {
             bot.answer_callback(q.id, Some("Repetition dismissed.".to_owned()))
                 .await?;
+            let tz = provider.tz_or_utc(chat_id.0);
             if let Err(e) =
-                refresh_dismissed_view(bot, chat_id, message_id, &updated, from_notification).await
+                refresh_dismissed_view(bot, chat_id, message_id, &updated, tz, from_notification)
+                    .await
             {
                 log::warn!("Failed to refresh dismissed-repetition event {id}: {e}");
             }
@@ -204,6 +209,7 @@ async fn refresh_dismissed_view(
     chat_id: ChatId,
     message_id: teloxide::types::MessageId,
     updated: &EventInfo,
+    tz: chrono_tz::Tz,
     from_notification: bool,
 ) -> teloxide::prelude::ResponseResult<()> {
     let is_repetition = updated.source == Some(NextSource::Repetition);
@@ -216,7 +222,7 @@ async fn refresh_dismissed_view(
         .await
     } else {
         let loc = crate::locale::for_chat(chat_id.0);
-        let text = event_detail(updated, Local::now().naive_local(), loc);
+        let text = event_detail(updated, Utc::now().naive_utc(), tz, loc);
         bot.edit_html(
             chat_id,
             message_id,
@@ -269,6 +275,19 @@ async fn handle_edit_prompt(
         return Ok(());
     };
     let chat_id = message.chat.id;
+
+    // Editing re-parses a time expression, which needs a configured timezone;
+    // a pre-existing-DB chat that never picked one gets the picker instead.
+    if provider.get_timezone(chat_id.0)?.is_none() {
+        bot.answer_callback(q.id, None).await?;
+        bot.send_html(
+            chat_id,
+            crate::view::TZ_REQUIRED,
+            Some(crate::view::timezone_regions_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let event = resolve_edit_target(provider, id, chat_id.0)?;
     bot.answer_callback(q.id, None).await?;

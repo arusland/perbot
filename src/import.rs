@@ -7,7 +7,7 @@
 use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
-use chrono::{Local, NaiveDateTime};
+use chrono::{NaiveDateTime, Utc};
 
 use crate::converter::{self, Status};
 use crate::locale;
@@ -63,8 +63,11 @@ pub fn import_zip(
     target_user_id: i64,
     zip_bytes: &[u8],
 ) -> anyhow::Result<ImportOutcome> {
-    let now = Local::now().naive_local();
+    let now = Utc::now().naive_utc();
     let loc = locale::for_chat(target_user_id);
+    // Legacy wall-clock data is interpreted in the target chat's timezone (UTC
+    // when the chat never picked one).
+    let tz = provider.tz_or_utc(target_user_id);
 
     // Ensure the destination chat exists (FK for events.chat_id).
     provider.upsert_chat(&ChatInfo {
@@ -110,8 +113,12 @@ pub fn import_zip(
         let contents = String::from_utf8_lossy(&buf);
 
         let (input, last_active) = converter::extract_input(&contents);
-        let created_at = converter::created_at_from_filename(&base).unwrap_or(now);
-        let converted = converter::convert(&input, created_at, last_active, target_user_id, now);
+        // The filename stamp is a wall-clock reading in the chat's timezone.
+        let created_at = converter::created_at_from_filename(&base)
+            .map(|local| crate::tz::to_utc(local, tz))
+            .unwrap_or(now);
+        let converted =
+            converter::convert(&input, created_at, last_active, target_user_id, now, tz);
 
         // Per-event synthetic message satisfies the events.msg_id FK. The synthetic
         // message's user_id matches the target chat id.
@@ -172,10 +179,10 @@ pub fn import_zip(
             "<tr{row_style}><td>{idx}</td><td>{file}</td><td>{created}</td><td>{input}</td><td>{new_input}</td><td>{next}</td><td>{active}</td><td>{status}</td></tr>\n",
             idx = outcome.total,
             file = escape_html(&base),
-            created = fmt_dt(Some(created_at)),
+            created = fmt_dt(Some(crate::tz::to_local(created_at, tz))),
             input = escape_html(&input),
             new_input = escape_html(&event.normalize_time(loc)),
-            next = fmt_dt(event.next_datetime),
+            next = fmt_dt(event.next_datetime.map(|dt| crate::tz::to_local(dt, tz))),
             active = if event.active { "yes" } else { "no" },
             status = status_cell,
         ));

@@ -220,14 +220,17 @@ async fn callback_handler(
     pending_edit: PendingEdit,
 ) -> anyhow::Result<()> {
     // `eid:<id>:…` is the event-specific envelope (snooze / delete / edit); `pm:`
-    // cancels a pending "send me the reminder text" prompt; everything else is list
-    // pagination (`<tag>:<page>`).
+    // cancels a pending "send me the reminder text" prompt; `tz:` is the timezone
+    // picker; everything else is list pagination (`<tag>:<page>`).
     match q.data.as_deref() {
         Some(d) if d.starts_with("eid:") => {
             commands::handle_event_callback(&bot, &provider, &pending_edit, q).await
         }
         Some(d) if d.starts_with("pm:") => {
             commands::handle_cancel_pending(&bot, &pending_msg, q).await
+        }
+        Some(d) if d.starts_with("tz:") => {
+            commands::handle_timezone_callback(&bot, &provider, q).await
         }
         _ => commands::handle_list_callback(&bot, &provider, q).await,
     }
@@ -300,14 +303,15 @@ async fn send_schedule_confirmation(
     chat_id: ChatId,
     stored: &EventInfo,
     input: &str,
+    tz: chrono_tz::Tz,
     loc: &dyn perbot::locale::LocaleProvider,
 ) -> anyhow::Result<()> {
     if stored.next_datetime.is_some() {
-        let now = chrono::Local::now().naive_local();
+        let now = chrono::Utc::now().naive_utc();
         let is_repetition = stored.source == Some(NextSource::Repetition);
         bot.send_html(
             chat_id,
-            scheduled_message(stored, now, loc),
+            scheduled_message(stored, now, tz, loc),
             Some(view::event_actions_keyboard(
                 stored.id,
                 stored.active,
@@ -385,6 +389,22 @@ async fn message_handler(
             return Ok(());
         }
 
+        // Scheduling interprets time input in the chat's timezone, so a chat
+        // that never picked one gets the picker instead — covering new
+        // reminders and the time-only/edit completions below in one gate.
+        // Commands (including /timezone itself) stay reachable above.
+        let Some(tz) = provider.get_timezone(msg.chat.id.0)? else {
+            pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+            pending_msg.lock().unwrap().remove(&msg.chat.id.0);
+            bot.send_html(
+                msg.chat.id,
+                view::TZ_REQUIRED,
+                Some(view::timezone_regions_keyboard()),
+            )
+            .await?;
+            return Ok(());
+        };
+
         // Completing a pending edit (the chat tapped Edit on an `/event<id>` view):
         // the next message replaces the event's time and message. A time-only or
         // unparsable reply re-prompts instead of applying.
@@ -401,7 +421,7 @@ async fn message_handler(
                 return Ok(());
             };
 
-            if let Some((mut event, spans)) = parser::parse_full(text, loc) {
+            if let Some((mut event, spans)) = parser::parse_full(text, loc, tz) {
                 let entities = msg.parse_entities().unwrap_or_default();
                 event.id = old.id;
                 event.chat_id = old.chat_id;
@@ -419,11 +439,11 @@ async fn message_handler(
                     bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                         .await?;
                 }
-                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
+                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the copyable current input still attached.
-                let lead = if parser::parse_time_only(text, loc).is_some() {
+                let lead = if parser::parse_time_only(text, loc, tz).is_some() {
                     view::EDIT_NEED_TEXT
                 } else {
                     view::EDIT_NEED_TIME
@@ -463,11 +483,11 @@ async fn message_handler(
                 bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
             return Ok(());
         }
 
-        if let Some((mut event, spans)) = parser::parse_full(text, loc) {
+        if let Some((mut event, spans)) = parser::parse_full(text, loc, tz) {
             event.chat_id = msg.chat.id.0;
             event.msg_id = msg_id;
             // Preserve the user's formatting: render the surviving message body
@@ -483,9 +503,9 @@ async fn message_handler(
                     .await?;
             }
 
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, loc).await?;
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
             return Ok(());
-        } else if let Some(event) = parser::parse_time_only(text, loc) {
+        } else if let Some(event) = parser::parse_time_only(text, loc, tz) {
             // A time was given but no reminder body: hold the parsed event and ask
             // for the text, offering a Cancel button.
             pending_msg.lock().unwrap().insert(msg.chat.id.0, event);

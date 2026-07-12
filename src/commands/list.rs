@@ -9,47 +9,65 @@ use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::types::{PageRequest, PageResponse};
 use crate::view::{LIST_PAGE_SIZE, ListKind, format_page_at, list_keyboard, total_pages};
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono_tz::Tz;
 use teloxide::types::CallbackQuery;
 
+/// Converts a chat-local calendar-day window `[start_day, start_day + days)`
+/// into UTC instant bounds for the storage range queries.
+fn day_window(
+    start_day: NaiveDate,
+    days: i64,
+    tz: Tz,
+) -> (chrono::NaiveDateTime, chrono::NaiveDateTime) {
+    let start = start_day.and_hms_opt(0, 0, 0).unwrap();
+    let end = start + Duration::days(days);
+    (crate::tz::to_utc(start, tz), crate::tz::to_utc(end, tz))
+}
+
 /// Fetches one page of a `kind` list's events plus the list's total size (the
-/// storage layer pages in SQL, so large lists never load whole). Date ranges
-/// are computed relative to "now", so paging recomputes them (a page turn
-/// across midnight reflects the then-current day/week/month). `Missed` reads
-/// the startup snapshot instead.
+/// storage layer pages in SQL, so large lists never load whole). Day/week/month
+/// windows are the chat's local calendar days (converted to UTC bounds) and are
+/// computed relative to "now", so paging recomputes them (a page turn across
+/// midnight reflects the then-current day/week/month). `Missed` reads the
+/// startup snapshot instead.
 fn fetch_page(
     kind: ListKind,
     provider: &EventProvider,
     chat_id: i64,
+    tz: Tz,
     page: usize,
 ) -> crate::error::Result<PageResponse> {
     let page = PageRequest::new(page, LIST_PAGE_SIZE);
+    let today = || crate::tz::to_local(Utc::now().naive_utc(), tz).date();
     match kind {
         ListKind::Events => provider.get_active_by_chat(chat_id, page),
         ListKind::Missed => provider.get_missed_snapshot_events(chat_id, page),
         ListKind::Today => {
-            let today = Local::now().naive_local().date();
-            provider.get_active_by_chat_on_date(chat_id, today, page)
+            let (start, end) = day_window(today(), 1, tz);
+            provider.get_active_by_chat_in_range(chat_id, start, end, page)
         }
         ListKind::Tomorrow => {
-            let tomorrow = Local::now().naive_local().date() + Duration::days(1);
-            provider.get_active_by_chat_on_date(chat_id, tomorrow, page)
+            let (start, end) = day_window(today() + Duration::days(1), 1, tz);
+            provider.get_active_by_chat_in_range(chat_id, start, end, page)
         }
         ListKind::Week => {
-            let today = Local::now().naive_local().date();
-            let start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-            let end = start + Duration::days(7);
+            let today = today();
+            let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+            let (start, end) = day_window(monday, 7, tz);
             provider.get_active_by_chat_in_range(chat_id, start, end, page)
         }
         ListKind::Month => {
-            let today = Local::now().naive_local().date();
-            let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+            let today = today();
+            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
             let (next_year, next_month) = if today.month() == 12 {
                 (today.year() + 1, 1)
             } else {
                 (today.year(), today.month() + 1)
             };
-            let end = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(start);
+            let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or(first);
+            let (start, _) = day_window(first, 0, tz);
+            let (end, _) = day_window(next_first, 0, tz);
             provider.get_active_by_chat_in_range(chat_id, start, end, page)
         }
     }
@@ -58,12 +76,14 @@ fn fetch_page(
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
 pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
-    let PageResponse { events, total } = fetch_page(kind, ctx.provider, ctx.chat_id.0, 0)?;
+    let tz = ctx.provider.tz_or_utc(ctx.chat_id.0);
+    let PageResponse { events, total } = fetch_page(kind, ctx.provider, ctx.chat_id.0, tz, 0)?;
     let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
         total,
-        Local::now().naive_local(),
+        Utc::now().naive_utc(),
+        tz,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),
@@ -128,14 +148,18 @@ pub async fn handle_list_callback(
     let chat_id = message.chat.id;
     let message_id = message.id;
 
-    let PageResponse { events, total } = fetch_page(kind, provider, chat_id.0, page)?;
+    let tz = provider.tz_or_utc(chat_id.0);
+    let PageResponse { events, total } = fetch_page(kind, provider, chat_id.0, tz, page)?;
     // The requested page can fall past the end when events were removed since
     // the keyboard was rendered; clamp to the (then-current) last page and
     // refetch it.
     let pages = total_pages(total, LIST_PAGE_SIZE);
     let (events, page) = if page >= pages {
         let page = pages - 1;
-        (fetch_page(kind, provider, chat_id.0, page)?.events, page)
+        (
+            fetch_page(kind, provider, chat_id.0, tz, page)?.events,
+            page,
+        )
     } else {
         (events, page)
     };
@@ -143,7 +167,8 @@ pub async fn handle_list_callback(
     let (text, total_pages) = format_page_at(
         &events,
         total,
-        Local::now().naive_local(),
+        Utc::now().naive_utc(),
+        tz,
         LIST_PAGE_SIZE,
         kind.title(),
         kind.empty(),

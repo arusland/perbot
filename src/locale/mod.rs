@@ -223,9 +223,9 @@ mod tests {
         let loc = for_chat(42);
         // A parse → normalize round-trip through the trait object yields the
         // canonical English form.
-        let event = parser::parse("8 call Alex", loc).unwrap();
+        let event = parser::parse("8 call Alex", loc, chrono_tz::Tz::UTC).unwrap();
         assert_eq!(event.normalize_time(loc), "08:00");
-        let event = parser::parse("13:30 mon-fri standup", loc).unwrap();
+        let event = parser::parse("13:30 mon-fri standup", loc, chrono_tz::Tz::UTC).unwrap();
         assert_eq!(event.normalize_time(loc), "13:30 Mon-Fri");
     }
 }

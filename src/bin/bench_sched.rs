@@ -40,8 +40,14 @@ fn bench_pattern(pattern: &str, start: NaiveDateTime, end: NaiveDateTime) {
     // Parse the pattern as-is; if it's body-less (which `parse` rejects),
     // append a reminder body so it parses. Only the time/repetition fields
     // drive the scheduler under test.
-    let parsed = perbot::parser::parse(pattern, &perbot::locale::EN)
-        .or_else(|| perbot::parser::parse(&format!("{pattern} reminder"), &perbot::locale::EN))
+    let parsed = perbot::parser::parse(pattern, &perbot::locale::EN, chrono_tz::Tz::UTC)
+        .or_else(|| {
+            perbot::parser::parse(
+                &format!("{pattern} reminder"),
+                &perbot::locale::EN,
+                chrono_tz::Tz::UTC,
+            )
+        })
         .expect("pattern should parse into an event");
 
     // Warm-up: a few hundred steps, results discarded.
@@ -49,7 +55,7 @@ fn bench_pattern(pattern: &str, start: NaiveDateTime, end: NaiveDateTime) {
         let mut ev = parsed.clone();
         let mut cur = start;
         for _ in 0..500 {
-            ev = calc_next_at(ev, cur);
+            ev = calc_next_at(ev, cur, chrono_tz::Tz::UTC);
             let next = ev
                 .next_datetime
                 .expect("recurring event always reschedules");
@@ -63,7 +69,7 @@ fn bench_pattern(pattern: &str, start: NaiveDateTime, end: NaiveDateTime) {
     let mut iterations: u64 = 0;
     let timer = Instant::now();
     loop {
-        ev = calc_next_at(ev, cur);
+        ev = calc_next_at(ev, cur, chrono_tz::Tz::UTC);
         let next = ev
             .next_datetime
             .expect("recurring event always reschedules");

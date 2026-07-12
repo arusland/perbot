@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::path::Path;
@@ -358,48 +358,20 @@ impl EventStorage {
         Ok(count as usize)
     }
 
-    /// Retrieves one page of the active events for a chat scheduled on the given
-    /// calendar date (see [`get_active_by_chat`](Self::get_active_by_chat) for
-    /// the `limit`/`offset` semantics).
-    pub fn get_active_by_chat_on_date(
-        &self,
-        chat_id: i64,
-        date: NaiveDate,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<EventInfo>> {
-        let next_day = date.succ_opt().unwrap_or(date);
-        self.get_active_by_chat_in_range(chat_id, date, next_day, limit, offset)
-    }
-
-    /// Counts the active events for a chat scheduled on the given calendar date.
-    pub fn count_active_by_chat_on_date(&self, chat_id: i64, date: NaiveDate) -> Result<usize> {
-        let next_day = date.succ_opt().unwrap_or(date);
-        self.count_active_by_chat_in_range(chat_id, date, next_day)
-    }
-
-    /// Retrieves one page of the active events for a chat scheduled within
-    /// `[start, end)` (end exclusive; see
+    /// Retrieves one page of the active events for a chat scheduled within the
+    /// UTC instant range `[start, end)` (end exclusive; see
     /// [`get_active_by_chat`](Self::get_active_by_chat) for the `limit`/`offset`
-    /// semantics).
+    /// semantics). Callers turn chat-local day windows into UTC bounds.
     pub fn get_active_by_chat_in_range(
         &self,
         chat_id: i64,
-        start: NaiveDate,
-        end: NaiveDate,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<EventInfo>> {
-        let start_str = start
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let end_str = end
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let start_str = start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let end_str = end.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} {EVENT_FROM}
@@ -416,23 +388,16 @@ impl EventStorage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Counts the active events for a chat scheduled within `[start, end)`.
+    /// Counts the active events for a chat scheduled within the UTC instant
+    /// range `[start, end)`.
     pub fn count_active_by_chat_in_range(
         &self,
         chat_id: i64,
-        start: NaiveDate,
-        end: NaiveDate,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
     ) -> Result<usize> {
-        let start_str = start
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let end_str = end
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
+        let start_str = start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let end_str = end.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM events WHERE chat_id = ?1 AND active = 1 AND next_datetime >= ?2 AND next_datetime < ?3",
@@ -518,7 +483,7 @@ impl EventStorage {
             .map(|dt| {
                 format!(
                     " (in {})",
-                    format_time_left(dt - Local::now().naive_local())
+                    format_time_left(dt - chrono::Utc::now().naive_utc())
                 )
             })
             .unwrap_or_default();
@@ -1864,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_active_by_chat_on_date() {
+    fn test_get_active_by_chat_day_window() {
         let storage = EventStorage::open_in_memory().unwrap();
         ensure_chat(&storage, 1);
         ensure_chat(&storage, 2);
@@ -1892,13 +1857,19 @@ mod tests {
             .unwrap();
         storage.mark_inactive(inactive).unwrap();
 
-        let today = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        let start = dt(2026, 6, 16, 0, 0);
+        let end = dt(2026, 6, 17, 0, 0);
         let events = storage
-            .get_active_by_chat_on_date(1, today, 100, 0)
+            .get_active_by_chat_in_range(1, start, end, 100, 0)
             .unwrap();
         let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
         assert_eq!(ids, vec![morning, night]);
-        assert_eq!(storage.count_active_by_chat_on_date(1, today).unwrap(), 2);
+        assert_eq!(
+            storage
+                .count_active_by_chat_in_range(1, start, end)
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -1934,8 +1905,8 @@ mod tests {
             .unwrap();
         storage.mark_inactive(inactive).unwrap();
 
-        let start = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let start = dt(2026, 6, 1, 0, 0);
+        let end = dt(2026, 7, 1, 0, 0);
         let events = storage
             .get_active_by_chat_in_range(1, start, end, 100, 0)
             .unwrap();

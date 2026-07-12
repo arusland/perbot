@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Local, Months, NaiveDate, NaiveDateTime};
+use chrono::{Duration, Months, NaiveDateTime, Utc};
+use chrono_tz::Tz;
 
 use crate::error::Result;
 use crate::scheduler;
@@ -9,6 +11,7 @@ use crate::types::{
     ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, PageRequest, PageResponse,
     TgMessage,
 };
+use crate::tz::{self, TIMEZONE_SETTING};
 
 /// How many missed events `move_missed_events` fetches and reschedules per
 /// batch — the upper bound on how much of the missed backlog is ever held in
@@ -71,6 +74,120 @@ impl EventProvider {
         inner.storage.get_setting(chat_id, name)
     }
 
+    /// Resolves a chat's timezone from the settings table for callers already
+    /// holding the lock. Unset or unparsable (logged) values fall back to UTC —
+    /// scheduling for tz-less chats is blocked upstream, so the fallback only
+    /// covers pre-existing events.
+    fn tz_for_chat_locked(inner: &EventProviderState, chat_id: i64) -> Tz {
+        match inner.storage.get_setting(chat_id, TIMEZONE_SETTING) {
+            Ok(Some(name)) => tz::parse_tz(&name).unwrap_or_else(|| {
+                log::warn!("Chat {chat_id} has unparsable timezone {name:?}; using UTC");
+                Tz::UTC
+            }),
+            Ok(None) => Tz::UTC,
+            Err(e) => {
+                log::error!("Failed to read timezone for chat {chat_id}: {e}; using UTC");
+                Tz::UTC
+            }
+        }
+    }
+
+    /// Returns the chat's configured timezone, or `None` when the chat never
+    /// picked one (an unparsable stored value also reads as `None`) — drives
+    /// the "set your timezone first" gate.
+    pub fn get_timezone(&self, chat_id: i64) -> Result<Option<Tz>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .storage
+            .get_setting(chat_id, TIMEZONE_SETTING)?
+            .as_deref()
+            .and_then(tz::parse_tz))
+    }
+
+    /// The chat's timezone with a UTC fallback, for display paths that must
+    /// always render something.
+    pub fn tz_or_utc(&self, chat_id: i64) -> Tz {
+        let inner = self.inner.lock().unwrap();
+        Self::tz_for_chat_locked(&inner, chat_id)
+    }
+
+    /// Stores the chat's timezone and re-anchors its active events so every
+    /// wall-clock reading survives the move ("09:00 every day" keeps firing at
+    /// 09:00 in the new zone). Pure-instant `in_offset` events are left alone —
+    /// "in 30 min" means the same moment in any zone. A shifted occurrence that
+    /// lands in the past is rescheduled forward (which may deactivate a
+    /// one-off). Returns how many events were re-anchored. Setting the same
+    /// timezone again is a no-op.
+    pub fn set_timezone(&self, chat_id: i64, new_tz: Tz) -> Result<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        let old_tz = Self::tz_for_chat_locked(&inner, chat_id);
+        inner
+            .storage
+            .set_setting(chat_id, TIMEZONE_SETTING, new_tz.name())?;
+        if old_tz == new_tz {
+            return Ok(0);
+        }
+
+        // Collect ids first: rescheduling can deactivate an event, which would
+        // shift LIMIT/OFFSET pages read from the active predicate underneath us.
+        let mut ids = Vec::new();
+        let mut page = 0;
+        loop {
+            let req = PageRequest::new(page, MISSED_MOVE_BATCH);
+            let batch = inner
+                .storage
+                .get_active_by_chat(chat_id, req.size, req.offset())?;
+            if batch.is_empty() {
+                break;
+            }
+            ids.extend(batch.into_iter().map(|e| e.id));
+            page += 1;
+        }
+
+        let now = Utc::now().naive_utc();
+        let mut shifted_count = 0;
+        for id in ids {
+            let Some(event) = inner.storage.get_event(id)? else {
+                continue;
+            };
+            let Some(next_dt) = event.next_datetime else {
+                continue;
+            };
+            if event.in_offset.is_some() {
+                continue;
+            }
+            let shifted = tz::shift_wallclock(next_dt, old_tz, new_tz);
+            if shifted > now {
+                inner.storage.update_schedule(
+                    id,
+                    event.active,
+                    Some(shifted),
+                    Some(shifted),
+                    event.source,
+                )?;
+            } else {
+                let recalculated = scheduler::calc_next_at(
+                    EventInfo {
+                        next_datetime: Some(shifted),
+                        ..event
+                    },
+                    now,
+                    new_tz,
+                );
+                inner.storage.update_schedule(
+                    id,
+                    recalculated.active,
+                    recalculated.next_datetime,
+                    recalculated.last_next_datetime,
+                    recalculated.source,
+                )?;
+            }
+            shifted_count += 1;
+        }
+        Self::load_next_event(&mut inner)?;
+        Ok(shifted_count)
+    }
+
     /// Writes a consistent snapshot of the database to `dest` (see
     /// `EventStorage::backup_to`). Used by the admin `/database` command.
     pub fn backup_database<P: AsRef<std::path::Path>>(&self, dest: P) -> Result<()> {
@@ -99,7 +216,7 @@ impl EventProvider {
     /// the table first (see `start()`).
     pub fn move_missed_events(&self) -> Result<usize> {
         let mut total = 0;
-        let now = Local::now().naive_local();
+        let now = Utc::now().naive_utc();
         loop {
             let mut inner = self.inner.lock().unwrap();
             let batch = inner.storage.get_missed_events(now, MISSED_MOVE_BATCH)?;
@@ -166,31 +283,15 @@ impl EventProvider {
         Ok(PageResponse { events, total })
     }
 
-    /// Returns one page of the active events for a chat scheduled on the given
-    /// date plus the day's total (see [`get_active_by_chat`](Self::get_active_by_chat)).
-    pub fn get_active_by_chat_on_date(
-        &self,
-        chat_id: i64,
-        date: NaiveDate,
-        page: PageRequest,
-    ) -> Result<PageResponse> {
-        let inner = self.inner.lock().unwrap();
-        let total = inner.storage.count_active_by_chat_on_date(chat_id, date)?;
-        let events =
-            inner
-                .storage
-                .get_active_by_chat_on_date(chat_id, date, page.size, page.offset())?;
-        Ok(PageResponse { events, total })
-    }
-
-    /// Returns one page of the active events for a chat scheduled within
-    /// `[start, end)` plus the range's total (see
-    /// [`get_active_by_chat`](Self::get_active_by_chat)).
+    /// Returns one page of the active events for a chat scheduled within the
+    /// UTC instant range `[start, end)` plus the range's total (see
+    /// [`get_active_by_chat`](Self::get_active_by_chat)). Callers derive the
+    /// bounds from chat-local day windows converted to UTC.
     pub fn get_active_by_chat_in_range(
         &self,
         chat_id: i64,
-        start: NaiveDate,
-        end: NaiveDate,
+        start: NaiveDateTime,
+        end: NaiveDateTime,
         page: PageRequest,
     ) -> Result<PageResponse> {
         let inner = self.inner.lock().unwrap();
@@ -216,18 +317,20 @@ impl EventProvider {
     /// Inserts a new event: calculates next datetime, persists to DB,
     /// reloads the next event, and returns the event as stored in DB.
     pub fn insert_event_and_get(&self, event: EventInfo) -> Result<EventInfo> {
-        self.insert_event_and_get_at(event, Local::now().naive_local())
+        self.insert_event_and_get_at(event, Utc::now().naive_utc())
     }
 
-    /// Inserts a new event: calculates next datetime at the given time,
-    /// persists to DB, reloads the next event, and returns the event as stored in DB.
+    /// Inserts a new event: calculates next datetime at the given UTC time in
+    /// the chat's timezone, persists to DB, reloads the next event, and
+    /// returns the event as stored in DB.
     pub fn insert_event_and_get_at(
         &self,
         event: EventInfo,
         now: NaiveDateTime,
     ) -> Result<EventInfo> {
         let mut inner = self.inner.lock().unwrap();
-        let calculated = scheduler::calc_next_at(event, now);
+        let tz = Self::tz_for_chat_locked(&inner, event.chat_id);
+        let calculated = scheduler::calc_next_at(event, now, tz);
         let id = inner.storage.insert_event(&calculated)?;
 
         // Reload to update the next event cache
@@ -247,10 +350,10 @@ impl EventProvider {
     /// cache (the edited event may be or have been the cached next), and returns the
     /// event as stored. Used by the `/event<id>` edit flow.
     pub fn update_event_and_get(&self, event: EventInfo) -> Result<EventInfo> {
-        self.update_event_and_get_at(event, Local::now().naive_local())
+        self.update_event_and_get_at(event, Utc::now().naive_utc())
     }
 
-    /// Like [`update_event_and_get`] but with an explicit `now` (for tests).
+    /// Like [`update_event_and_get`] but with an explicit UTC `now` (for tests).
     pub fn update_event_and_get_at(
         &self,
         event: EventInfo,
@@ -258,7 +361,8 @@ impl EventProvider {
     ) -> Result<EventInfo> {
         let mut inner = self.inner.lock().unwrap();
         let id = event.id;
-        let calculated = scheduler::calc_next_at(event, now);
+        let tz = Self::tz_for_chat_locked(&inner, event.chat_id);
+        let calculated = scheduler::calc_next_at(event, now, tz);
         inner.storage.update_event(&calculated)?;
 
         // Reload to update the next event cache
@@ -297,7 +401,7 @@ impl EventProvider {
 
     /// Recalculates all given events and reloads the next event from DB.
     fn update_and_reload(&self, events: Vec<EventInfo>) -> Result<()> {
-        self.update_at_and_reload(events, Local::now().naive_local())
+        self.update_at_and_reload(events, Utc::now().naive_utc())
     }
 
     /// Recalculates all given events and reloads the next event from DB.
@@ -308,15 +412,21 @@ impl EventProvider {
 
     /// [`update_at_and_reload`](Self::update_at_and_reload) body operating on an
     /// already-locked inner (the mutex is non-reentrant), for callers that hold
-    /// the lock across surrounding storage work (`move_missed_events`).
+    /// the lock across surrounding storage work (`move_missed_events`). A batch
+    /// (fired or missed events) may span chats, so per-chat timezones are
+    /// memoized across the loop.
     fn update_at_and_reload_locked(
         inner: &mut EventProviderState,
         events: Vec<EventInfo>,
         now: NaiveDateTime,
     ) -> Result<()> {
+        let mut tz_cache: HashMap<i64, Tz> = HashMap::new();
         for event in events {
             let event_id = event.id;
-            let next = scheduler::calc_next_at(event, now);
+            let tz = *tz_cache
+                .entry(event.chat_id)
+                .or_insert_with(|| Self::tz_for_chat_locked(inner, event.chat_id));
+            let next = scheduler::calc_next_at(event, now, tz);
             inner.storage.update_schedule(
                 event_id,
                 next.active,
@@ -347,7 +457,8 @@ impl EventProvider {
             return Ok(DismissOutcome::Inactive);
         };
 
-        let calculated = scheduler::calc_next_at(event, next_dt + Duration::seconds(1));
+        let tz = Self::tz_for_chat_locked(&inner, chat_id);
+        let calculated = scheduler::calc_next_at(event, next_dt + Duration::seconds(1), tz);
         inner.storage.update_schedule(
             id,
             calculated.active,
@@ -392,7 +503,8 @@ impl EventProvider {
 
         // The single-step advance — identical to `dismiss`. Also the fallback when no
         // non-repetition occurrence is reachable.
-        let fallback = scheduler::calc_next_at(event.clone(), next_dt + Duration::seconds(1));
+        let tz = Self::tz_for_chat_locked(&inner, chat_id);
+        let fallback = scheduler::calc_next_at(event.clone(), next_dt + Duration::seconds(1), tz);
 
         let chosen = if !has_anchor {
             fallback
@@ -413,7 +525,7 @@ impl EventProvider {
                 if cur_dt > horizon {
                     break fallback;
                 }
-                current = scheduler::calc_next_at(current, cur_dt + Duration::seconds(1));
+                current = scheduler::calc_next_at(current, cur_dt + Duration::seconds(1), tz);
             }
         };
 
@@ -451,7 +563,7 @@ impl EventProvider {
             if moved > 0 {
                 log::info!("Sending {} missed event(s)", moved);
 
-                let now = Local::now().naive_local();
+                let now = Utc::now().naive_utc();
                 let chat_ids = {
                     let inner = self.inner.lock().unwrap();
                     inner.storage.get_missed_chat_ids()?
@@ -467,8 +579,9 @@ impl EventProvider {
                         },
                     )?;
                     let loc = crate::locale::for_chat(chat_id);
+                    let tz = self.tz_or_utc(chat_id);
                     let (text, reply_markup) =
-                        crate::view::format_missed_page(&page.events, page.total, now, 0, loc);
+                        crate::view::format_missed_page(&page.events, page.total, now, tz, 0, loc);
                     messages.push(TgMessage {
                         chat_id,
                         text,
@@ -502,7 +615,7 @@ impl EventProvider {
                     continue;
                 };
 
-                let now = Local::now().naive_local();
+                let now = Utc::now().naive_utc();
                 if now >= dt {
                     let events = match provider.get_events_at(dt) {
                         Ok(events) => events,
@@ -511,20 +624,25 @@ impl EventProvider {
                             continue;
                         }
                     };
+                    let mut tz_cache: HashMap<i64, Tz> = HashMap::new();
                     let messages: Vec<TgMessage> = events
                         .iter()
                         .map(|e| {
                             let loc = crate::locale::for_chat(e.chat_id);
+                            let tz = *tz_cache
+                                .entry(e.chat_id)
+                                .or_insert_with(|| provider.tz_or_utc(e.chat_id));
                             // Predict the reschedule `update_and_reload` performs
                             // right after sending, so the dismiss row reflects the
                             // event's post-fire state.
-                            let next = scheduler::calc_next_at(e.clone(), now);
+                            let next = scheduler::calc_next_at(e.clone(), now, tz);
                             crate::view::fired_message(
                                 e,
                                 now,
                                 dt,
                                 next.active,
                                 next.source == Some(NextSource::Repetition),
+                                tz,
                                 loc,
                             )
                         })
@@ -562,6 +680,7 @@ impl EventProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     /// Builds an in-memory provider with a single private chat and a backing
     /// message row so events (whose `msg_id`/`chat_id` are FKs) can be inserted.
@@ -870,5 +989,124 @@ mod tests {
             .unwrap();
         assert_eq!(other.total, 0);
         assert!(other.events.is_empty());
+    }
+
+    #[test]
+    fn timezone_setting_round_trips_and_gates() {
+        let (provider, _) = test_provider(600);
+        // Unset → None (the scheduling gate fires); after a pick → Some.
+        assert_eq!(provider.get_timezone(600).unwrap(), None);
+        assert_eq!(provider.tz_or_utc(600), Tz::UTC);
+        provider.set_timezone(600, Tz::Europe__Moscow).unwrap();
+        assert_eq!(
+            provider.get_timezone(600).unwrap(),
+            Some(Tz::Europe__Moscow)
+        );
+        assert_eq!(provider.tz_or_utc(600), Tz::Europe__Moscow);
+    }
+
+    #[test]
+    fn set_timezone_preserves_wall_clock_of_active_events() {
+        use chrono::NaiveTime;
+        let chat_id = 601;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // A far-future daily 09:00 event scheduled while the chat was
+        // (implicitly) UTC.
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(9, 0, 0);
+        event.repetition = Some(crate::types::Repetition {
+            interval: 1,
+            unit: crate::types::TimeUnit::Days,
+        });
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2099, 1, 1, 0, 0, 0))
+            .unwrap();
+        assert_eq!(event.next_datetime, Some(ndt(2099, 1, 1, 9, 0, 0)));
+
+        // Moving to Tokyo (+9, no DST) keeps the 09:00 reading: the UTC
+        // instant shifts back nine hours.
+        let rescheduled = provider.set_timezone(chat_id, Tz::Asia__Tokyo).unwrap();
+        assert_eq!(rescheduled, 1);
+        let stored = provider.get_event(event.id).unwrap().unwrap();
+        assert_eq!(stored.next_datetime, Some(ndt(2099, 1, 1, 0, 0, 0)));
+        assert_eq!(
+            tz::to_local(stored.next_datetime.unwrap(), Tz::Asia__Tokyo).time(),
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+        assert!(stored.active);
+        assert_eq!(stored.source, event.source);
+
+        // Setting the same timezone again is a no-op.
+        assert_eq!(provider.set_timezone(chat_id, Tz::Asia__Tokyo).unwrap(), 0);
+    }
+
+    #[test]
+    fn set_timezone_skips_in_offset_and_inactive_events() {
+        use chrono::NaiveTime;
+        let chat_id = 602;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // A pure-instant "in 30 min" event: the moment must not move.
+        let mut offset_event = base_event(chat_id, msg_id);
+        offset_event.in_offset = Some((30, crate::types::TimeUnit::Minutes));
+        let offset_event = provider
+            .insert_event_and_get_at(offset_event, ndt(2099, 1, 1, 0, 0, 0))
+            .unwrap();
+        let offset_instant = offset_event.next_datetime;
+        assert!(offset_instant.is_some());
+
+        // An inactive (already fired one-off) event: untouched too.
+        let mut past = base_event(chat_id, msg_id);
+        past.time = NaiveTime::from_hms_opt(10, 0, 0);
+        past.date = NaiveDate::from_ymd_opt(2020, 5, 1);
+        past.year_explicit = true;
+        let past = provider
+            .insert_event_and_get_at(past, ndt(2099, 1, 1, 0, 0, 0))
+            .unwrap();
+        assert!(!past.active);
+
+        let rescheduled = provider.set_timezone(chat_id, Tz::Asia__Tokyo).unwrap();
+        assert_eq!(rescheduled, 0);
+        assert_eq!(
+            provider
+                .get_event(offset_event.id)
+                .unwrap()
+                .unwrap()
+                .next_datetime,
+            offset_instant
+        );
+        assert!(!provider.get_event(past.id).unwrap().unwrap().active);
+    }
+
+    #[test]
+    fn set_timezone_reschedules_shifted_past_occurrence_forward() {
+        let chat_id = 603;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // A daily event whose next fire is soon: shifting the wall clock nine
+        // hours back (UTC → Tokyo) lands the occurrence in the past, so it is
+        // recomputed forward in the new zone instead of being stored stale.
+        let now = chrono::Utc::now().naive_utc();
+        let soon = now + Duration::hours(1);
+        let mut event = base_event(chat_id, msg_id);
+        event.time = Some(soon.time());
+        event.repetition = Some(crate::types::Repetition {
+            interval: 1,
+            unit: crate::types::TimeUnit::Days,
+        });
+        let event = provider.insert_event_and_get(event).unwrap();
+
+        let rescheduled = provider.set_timezone(chat_id, Tz::Asia__Tokyo).unwrap();
+        assert_eq!(rescheduled, 1);
+        let stored = provider.get_event(event.id).unwrap().unwrap();
+        assert!(stored.active);
+        let next = stored.next_datetime.unwrap();
+        assert!(next > now);
+        // The wall-clock reading in the new zone still matches the event's time.
+        assert_eq!(
+            tz::to_local(next, Tz::Asia__Tokyo).time(),
+            event.time.unwrap()
+        );
     }
 }

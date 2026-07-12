@@ -7,6 +7,7 @@ use crate::locale::LocaleProvider;
 use crate::scheduler;
 use crate::types::{EventInfo, MonthlyPattern};
 use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
 
@@ -28,6 +29,7 @@ pub fn next_launches_preview(
     event: &EventInfo,
     now: NaiveDateTime,
     after: NaiveDateTime,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
     let mut launches: Vec<NaiveDateTime> = Vec::new();
@@ -35,7 +37,7 @@ pub fn next_launches_preview(
     let mut cursor = after;
     // Probe one beyond the limit so we know whether to show the "..." bullet.
     while launches.len() <= MAX_NEXT_PREVIEW {
-        current = scheduler::calc_next_at(current, cursor);
+        current = scheduler::calc_next_at(current, cursor, tz);
         match current.next_datetime {
             Some(next) => {
                 launches.push(next);
@@ -49,7 +51,7 @@ pub fn next_launches_preview(
     }
     let mut out = format!("\n\n<b>{}</b>", loc.next_launches_header());
     for dt in launches.iter().take(MAX_NEXT_PREVIEW) {
-        out.push_str(&format!("\n{BULLET} {}", format_when(now, *dt, loc)));
+        out.push_str(&format!("\n{BULLET} {}", format_when(now, *dt, tz, loc)));
     }
     if launches.len() > MAX_NEXT_PREVIEW {
         out.push_str(&format!("\n{BULLET} ..."));
@@ -65,15 +67,21 @@ pub fn next_launches_preview(
 pub fn scheduled_message(
     event: &EventInfo,
     now: NaiveDateTime,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
-    detail_body(Some("Event created"), event, now, loc)
+    detail_body(Some("Event created"), event, now, tz, loc)
 }
 
 /// Confirmation sent when a snooze button creates its one-off copy: the same
 /// captioned detail view as [`scheduled_message`], but titled `Event snoozed`.
-pub fn snoozed_message(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
-    detail_body(Some("Event snoozed"), event, now, loc)
+pub fn snoozed_message(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> String {
+    detail_body(Some("Event snoozed"), event, now, tz, loc)
 }
 
 /// Reconstructs the re-parseable plain-text input for an event: its canonical time
@@ -154,14 +162,14 @@ fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String
 /// minute away — the locale owns the preposition). `, <recurrence>` is appended
 /// inside the parentheses, next to the relative time, when the event repeats.
 /// Contains no HTML specials. Returns `—` for an event with no upcoming launch.
-fn when_text(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+fn when_text(e: &EventInfo, now: NaiveDateTime, tz: Tz, loc: &dyn LocaleProvider) -> String {
     let recurrence = describe_recurrence(e, loc)
         .map(|r| format!(", {r}"))
         .unwrap_or_default();
     match e.next_datetime {
         Some(dt) => html::escape(&format!(
             "{} ({}{})",
-            loc.format_datetime(dt),
+            loc.format_datetime(crate::tz::to_local(dt, tz)),
             loc.format_relative_in((dt - now).num_seconds()),
             recurrence
         )),
@@ -174,9 +182,10 @@ fn when_text(e: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> Str
 pub(super) fn event_when_line(
     e: &EventInfo,
     now: NaiveDateTime,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
-    format!("{BULLET} <b>{}</b>", when_text(e, now, loc))
+    format!("{BULLET} <b>{}</b>", when_text(e, now, tz, loc))
 }
 
 /// The shared single-event detail body: an optional bold caption first line,
@@ -190,6 +199,7 @@ fn detail_body(
     caption: Option<&str>,
     event: &EventInfo,
     now: NaiveDateTime,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
     let caption = caption
@@ -199,20 +209,20 @@ fn detail_body(
         let notice = match event.last_next_datetime {
             Some(dt) => html::escape(&format!(
                 "Event is out of date. Last fired at {}",
-                loc.format_datetime(dt)
+                loc.format_datetime(crate::tz::to_local(dt, tz))
             )),
             None => "Event is out of date.".to_string(),
         };
         return format!("{caption}<b>{notice}</b>\n\n{}", event.message);
     }
     let preview = match event.next_datetime {
-        Some(dt) => next_launches_preview(event, now, dt, loc),
+        Some(dt) => next_launches_preview(event, now, dt, tz, loc),
         None => String::new(),
     };
     format!(
         "{caption}<b>{}: {}</b>\n\n{}{}",
         html::escape(loc.time_label()),
-        when_text(event, now, loc),
+        when_text(event, now, tz, loc),
         event.message,
         preview
     )
@@ -220,8 +230,13 @@ fn detail_body(
 
 /// Detailed single-event view for `/event<id>`: the caption-less
 /// [`detail_body`] — bold `Time:` when-line, full message, launches preview.
-pub fn event_detail(event: &EventInfo, now: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
-    detail_body(None, event, now, loc)
+pub fn event_detail(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> String {
+    detail_body(None, event, now, tz, loc)
 }
 
 /// The action buttons shown under the `/event<id>` detail view: an optional
@@ -303,7 +318,7 @@ mod tests {
         // relative offset, then the message body.
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
-            scheduled_message(&event, now, &EN),
+            scheduled_message(&event, now, Tz::UTC, &EN),
             "<b>Event created</b>\n<b>Time: 13:05 31.12.2027 (in 1d)</b>\n\nring in the new year"
         );
     }
@@ -321,7 +336,7 @@ mod tests {
         // `message` is already an HTML fragment; it is embedded as-is.
         let event = sample_event("<b>call</b> the office", Some(dt));
         assert_eq!(
-            scheduled_message(&event, now, &EN),
+            scheduled_message(&event, now, Tz::UTC, &EN),
             "<b>Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h)</b>\n\n<b>call</b> the office"
         );
     }
@@ -344,7 +359,7 @@ mod tests {
             unit: TimeUnit::Days,
         });
 
-        let text = scheduled_message(&event, now, &EN);
+        let text = scheduled_message(&event, now, Tz::UTC, &EN);
         // The recurrence rides inside the when-line parentheses, like /event<id>.
         assert!(
             text.starts_with(
@@ -370,7 +385,7 @@ mod tests {
         );
         let event = sample_event("call the office", Some(dt));
         assert_eq!(
-            snoozed_message(&event, now, &EN),
+            snoozed_message(&event, now, Tz::UTC, &EN),
             "<b>Event snoozed</b>\n<b>Time: 09:30 22.06.2026 (in 30 mins)</b>\n\ncall the office"
         );
     }
@@ -383,7 +398,7 @@ mod tests {
         );
         let mut event = sample_event("call mom", Some(fire));
         event.time = NaiveTime::from_hms_opt(10, 0, 0);
-        assert_eq!(next_launches_preview(&event, fire, fire, &EN), "");
+        assert_eq!(next_launches_preview(&event, fire, fire, Tz::UTC, &EN), "");
     }
 
     #[test]
@@ -400,7 +415,7 @@ mod tests {
             unit: TimeUnit::Days,
         });
 
-        let preview = next_launches_preview(&event, fire, fire, &EN);
+        let preview = next_launches_preview(&event, fire, fire, Tz::UTC, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
         assert!(preview.contains("▪ 10:00 23.06.2026"));
@@ -431,7 +446,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 6, 21).unwrap(),
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         );
-        let preview = next_launches_preview(&event, now, fire, &EN);
+        let preview = next_launches_preview(&event, now, fire, Tz::UTC, &EN);
         assert!(preview.contains("▪ 10:00 23.06.2026 (2d)"));
     }
 
@@ -448,7 +463,7 @@ mod tests {
         event.time = NaiveTime::from_hms_opt(23, 0, 0);
         event.years = Some(HashSet::from([2027]));
 
-        let preview = next_launches_preview(&event, fire, fire, &EN);
+        let preview = next_launches_preview(&event, fire, fire, Tz::UTC, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         assert!(preview.contains("▪ 23:00 31.12.2027"));
         assert!(!preview.contains("▪ ..."));
@@ -464,7 +479,7 @@ mod tests {
         e.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
         assert_eq!(event_source_input(&e, &EN), "13:30 call the office");
         // Round-trips: parsing yields the same time/message.
-        let parsed = parser::parse(&event_source_input(&e, &EN), &EN).unwrap();
+        let parsed = parser::parse(&event_source_input(&e, &EN), &EN, Tz::UTC).unwrap();
         assert_eq!(parsed.time, e.time);
         assert_eq!(parsed.message, "call the office");
 
@@ -588,7 +603,7 @@ mod tests {
             "<b>call</b> the office and bring the documents",
             Some(now + Duration::hours(2)),
         );
-        let text = event_detail(&e, now, &EN);
+        let text = event_detail(&e, now, Tz::UTC, &EN);
         // Bold Time line, then the full untruncated HTML message verbatim.
         assert!(text.starts_with("<b>Time: 14:00 15.06.2026 (in 2h)</b>\n\n"));
         assert!(text.contains("<b>call</b> the office and bring the documents"));
@@ -608,7 +623,7 @@ mod tests {
             interval: 1,
             unit: TimeUnit::Hours,
         });
-        let text = event_detail(&e, now, &EN);
+        let text = event_detail(&e, now, Tz::UTC, &EN);
         // Under a minute away: bare "soon", never "in soon".
         assert!(text.starts_with("<b>Time: 12:00 15.06.2026 (soon, every hour)</b>\n\n"));
         assert!(!text.contains("in soon"));
@@ -626,7 +641,7 @@ mod tests {
             interval: 1,
             unit: TimeUnit::Days,
         });
-        let text = event_detail(&e, now, &EN);
+        let text = event_detail(&e, now, Tz::UTC, &EN);
         assert!(text.starts_with("<b>Time: 14:00 15.06.2026 (in 2h, every day)</b>\n\n"));
         assert!(text.contains("standup"));
         // Recurring: launches block present, listing dates after the upcoming one.
@@ -642,7 +657,7 @@ mod tests {
         e.last_next_datetime = Some(
             NaiveDateTime::parse_from_str("2026-06-10 09:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
         );
-        let text = event_detail(&e, now, &EN);
+        let text = event_detail(&e, now, Tz::UTC, &EN);
         assert!(
             text.starts_with("<b>Event is out of date. Last fired at 09:30 10.06.2026</b>\n\n")
         );

@@ -4,6 +4,7 @@
 
 use crate::locale::LocaleProvider;
 use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use teloxide::utils::html;
 
 /// Short relative time until `dt` from `now`, delegated to the locale (e.g.
@@ -13,12 +14,19 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime, loc: &dyn LocaleProvid
 }
 
 /// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
-/// `14:00 23.06.2026 (1d)`. Unescaped — for the fired-reminder preview. List
-/// replies use `write_event_row` (HTML) instead.
-pub fn format_when(now: NaiveDateTime, dt: NaiveDateTime, loc: &dyn LocaleProvider) -> String {
+/// `14:00 23.06.2026 (1d)`. `now`/`dt` are UTC instants; the absolute part is
+/// rendered on the chat's wall clock (`tz`), the relative part is frame-free.
+/// Unescaped — for the fired-reminder preview. List replies use
+/// `write_event_row` (HTML) instead.
+pub fn format_when(
+    now: NaiveDateTime,
+    dt: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> String {
     format!(
         "{} ({})",
-        loc.format_datetime(dt),
+        loc.format_datetime(crate::tz::to_local(dt, tz)),
         format_relative(now, dt, loc)
     )
 }

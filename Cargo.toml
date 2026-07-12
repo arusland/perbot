@@ -12,6 +12,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4.29"
 flexi_logger = "0.31"
 chrono = "0.4"
+chrono-tz = "0.10"
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 thiserror = "2.0.18"

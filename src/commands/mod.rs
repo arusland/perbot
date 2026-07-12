@@ -14,12 +14,14 @@ mod import;
 mod list;
 mod logs;
 mod snooze;
+mod timezone;
 
 pub use cancel::handle_cancel_pending;
 pub use event::{handle_event_callback, handle_event_view, parse_event_command};
 pub use import::handle_import_zip;
 pub use list::handle_list_callback;
 pub use snooze::handle_snooze_callback;
+pub use timezone::handle_timezone_callback;
 
 use crate::import::PendingImport;
 use crate::state::EventProvider;
@@ -43,6 +45,8 @@ pub enum Command {
     Week,
     #[command(description = "list this month's events")]
     Month,
+    #[command(description = "show or change the chat timezone")]
+    Timezone,
     #[command(description = "import legacy alerts for a chat (admin only)", hide)]
     Import(i64),
     #[command(description = "download the database file (admin only)", hide)]
@@ -73,6 +77,7 @@ impl Command {
             Command::Tomorrow => list::handle_list(&ctx, ListKind::Tomorrow).await,
             Command::Week => list::handle_list(&ctx, ListKind::Week).await,
             Command::Month => list::handle_list(&ctx, ListKind::Month).await,
+            Command::Timezone => timezone::handle_timezone(&ctx).await,
             Command::Import(user_id) => import::handle_import(&ctx, user_id).await,
             Command::Database => database::handle_database(&ctx).await,
             Command::Logs => logs::handle_logs(&ctx).await,

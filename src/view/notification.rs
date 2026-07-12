@@ -5,6 +5,7 @@ use super::event::next_launches_preview;
 use crate::locale::LocaleProvider;
 use crate::types::{EventInfo, TgMessage};
 use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::html;
 
@@ -88,6 +89,7 @@ pub fn fired_message(
     due: NaiveDateTime,
     post_fire_active: bool,
     post_fire_is_repetition: bool,
+    tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> TgMessage {
     log::info!(
@@ -98,7 +100,7 @@ pub fn fired_message(
     );
     // `event.message` and the preview are HTML fragments; the hint is plain
     // text, so escape only the hint for HTML.
-    let preview = next_launches_preview(event, now, due, loc);
+    let preview = next_launches_preview(event, now, due, tz, loc);
     TgMessage {
         chat_id: event.chat_id,
         text: format!(
@@ -203,7 +205,7 @@ mod tests {
         event.chat_id = 7;
 
         // One-off event: no launches preview between the body and the hint.
-        let msg = fired_message(&event, due, due, true, false, &EN);
+        let msg = fired_message(&event, due, due, true, false, Tz::UTC, &EN);
         assert_eq!(msg.chat_id, 7);
         assert_eq!(
             msg.text,
@@ -216,7 +218,7 @@ mod tests {
         assert_eq!(count, SNOOZE_OPTIONS.len() + 3);
 
         // Inactive post-fire state drops the dismiss row.
-        let kb = fired_message(&event, due, due, false, false, &EN)
+        let kb = fired_message(&event, due, due, false, false, Tz::UTC, &EN)
             .reply_markup
             .expect("notification keyboard");
         let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();

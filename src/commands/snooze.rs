@@ -9,7 +9,8 @@ use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
 use crate::view::{event_actions_keyboard, snoozed_message};
-use chrono::{Duration, Local};
+use chrono::{Duration, Utc};
+use chrono_tz::Tz;
 use teloxide::types::CallbackQuery;
 
 /// Parses snooze callback data `eid:<id>:sn:<minutes>` into `(event_id, minutes)`.
@@ -21,17 +22,20 @@ fn parse_snooze_callback(data: &str) -> Option<(i64, i64)> {
 }
 
 /// Builds the one-off child event a snooze creates: an explicit-year reminder
-/// scheduled exactly at `next`, already marked active, whose `parent` points at
-/// `source`'s root (`source.parent` when `source` is itself a snooze — snoozes
-/// never chain). The child stores an empty message and reuses the parent's
+/// scheduled exactly at `next` (UTC), already marked active, whose `parent`
+/// points at `source`'s root (`source.parent` when `source` is itself a snooze —
+/// snoozes never chain). The wall-clock `date`/`time` fields carry the chat-local
+/// reading of `next`, so the edit prompt and a timezone-change reschedule see
+/// consistent values. The child stores an empty message and reuses the parent's
 /// `msg_id`; the effective text always comes from the parent. It is inserted via
 /// `insert_prebuilt_event` (no scheduler run), and after it fires
 /// `scheduler::calc_next_at` returns `None` (no repetition, year explicit), so it
 /// goes inactive instead of repeating.
-fn snoozed_event(source: &EventInfo, next: chrono::NaiveDateTime) -> EventInfo {
+fn snoozed_event(source: &EventInfo, next: chrono::NaiveDateTime, tz: Tz) -> EventInfo {
+    let local = crate::tz::to_local(next, tz);
     EventInfo {
-        date: Some(next.date()),
-        time: Some(next.time()),
+        date: Some(local.date()),
+        time: Some(local.time()),
         year_explicit: true,
         days: None,
         years: None,
@@ -90,10 +94,13 @@ pub async fn handle_snooze_callback(
         }
     };
 
-    let now = Local::now().naive_local();
+    let now = Utc::now().naive_utc();
     let next = now + Duration::minutes(minutes);
 
-    let mut event = snoozed_event(&source, next);
+    // Snooze is deliberately not gated on an unset timezone: it is pure-instant
+    // ("in N minutes"), so the UTC fallback only affects the wall-clock fields.
+    let tz = provider.tz_or_utc(chat_id.0);
+    let mut event = snoozed_event(&source, next, tz);
     match provider.insert_prebuilt_event(&event) {
         Ok(id) => event.id = id,
         Err(e) => {
@@ -112,7 +119,7 @@ pub async fn handle_snooze_callback(
     let is_repetition = event.source == Some(NextSource::Repetition);
     bot.send_html(
         chat_id,
-        snoozed_message(&event, now, loc),
+        snoozed_message(&event, now, tz, loc),
         Some(event_actions_keyboard(
             event.id,
             event.active,
@@ -145,11 +152,11 @@ mod tests {
     fn snoozed_event_goes_inactive_after_firing() {
         // The snoozed event is scheduled at `next`; once "now" reaches it (firing),
         // calc_next_at must return inactive so it does not repeat.
-        let next = Local::now().naive_local() + Duration::minutes(5);
+        let next = Utc::now().naive_utc() + Duration::minutes(5);
         let mut source = crate::view::test_support::sample_event("call mom", Some(next));
         source.id = 42;
         source.msg_id = 7;
-        let event = snoozed_event(&source, next);
+        let event = snoozed_event(&source, next, Tz::UTC);
         assert!(event.active);
         assert!(event.is_snoozed());
         assert_eq!(event.parent, Some(42));
@@ -157,7 +164,7 @@ mod tests {
         assert!(event.message.is_empty());
         assert_eq!(event.next_datetime, Some(next));
 
-        let fired = scheduler::calc_next_at(event, next);
+        let fired = scheduler::calc_next_at(event, next, Tz::UTC);
         assert!(!fired.active);
         assert!(fired.next_datetime.is_none());
     }
@@ -165,11 +172,11 @@ mod tests {
     #[test]
     fn snoozing_a_snoozed_event_reparents_to_root() {
         // Snoozes never chain: a snooze of a snooze points at the original root.
-        let next = Local::now().naive_local() + Duration::minutes(5);
+        let next = Utc::now().naive_utc() + Duration::minutes(5);
         let mut source = crate::view::test_support::sample_event("call mom", Some(next));
         source.id = 42;
         source.parent = Some(7);
-        let event = snoozed_event(&source, next);
+        let event = snoozed_event(&source, next, Tz::UTC);
         assert_eq!(event.parent, Some(7));
     }
 }
