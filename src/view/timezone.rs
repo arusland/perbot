@@ -234,13 +234,13 @@ mod tests {
             city_label(Tz::America__Argentina__Buenos_Aires, "America"),
             "Argentina/Buenos Aires"
         );
-        assert_eq!(city_label(Tz::Europe__Moscow, "Europe"), "Moscow");
+        assert_eq!(city_label(Tz::Europe__Berlin, "Europe"), "Berlin");
     }
 
     #[test]
     fn messages_mention_zone_and_reschedule_count() {
         assert!(timezone_current_message(None).starts_with("No timezone set."));
-        assert!(timezone_current_message(Some(Tz::Europe__Moscow)).contains("Europe/Moscow"));
+        assert!(timezone_current_message(Some(Tz::Europe__Berlin)).contains("Europe/Berlin"));
         assert_eq!(
             timezone_set_message(Tz::UTC, 0),
             "Timezone set to <b>UTC</b>."

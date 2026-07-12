@@ -349,12 +349,19 @@ async fn message_handler(
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
     let is_admin = user_id == Some(admin_id.0);
 
-    // Legacy import: the admin sends the zip after `/import <user_id>`.
+    // Legacy import: the admin sends the zip after `/import <user_id> <timezone>`.
     let pending_target = *pending_import.lock().unwrap();
-    if is_admin && let (Some(target), Some(doc)) = (pending_target, msg.document()) {
+    if is_admin && let (Some((target, tz)), Some(doc)) = (pending_target, msg.document()) {
         *pending_import.lock().unwrap() = None;
-        commands::handle_import_zip(&bot, &provider, msg.chat.id, target, doc.file.id.clone())
-            .await?;
+        commands::handle_import_zip(
+            &bot,
+            &provider,
+            msg.chat.id,
+            target,
+            tz,
+            doc.file.id.clone(),
+        )
+        .await?;
         return Ok(());
     }
 

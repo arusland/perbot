@@ -8,7 +8,7 @@
 use chrono::{Duration, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 
-/// Settings-table key holding a chat's IANA timezone name (e.g. `Europe/Moscow`).
+/// Settings-table key holding a chat's IANA timezone name (e.g. `Europe/Berlin`).
 pub const TIMEZONE_SETTING: &str = "timezone";
 
 /// Parses a stored IANA timezone name. Any name chrono-tz knows is accepted,
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn parse_tz_accepts_iana_and_rejects_junk() {
-        assert_eq!(parse_tz("Europe/Moscow"), Some(Tz::Europe__Moscow));
+        assert_eq!(parse_tz("Europe/Berlin"), Some(Tz::Europe__Berlin));
         assert_eq!(parse_tz("UTC"), Some(Tz::UTC));
         assert!(parse_tz("Nowhere/Nothing").is_none());
     }

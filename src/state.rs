@@ -997,12 +997,12 @@ mod tests {
         // Unset → None (the scheduling gate fires); after a pick → Some.
         assert_eq!(provider.get_timezone(600).unwrap(), None);
         assert_eq!(provider.tz_or_utc(600), Tz::UTC);
-        provider.set_timezone(600, Tz::Europe__Moscow).unwrap();
+        provider.set_timezone(600, Tz::Europe__Berlin).unwrap();
         assert_eq!(
             provider.get_timezone(600).unwrap(),
-            Some(Tz::Europe__Moscow)
+            Some(Tz::Europe__Berlin)
         );
-        assert_eq!(provider.tz_or_utc(600), Tz::Europe__Moscow);
+        assert_eq!(provider.tz_or_utc(600), Tz::Europe__Berlin);
     }
 
     #[test]

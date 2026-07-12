@@ -8,15 +8,17 @@ use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
 use chrono::{NaiveDateTime, Utc};
+use chrono_tz::Tz;
 
 use crate::converter::{self, Status};
 use crate::locale;
 use crate::state::EventProvider;
 use crate::types::{ChatInfo, ChatType};
 
-/// Pending import target (chat id) recorded by `/import <user_id>` until the
-/// admin sends the zip. A single admin means a single slot is enough.
-pub type PendingImport = Arc<Mutex<Option<i64>>>;
+/// Pending import target (chat id + the timezone the legacy wall-clock data is
+/// read in) recorded by `/import <user_id> <timezone>` until the admin sends
+/// the zip. A single admin means a single slot is enough.
+pub type PendingImport = Arc<Mutex<Option<(i64, Tz)>>>;
 
 pub fn new_pending() -> PendingImport {
     Arc::new(Mutex::new(None))
@@ -56,18 +58,18 @@ fn fmt_dt(dt: Option<NaiveDateTime>) -> String {
 }
 
 /// Imports every `.alert` entry of `zip_bytes` for `target_user_id`, writing the
-/// converted events into the database behind `provider`. Returns counts plus the
-/// HTML report.
+/// converted events into the database behind `provider`. Legacy wall-clock data
+/// is interpreted in `tz` (the zone the admin passed to `/import`); a chat with
+/// no timezone setting yet also adopts `tz` as its setting. Returns counts plus
+/// the HTML report.
 pub fn import_zip(
     provider: &EventProvider,
     target_user_id: i64,
     zip_bytes: &[u8],
+    tz: Tz,
 ) -> anyhow::Result<ImportOutcome> {
     let now = Utc::now().naive_utc();
     let loc = locale::for_chat(target_user_id);
-    // Legacy wall-clock data is interpreted in the target chat's timezone (UTC
-    // when the chat never picked one).
-    let tz = provider.tz_or_utc(target_user_id);
 
     // Ensure the destination chat exists (FK for events.chat_id).
     provider.upsert_chat(&ChatInfo {
@@ -80,6 +82,13 @@ pub fn import_zip(
         updated_at: None,
         created_at: None,
     })?;
+
+    // A chat without a timezone adopts the import's zone (before converting, so
+    // the stored setting and the conversion frame agree); an existing setting is
+    // never overwritten — the passed zone still drives this conversion.
+    if provider.get_timezone(target_user_id)?.is_none() {
+        provider.set_timezone(target_user_id, tz)?;
+    }
 
     let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes))?;
     log::info!(

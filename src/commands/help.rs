@@ -9,7 +9,7 @@ pub(super) async fn handle_help(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     if ctx.is_admin {
         help.push_str(
             "\n\nAdmin commands:\n\
-             /import <user_id> — import legacy alerts for a chat\n\
+             /import <user_id> <timezone> — import legacy alerts for a chat\n\
              /database — download the database file\n\
              /logs — download the current log file\n\
              /exit — shut the bot down",
