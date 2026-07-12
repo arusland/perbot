@@ -27,6 +27,7 @@ use crate::import::PendingImport;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::view::ListKind;
+use chrono_tz::Tz;
 use teloxide::types::ChatId;
 use teloxide::utils::command::BotCommands;
 
@@ -64,6 +65,10 @@ pub enum Command {
 pub struct CmdContext<'a> {
     pub bot: &'a TgBot,
     pub chat_id: ChatId,
+    /// The chat's timezone, resolved once by `main`'s timezone gate before any
+    /// command is dispatched (so it is always the stored setting, never a
+    /// fallback).
+    pub tz: Tz,
     pub provider: &'a EventProvider,
     pub admin_id: ChatId,
     pub is_admin: bool,

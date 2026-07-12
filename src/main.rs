@@ -396,6 +396,7 @@ async fn message_handler(
             let ctx = CmdContext {
                 bot: &bot,
                 chat_id: msg.chat.id,
+                tz,
                 provider: &provider,
                 admin_id,
                 is_admin,

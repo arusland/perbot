@@ -16,11 +16,10 @@ use teloxide::types::CallbackQuery;
 
 /// Handles `/timezone`: shows the current setting and the region picker.
 pub(super) async fn handle_timezone(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
-    let current = ctx.provider.get_timezone(ctx.chat_id.0)?;
     ctx.bot
         .send_html(
             ctx.chat_id,
-            timezone_current_message(current),
+            timezone_current_message(Some(ctx.tz)),
             Some(timezone_regions_keyboard()),
         )
         .await?;

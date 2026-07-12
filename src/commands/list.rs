@@ -76,7 +76,7 @@ fn fetch_page(
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
 pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
-    let tz = ctx.provider.tz_or_utc(ctx.chat_id.0);
+    let tz = ctx.tz;
     let PageResponse { events, total } = fetch_page(kind, ctx.provider, ctx.chat_id.0, tz, 0)?;
     let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
