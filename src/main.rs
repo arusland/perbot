@@ -365,6 +365,22 @@ async fn message_handler(
         return Ok(());
     }
 
+    // Scheduling interprets time input in the chat's timezone, so a chat that
+    // never picked one gets the picker before any other handling — commands
+    // and text alike. Only the `tz:` picker callbacks can get the chat past
+    // this gate.
+    let Some(tz) = provider.get_timezone(msg.chat.id.0)? else {
+        pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+        pending_msg.lock().unwrap().remove(&msg.chat.id.0);
+        bot.send_html(
+            msg.chat.id,
+            view::TZ_REQUIRED,
+            Some(view::timezone_regions_keyboard()),
+        )
+        .await?;
+        return Ok(());
+    };
+
     let reply_text = if let Some(text) = msg.text() {
         // Resolve the chat's locale once; every parse/format below threads it.
         let loc = perbot::locale::for_chat(msg.chat.id.0);
@@ -395,22 +411,6 @@ async fn message_handler(
             commands::handle_event_view(&bot, &provider, msg.chat.id, id).await?;
             return Ok(());
         }
-
-        // Scheduling interprets time input in the chat's timezone, so a chat
-        // that never picked one gets the picker instead — covering new
-        // reminders and the time-only/edit completions below in one gate.
-        // Commands (including /timezone itself) stay reachable above.
-        let Some(tz) = provider.get_timezone(msg.chat.id.0)? else {
-            pending_edit.lock().unwrap().remove(&msg.chat.id.0);
-            pending_msg.lock().unwrap().remove(&msg.chat.id.0);
-            bot.send_html(
-                msg.chat.id,
-                view::TZ_REQUIRED,
-                Some(view::timezone_regions_keyboard()),
-            )
-            .await?;
-            return Ok(());
-        };
 
         // Completing a pending edit (the chat tapped Edit on an `/event<id>` view):
         // the next message replaces the event's time and message. A time-only or
