@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Run the perbot container with ./data and ./logs bind-mounted from the host.
+# Host /tmp is mounted too so the /tmp/perbot.lock instance lock is host-wide.
 # Requires TG_BOT_TOKEN and TG_ADMIN_ID in the environment (or in ./perbot.env).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,6 +31,7 @@ docker run -d \
     --user "$(id -u):$(id -g)" \
     -v "$DATA_DIR":/data \
     -v "$LOGS_DIR":/logs \
+    -v /tmp:/tmp \
     -e LOG_DIR=/logs \
     -e TG_BOT_TOKEN \
     -e TG_ADMIN_ID \
