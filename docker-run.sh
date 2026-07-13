@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run the perbot container with ./data and ./logs bind-mounted from the host.
-# Requires TG_BOT_TOKEN and TG_ADMIN_ID in the environment (or in ./.env).
+# Requires TG_BOT_TOKEN and TG_ADMIN_ID in the environment (or in ./perbot.env).
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Pick up TG_BOT_TOKEN / TG_ADMIN_ID / TZ / RUST_LOG from .env if present
-if [ -f .env ]; then
+# Pick up TG_BOT_TOKEN / TG_ADMIN_ID / TZ / RUST_LOG from perbot.env if present
+if [ -f perbot.env ]; then
     set -a
-    . ./.env
+    . ./perbot.env
     set +a
 fi
 
@@ -34,7 +34,6 @@ docker run -d \
     -e TG_BOT_TOKEN \
     -e TG_ADMIN_ID \
     -e RUST_LOG="${RUST_LOG:-info}" \
-    -e TZ="${TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}" \
     "$IMAGE"
 
 echo "Started container '$NAME' (db: $DATA_DIR/perbot.db, logs: $LOGS_DIR)"

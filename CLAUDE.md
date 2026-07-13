@@ -20,10 +20,10 @@ cargo test                 # parser/storage/scheduler/table tests
 cargo test <name>          # single test/module, e.g. parser::tests
 cargo run --bin bench      # storage benchmark (1000 events)
 ./docker-build.sh          # two-stage image: static musl build (rust:1-alpine) → alpine runtime
-./docker-run.sh            # run container; bind-mounts ./data (perbot.db) and ./logs, reads .env
+./docker-run.sh            # run container; bind-mounts ./data (perbot.db) and ./logs, reads perbot.env
 ```
 
-Docker: the bot opens `data/perbot.db` relative to its working directory (creating `data/` if missing); `WORKDIR /` keeps the db in the mounted `./data`; logs go to `LOG_DIR=/logs` (mounted `./logs`). `docker-run.sh` requires `TG_BOT_TOKEN`/`TG_ADMIN_ID` (env or `.env`), forwards `RUST_LOG`/`TZ`, and runs as the host user so the bind mounts stay writable. `chrono-tz` bundles the IANA tzdata into the binary (nothing needed in the alpine image); the `TZ` env var no longer affects scheduling (the image defaults `TZ=Europe/Berlin`) — all scheduling runs in UTC + the per-chat timezone setting.
+Docker: the bot opens `data/perbot.db` relative to its working directory (creating `data/` if missing); `WORKDIR /` keeps the db in the mounted `./data`; logs go to `LOG_DIR=/logs` (mounted `./logs`). `docker-run.sh` requires `TG_BOT_TOKEN`/`TG_ADMIN_ID` (env or `perbot.env`), forwards `RUST_LOG`/`TZ`, and runs as the host user so the bind mounts stay writable. `chrono-tz` bundles the IANA tzdata into the binary (nothing needed in the alpine image); the `TZ` env var no longer affects scheduling (the image defaults `TZ=Europe/Berlin`) — all scheduling runs in UTC + the per-chat timezone setting.
 
 ## Environment Variables
 
