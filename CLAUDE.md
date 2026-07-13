@@ -21,9 +21,12 @@ cargo test <name>          # single test/module, e.g. parser::tests
 cargo run --bin bench      # storage benchmark (1000 events)
 ./docker-build.sh          # two-stage image: static musl build (rust:1-alpine) → alpine runtime
 ./docker-run.sh            # run container; bind-mounts ./data (perbot.db) and ./logs, reads perbot.env
+./deploy.sh dev|prod       # spot deploy (spot.yml): build image locally, ship over SSH, restart on the target
 ```
 
 Docker: the bot opens `data/perbot.db` relative to its working directory (creating `data/` if missing); `WORKDIR /` keeps the db in the mounted `./data`; logs go to `LOG_DIR=/logs` (mounted `./logs`). `docker-run.sh` requires `TG_BOT_TOKEN`/`TG_ADMIN_ID` (env or `perbot.env`), forwards `RUST_LOG`/`TZ`, and runs as the host user so the bind mounts stay writable. `chrono-tz` bundles the IANA tzdata into the binary (nothing needed in the alpine image); the `TZ` env var no longer affects scheduling (the image defaults `TZ=Europe/Berlin`) — all scheduling runs in UTC + the per-chat timezone setting.
+
+Deploy: `./deploy.sh dev|prod` runs the `spot.yml` playbook ([umputun/spot](https://github.com/umputun/spot); prod asks for confirmation; extra flags forward to `spot`, e.g. `./deploy.sh dev --dry`). It builds the image locally, `docker save`s it, uploads the tarball + `docker-run.sh` to `~/perbot/` on the target (sftp copy paths are home-relative — no `~` expansion), `docker load`s and restarts via `docker-run.sh` there, then waits for the container to report running. The placeholder hosts/users in `spot.yml` must be filled in once; `~/perbot/perbot.env` must already exist on each server (checked, never uploaded — it's gitignored) and the remote user needs `docker`-group access (no sudo anywhere).
 
 ## Environment Variables
 

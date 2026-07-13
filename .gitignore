@@ -1,6 +1,7 @@
 /target
 /data
 /.env
+/perbot.env
 /*.db
 /*.db-journal
 /logs
