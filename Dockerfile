@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- Stage 2: minimal runtime ----
 FROM alpine:3.22
 
-# CA bundle for the Telegram API TLS, tzdata so TZ affects local-time scheduling
+# CA bundle for the Telegram API TLS, tzdata so TZ resolves for process-local time
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S perbot \
     && adduser -S -G perbot perbot
@@ -35,6 +35,10 @@ RUN mkdir -p /data && chown perbot:perbot /data
 VOLUME /data
 
 USER perbot
+
+# Scheduling runs in UTC + the per-chat timezone setting; TZ only affects
+# process-local time (e.g. log timestamps). Default it to Berlin.
+ENV TZ=Europe/Berlin
 
 # Required at runtime: TG_BOT_TOKEN, TG_ADMIN_ID. Optional: RUST_LOG, TZ.
 ENTRYPOINT ["perbot"]
