@@ -2,6 +2,8 @@
 # Run the perbot container with ./data and ./logs bind-mounted from the host.
 # Host /tmp is mounted too so the /tmp/perbot.lock instance lock is host-wide.
 # Requires TG_BOT_TOKEN and TG_ADMIN_ID in the environment (or in ./perbot.env).
+# Restart policy is on-failure: crashes restart, a clean exit (/exit yes) stays
+# down. Boot-time start comes from the cron @reboot entry installed by spot.yml.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -15,6 +17,12 @@ fi
 : "${TG_BOT_TOKEN:?TG_BOT_TOKEN is required}"
 : "${TG_ADMIN_ID:?TG_ADMIN_ID is required}"
 
+# When launched from cron @reboot the docker daemon may not be up yet
+for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && break
+    sleep 2
+done
+
 IMAGE="${IMAGE:-perbot}"
 NAME="${NAME:-perbot}"
 DATA_DIR="$PWD/data"   # perbot.db lives here (bot opens data/perbot.db from WORKDIR /)
@@ -27,7 +35,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 # --user matches the host owner of the bind mounts so the bot can write to them
 docker run -d \
     --name "$NAME" \
-    --restart unless-stopped \
+    --restart on-failure \
     --user "$(id -u):$(id -g)" \
     -v "$DATA_DIR":/data \
     -v "$LOGS_DIR":/logs \
