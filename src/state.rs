@@ -6,7 +6,7 @@ use chrono_tz::Tz;
 
 use crate::error::Result;
 use crate::scheduler;
-use crate::storage::EventStorage;
+use crate::storage::{ACTIVATED_SETTING, EventStorage};
 use crate::types::{
     ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, PageRequest, PageResponse,
     TgMessage,
@@ -72,6 +72,32 @@ impl EventProvider {
     pub fn get_setting(&self, chat_id: i64, name: &str) -> Result<Option<String>> {
         let inner = self.inner.lock().unwrap();
         inner.storage.get_setting(chat_id, name)
+    }
+
+    /// Marks a chat as activated — it has sent its first message, so its
+    /// events become visible to the firing-path queries (which ignore
+    /// non-activated chats; see `storage::ACTIVATED_SETTING`). Only a chat
+    /// with **no** `activated` setting is activated: an existing value —
+    /// `"true"` (already registered) or anything else (e.g. `"false"`,
+    /// deactivated by the admin) — is left untouched, so a deactivated chat
+    /// cannot re-activate itself by messaging. Returns `true` when the chat
+    /// was newly activated (drives the admin "new user registered" notice).
+    /// On activation the next-event cache is reloaded: the chat's
+    /// pre-existing (e.g. imported) events may now be the nearest.
+    pub fn activate_chat(&self, chat_id: i64) -> Result<bool> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .storage
+            .get_setting(chat_id, ACTIVATED_SETTING)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        inner
+            .storage
+            .set_setting(chat_id, ACTIVATED_SETTING, "true")?;
+        Self::load_next_event(&mut inner)?;
+        Ok(true)
     }
 
     /// Resolves a chat's timezone from the settings table for callers already
@@ -684,10 +710,22 @@ mod tests {
 
     /// Builds an in-memory provider with a single private chat and a backing
     /// message row so events (whose `msg_id`/`chat_id` are FKs) can be inserted.
+    /// The chat is activated — most tests exercise firing paths, which only see
+    /// activated chats; `upsert_silent_chat` sets up a never-registered one.
     fn test_provider(chat_id: i64) -> (EventProvider, i64) {
-        use crate::types::{ChatInfo, ChatType};
         let storage = EventStorage::open_in_memory().unwrap();
         let provider = EventProvider::new(storage);
+        upsert_silent_chat(&provider, chat_id);
+        provider.activate_chat(chat_id).unwrap();
+        let msg_id = provider
+            .insert_message(None, chat_id, "call the office")
+            .unwrap();
+        (provider, msg_id)
+    }
+
+    /// Upserts a chat row without activating it (a chat that never messaged).
+    fn upsert_silent_chat(provider: &EventProvider, chat_id: i64) {
+        use crate::types::{ChatInfo, ChatType};
         provider
             .upsert_chat(&ChatInfo {
                 id: chat_id,
@@ -700,10 +738,6 @@ mod tests {
                 created_at: None,
             })
             .unwrap();
-        let msg_id = provider
-            .insert_message(None, chat_id, "call the office")
-            .unwrap();
-        (provider, msg_id)
     }
 
     fn ndt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
@@ -989,6 +1023,73 @@ mod tests {
             .unwrap();
         assert_eq!(other.total, 0);
         assert!(other.events.is_empty());
+    }
+
+    #[test]
+    fn activate_chat_registers_once_and_unlocks_firing() {
+        use chrono::NaiveTime;
+        let chat_id = 700;
+        let storage = EventStorage::open_in_memory().unwrap();
+        let provider = EventProvider::new(storage);
+        upsert_silent_chat(&provider, chat_id);
+        let msg_id = provider
+            .insert_message(None, chat_id, "call the office")
+            .unwrap();
+
+        // An event stored for the silent chat is active but invisible to the
+        // firing path (the next-event cache stays empty).
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.date = NaiveDate::from_ymd_opt(2099, 1, 1);
+        event.year_explicit = true;
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2098, 1, 1, 0, 0, 0))
+            .unwrap();
+        assert!(event.active);
+        assert!(provider.get_next_event().is_none());
+
+        // First message: newly activated, and the cache now sees the event.
+        assert!(provider.activate_chat(chat_id).unwrap());
+        assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
+
+        // Any further message is a no-op.
+        assert!(!provider.activate_chat(chat_id).unwrap());
+    }
+
+    #[test]
+    fn activate_chat_never_overrides_admin_deactivation() {
+        use chrono::NaiveTime;
+        let chat_id = 701;
+        let storage = EventStorage::open_in_memory().unwrap();
+        let provider = EventProvider::new(storage);
+        upsert_silent_chat(&provider, chat_id);
+        let msg_id = provider
+            .insert_message(None, chat_id, "call the office")
+            .unwrap();
+
+        // The admin deactivated the chat: the setting exists as "false".
+        provider
+            .set_setting(chat_id, ACTIVATED_SETTING, "false")
+            .unwrap();
+
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.date = NaiveDate::from_ymd_opt(2099, 1, 1);
+        event.year_explicit = true;
+        provider
+            .insert_event_and_get_at(event, ndt(2098, 1, 1, 0, 0, 0))
+            .unwrap();
+
+        // Messaging doesn't re-activate; the setting and the firing gate hold.
+        assert!(!provider.activate_chat(chat_id).unwrap());
+        assert_eq!(
+            provider
+                .get_setting(chat_id, ACTIVATED_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("false")
+        );
+        assert!(provider.get_next_event().is_none());
     }
 
     #[test]

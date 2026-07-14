@@ -57,6 +57,8 @@ fn main() -> anyhow::Result<()> {
         updated_at: None,
         created_at: None,
     })?;
+    // get_next_event only considers activated chats.
+    storage.set_setting(1, perbot::storage::ACTIVATED_SETTING, "true")?;
 
     let msg_id = storage.insert_message(&MessageInfo {
         id: 0,

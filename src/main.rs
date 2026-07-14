@@ -346,6 +346,23 @@ async fn message_handler(
         log::error!("Failed to save chat info: {}", e);
     }
 
+    // First message from this chat ever: mark it activated — the firing
+    // queries ignore events of non-activated chats (e.g. freshly imported
+    // ones) — and tell the admin a new user registered. An existing
+    // `activated=false` (admin deactivation) is never overwritten. A failed
+    // activation is only logged: the next message retries it.
+    match provider.activate_chat(msg.chat.id.0) {
+        Ok(true) => {
+            log::info!("Chat {} activated", msg.chat.id.0);
+            if msg.chat.id != admin_id {
+                bot.send_html(admin_id, view::user_registered_message(&chat_info), None)
+                    .await?;
+            }
+        }
+        Ok(false) => {}
+        Err(e) => log::error!("Failed to activate chat {}: {}", msg.chat.id.0, e),
+    }
+
     let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
     let is_admin = user_id == Some(admin_id.0);
 

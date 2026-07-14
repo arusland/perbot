@@ -137,6 +137,32 @@ pub fn inactive_event_reply(text: &str) -> String {
     format!("<b>{}</b>", html::escape(text))
 }
 
+/// Admin notice sent when a chat registers (its first message ever flips the
+/// `activated` setting): the chat id and type, plus whatever identity fields
+/// Telegram provided, HTML-escaped.
+pub fn user_registered_message(chat: &crate::types::ChatInfo) -> String {
+    let mut out = format!(
+        "🆕 <b>New user registered</b>\nChat: <code>{}</code> ({})",
+        chat.id,
+        chat.chat_type.as_str()
+    );
+    let name = [chat.first_name.as_deref(), chat.last_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !name.is_empty() {
+        out.push_str(&format!("\nName: {}", html::escape(&name)));
+    }
+    if let Some(username) = &chat.username {
+        out.push_str(&format!("\nUsername: @{}", html::escape(username)));
+    }
+    if let Some(title) = &chat.title {
+        out.push_str(&format!("\nTitle: {}", html::escape(title)));
+    }
+    out
+}
+
 /// Tap-to-copy example reminders shown by /help right after the command list:
 /// one `<code>` line per major datetime format, each with a short plain-text
 /// annotation.
@@ -281,6 +307,44 @@ mod tests {
         let admin = help_message("cmds", true);
         assert!(admin.contains("/import &lt;user_id&gt; &lt;timezone&gt;"));
         assert!(admin.find("Examples").unwrap() < admin.find("Admin commands:").unwrap());
+    }
+
+    #[test]
+    fn user_registered_message_lists_present_identity_fields_escaped() {
+        use crate::types::{ChatInfo, ChatType};
+        let chat = ChatInfo {
+            id: 42,
+            chat_type: ChatType::Private,
+            title: None,
+            username: Some("jo_hn".into()),
+            first_name: Some("Jo <b>".into()),
+            last_name: Some("Doe & Co".into()),
+            updated_at: None,
+            created_at: None,
+        };
+        let out = user_registered_message(&chat);
+        assert!(out.starts_with("🆕 <b>New user registered</b>"));
+        assert!(out.contains("Chat: <code>42</code> (private)"));
+        assert!(out.contains("Name: Jo &lt;b&gt; Doe &amp; Co"));
+        assert!(out.contains("Username: @jo_hn"));
+        assert!(!out.contains("Title:"));
+
+        // A bare group chat (no identity fields) still renders id + type.
+        let group = ChatInfo {
+            id: -100,
+            chat_type: ChatType::Group,
+            title: Some("Team <chat>".into()),
+            username: None,
+            first_name: None,
+            last_name: None,
+            updated_at: None,
+            created_at: None,
+        };
+        let out = user_registered_message(&group);
+        assert!(out.contains("Chat: <code>-100</code> (group)"));
+        assert!(out.contains("Title: Team &lt;chat&gt;"));
+        assert!(!out.contains("Name:"));
+        assert!(!out.contains("Username:"));
     }
 
     #[test]

@@ -97,6 +97,22 @@ fn event_cols(next_expr: &str) -> String {
 /// bare names are ambiguous against the join.
 const EVENT_FROM: &str = "FROM events e LEFT JOIN events p ON e.parent = p.id";
 
+/// Per-chat settings key marking a chat as activated: it has sent the bot at
+/// least one message. Set to `"true"` by the first-message hook in `main`
+/// **only while the setting is absent** — any pre-existing value (notably
+/// `"false"`, set by the admin to deactivate a chat) is never overwritten, so
+/// a deactivated chat stays deactivated no matter how much it messages.
+pub const ACTIVATED_SETTING: &str = "activated";
+
+/// WHERE fragment restricting an event query to activated chats (the
+/// [`ACTIVATED_SETTING`] setting present and `"true"`). Applied only to the
+/// firing-path queries — `get_next_event`, `get_missed_events`,
+/// `get_events_at` — so events of never-registered (setting absent) or
+/// deactivated (`"false"`) chats sit untouched. Interactive per-chat queries
+/// stay unfiltered: replying to a chat implies it already registered.
+const ACTIVATED_ONLY: &str = "EXISTS (SELECT 1 FROM settings s \
+     WHERE s.chat_id = e.chat_id AND s.name = 'activated' AND s.value = 'true')";
+
 /// SQLite-based storage for parsed events.
 pub struct EventStorage {
     conn: Connection,
@@ -528,10 +544,11 @@ impl EventStorage {
         }
     }
 
-    /// Returns the single nearest active event from `now`.
+    /// Returns the single nearest active event from `now`, considering only
+    /// activated chats (see [`ACTIVATED_ONLY`]).
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} {EVENT_FROM} WHERE e.active = 1
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND {ACTIVATED_ONLY}
              ORDER BY e.next_datetime ASC LIMIT 1",
             event_cols("e.next_datetime")
         ))?;
@@ -545,14 +562,16 @@ impl EventStorage {
     }
 
     /// Returns up to `limit` active events whose `next_datetime` is before `now`
-    /// (missed events), earliest first. Callers batch through the backlog by
-    /// rescheduling each batch (which removes it from this predicate) and
-    /// fetching again — no offset needed.
+    /// (missed events), earliest first, considering only activated chats (see
+    /// [`ACTIVATED_ONLY`]). Callers batch through the backlog by rescheduling
+    /// each batch (which removes it from this predicate) and fetching again —
+    /// no offset needed.
     pub fn get_missed_events(&self, now: NaiveDateTime, limit: usize) -> Result<Vec<EventInfo>> {
         let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime < ?1
+             AND {ACTIVATED_ONLY}
              ORDER BY e.next_datetime ASC LIMIT ?2",
             event_cols("e.next_datetime")
         ))?;
@@ -638,12 +657,14 @@ impl EventStorage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Returns all active events with the exact given `next_datetime`.
+    /// Returns all active events with the exact given `next_datetime`,
+    /// considering only activated chats (see [`ACTIVATED_ONLY`]).
     pub fn get_events_at(&self, dt: NaiveDateTime) -> Result<Vec<EventInfo>> {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime = ?1
+             AND {ACTIVATED_ONLY}
              ORDER BY e.id ASC",
             event_cols("e.next_datetime")
         ))?;
@@ -875,6 +896,12 @@ mod tests {
                 updated_at: None,
                 created_at: None,
             })
+            .unwrap();
+        // Test chats count as registered: the firing-path queries only see
+        // activated chats. `test_firing_queries_ignore_non_activated_chats`
+        // sets up its silent chat without this helper.
+        storage
+            .set_setting(chat_id, ACTIVATED_SETTING, "true")
             .unwrap();
     }
 
@@ -1748,6 +1775,61 @@ mod tests {
 
         let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0), 10).unwrap();
         assert!(missed.is_empty());
+    }
+
+    #[test]
+    fn test_firing_queries_ignore_non_activated_chats() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        // Chat 2 exists (e.g. created by an admin import) but never sent a
+        // message, so it has no `activated` setting.
+        storage
+            .upsert_chat(&ChatInfo {
+                id: 2,
+                chat_type: ChatType::Private,
+                title: None,
+                username: None,
+                first_name: None,
+                last_name: None,
+                updated_at: None,
+                created_at: None,
+            })
+            .unwrap();
+        let msg1 = ensure_message(&storage, 1);
+        let msg2 = ensure_message(&storage, 2);
+
+        // The silent chat's event is strictly nearer than the activated one's.
+        let silent = storage
+            .insert_event(&event_at(2, msg2, dt(2026, 1, 1, 10, 0)))
+            .unwrap();
+        let visible = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 1, 10, 0)))
+            .unwrap();
+
+        // The nearer event is invisible to every firing-path query.
+        assert_eq!(storage.get_next_event().unwrap().unwrap().id, visible);
+        let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0), 10).unwrap();
+        assert_eq!(
+            missed.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![visible]
+        );
+        assert!(
+            storage
+                .get_events_at(dt(2026, 1, 1, 10, 0))
+                .unwrap()
+                .is_empty()
+        );
+        // Interactive per-chat reads still see it (the chat could only reach
+        // them by messaging, but the queries themselves are unfiltered).
+        assert_eq!(storage.get_active_by_chat(2, 10, 0).unwrap().len(), 1);
+
+        // Activation makes the chat's events eligible.
+        storage.set_setting(2, ACTIVATED_SETTING, "true").unwrap();
+        assert_eq!(storage.get_next_event().unwrap().unwrap().id, silent);
+        assert_eq!(
+            storage.get_events_at(dt(2026, 1, 1, 10, 0)).unwrap().len(),
+            1
+        );
     }
 
     #[test]

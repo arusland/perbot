@@ -266,6 +266,10 @@ fn run_table(table_idx: usize, table: &Table) {
             created_at: None,
         })
         .unwrap();
+    // The firing-path queries (backing `get_next_event`) only see activated
+    // chats; the test chat still carries no timezone setting, so the tables
+    // stay timezone-neutral.
+    provider.activate_chat(CHAT_ID).unwrap();
 
     let mut current_id: Option<i64> = None;
 
