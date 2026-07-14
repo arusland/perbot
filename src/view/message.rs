@@ -137,10 +137,27 @@ pub fn inactive_event_reply(text: &str) -> String {
     format!("<b>{}</b>", html::escape(text))
 }
 
-/// Reply for a message that didn't parse into a time expression: the input
-/// echoed back in bold, HTML-escaped.
+/// Max characters of the offending input echoed back by
+/// [`unparsable_message`] before it is truncated with a trailing `...`.
+const UNPARSABLE_ECHO_MAX: usize = 200;
+
+/// Reply for a message that didn't parse into a time expression: a warning
+/// that the input isn't a properly formatted reminder, the input echoed back
+/// in bold (HTML-escaped, truncated to [`UNPARSABLE_ECHO_MAX`] chars), and a
+/// pointer to /help.
 pub fn unparsable_message(text: &str) -> String {
-    format!("Unparsable message: <b>{}</b>", html::escape(text))
+    let echo = if text.chars().count() > UNPARSABLE_ECHO_MAX {
+        let head: String = text.chars().take(UNPARSABLE_ECHO_MAX).collect();
+        format!("{head}...")
+    } else {
+        text.to_owned()
+    };
+    format!(
+        "⚠️ Your message is not properly formatted, I couldn't find a time expression in it:\n\n\
+         <b>{}</b>\n\n\
+         See /help for the supported formats.",
+        html::escape(&echo)
+    )
 }
 
 #[cfg(test)]
@@ -221,6 +238,25 @@ mod tests {
             message_preview("01234567890123456789", 20),
             "01234567890123456789"
         );
+    }
+
+    #[test]
+    fn unparsable_message_warns_and_points_to_help() {
+        let out = unparsable_message("hello <world> & co");
+        assert!(out.starts_with("⚠️"));
+        assert!(out.contains("<b>hello &lt;world&gt; &amp; co</b>"));
+        assert!(out.contains("/help"));
+    }
+
+    #[test]
+    fn unparsable_message_truncates_long_input() {
+        let long = "ñ".repeat(UNPARSABLE_ECHO_MAX + 50);
+        let out = unparsable_message(&long);
+        let expected: String = "ñ".repeat(UNPARSABLE_ECHO_MAX) + "...";
+        assert!(out.contains(&format!("<b>{expected}</b>")));
+        // A short input is echoed whole, no ellipsis.
+        assert!(unparsable_message("short").contains("<b>short</b>"));
+        assert!(!unparsable_message("short").contains("..."));
     }
 
     #[test]

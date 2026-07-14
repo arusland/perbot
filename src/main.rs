@@ -523,34 +523,8 @@ async fn message_handler(
         } else {
             view::unparsable_message(text)
         }
-    } else if msg.photo().is_some() {
-        "Received a photo!".to_string()
-    } else if msg.video().is_some() {
-        "Received a video!".to_string()
-    } else if msg.audio().is_some() {
-        "Received an audio file!".to_string()
-    } else if msg.voice().is_some() {
-        "Received a voice message!".to_string()
-    } else if msg.document().is_some() {
-        "Received a document!".to_string()
-    } else if msg.sticker().is_some() {
-        "Received a sticker!".to_string()
-    } else if msg.animation().is_some() {
-        "Received an animation!".to_string()
-    } else if msg.video_note().is_some() {
-        "Received a video note!".to_string()
-    } else if msg.contact().is_some() {
-        "Received a contact!".to_string()
-    } else if msg.location().is_some() {
-        "Received a location!".to_string()
-    } else if msg.venue().is_some() {
-        "Received a venue!".to_string()
-    } else if msg.poll().is_some() {
-        "Received a poll!".to_string()
-    } else if msg.dice().is_some() {
-        "Received a dice!".to_string()
     } else {
-        "Received an unknown message type!".to_string()
+        "⚠️ Received an unknown message type!\n\nSee /help for the examples.".to_string()
     };
 
     bot.send_html(msg.chat.id, reply_text, None).await?;
