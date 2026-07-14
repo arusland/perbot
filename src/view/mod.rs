@@ -23,7 +23,7 @@ pub use list::{
     total_pages,
 };
 pub use message::{
-    MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, clamp_message, format_when,
+    MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, clamp_message, format_when, help_message,
     inactive_event_reply, rendered_len, unparsable_message,
 };
 pub use notification::{fired_message, notification_keyboard};

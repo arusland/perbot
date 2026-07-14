@@ -137,6 +137,34 @@ pub fn inactive_event_reply(text: &str) -> String {
     format!("<b>{}</b>", html::escape(text))
 }
 
+/// Tap-to-copy example reminders shown by /help right after the command list:
+/// one `<code>` line per major datetime format, each with a short plain-text
+/// annotation.
+const HELP_EXAMPLES: &str = "Examples (tap to copy):\n\
+     <code>13:30 call the office</code> — one-off, today (or tomorrow if past)\n\
+     <code>in 45 min take the pizza out</code> — relative offset\n\
+     <code>8 morning run</code> — next 8:00\n\
+     <code>17:45 every mon-fri leave for the gym</code> — weekday recurrence\n\
+     <code>10:00 15.12 congrat Alice</code> — every year on that date\n\
+     <code>09:00 every 2 weeks water the plants</code> — repeating interval\n\
+     <code>18:00 last day of the month pay the rent</code> — monthly pattern";
+
+/// The /help reply (HTML): the command list (escaped), the tap-to-copy
+/// [`HELP_EXAMPLES`] block, and — for the admin — the admin-only commands.
+pub fn help_message(descriptions: &str, is_admin: bool) -> String {
+    let mut help = format!("{}\n\n{HELP_EXAMPLES}", html::escape(descriptions));
+    if is_admin {
+        help.push_str(
+            "\n\nAdmin commands:\n\
+             /import &lt;user_id&gt; &lt;timezone&gt; — import legacy alerts for a chat\n\
+             /database — download the database file\n\
+             /logs — download the current log file\n\
+             /exit — shut the bot down",
+        );
+    }
+    help
+}
+
 /// Max characters of the offending input echoed back by
 /// [`unparsable_message`] before it is truncated with a trailing `...`.
 const UNPARSABLE_ECHO_MAX: usize = 200;
@@ -238,6 +266,21 @@ mod tests {
             message_preview("01234567890123456789", 20),
             "01234567890123456789"
         );
+    }
+
+    #[test]
+    fn help_message_escapes_and_appends_examples() {
+        let out = help_message("Available commands:\n/help — <desc>", false);
+        // Command list is escaped and leads.
+        assert!(out.starts_with("Available commands:\n/help — &lt;desc&gt;"));
+        // Copyable examples follow right after the commands.
+        assert!(out.contains("Examples (tap to copy):\n<code>13:30 call the office</code>"));
+        assert!(!out.contains("Admin commands:"));
+
+        // Admin flavor appends the admin block after the examples, escaped.
+        let admin = help_message("cmds", true);
+        assert!(admin.contains("/import &lt;user_id&gt; &lt;timezone&gt;"));
+        assert!(admin.find("Examples").unwrap() < admin.find("Admin commands:").unwrap());
     }
 
     #[test]
