@@ -157,7 +157,10 @@ pub fn timezone_set_message(tz: Tz, rescheduled: usize) -> String {
         1 => "\n1 event was rescheduled to keep its local time.".to_string(),
         n => format!("\n{n} events were rescheduled to keep their local times."),
     };
-    format!("Timezone set to <b>{}</b>.{tail}", html::escape(tz.name()))
+    format!(
+        "🌍 Timezone set to <b>{}</b>.{tail}",
+        html::escape(tz.name())
+    )
 }
 
 #[cfg(test)]
@@ -243,7 +246,7 @@ mod tests {
         assert!(timezone_current_message(Some(Tz::Europe__Berlin)).contains("Europe/Berlin"));
         assert_eq!(
             timezone_set_message(Tz::UTC, 0),
-            "Timezone set to <b>UTC</b>."
+            "🌍 Timezone set to <b>UTC</b>."
         );
         assert!(timezone_set_message(Tz::Asia__Tokyo, 1).contains("1 event was rescheduled"));
         assert!(timezone_set_message(Tz::Asia__Tokyo, 3).contains("3 events were rescheduled"));

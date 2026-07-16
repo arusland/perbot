@@ -70,7 +70,7 @@ pub fn scheduled_message(
     tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
-    detail_body(Some("Event created"), event, now, tz, loc)
+    detail_body(Some("✅ Event created"), event, now, tz, loc)
 }
 
 /// Confirmation sent when a snooze button creates its one-off copy: the same
@@ -81,7 +81,7 @@ pub fn snoozed_message(
     tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> String {
-    detail_body(Some("Event snoozed"), event, now, tz, loc)
+    detail_body(Some("💤 Event snoozed"), event, now, tz, loc)
 }
 
 /// Reconstructs the re-parseable plain-text input for an event: its canonical time
@@ -208,10 +208,10 @@ fn detail_body(
     if !event.active {
         let notice = match event.last_next_datetime {
             Some(dt) => html::escape(&format!(
-                "Event is out of date. Last fired at {}",
+                "⌛ Event is out of date. Last fired at {}",
                 loc.format_datetime(crate::tz::to_local(dt, tz))
             )),
-            None => "Event is out of date.".to_string(),
+            None => "⌛ Event is out of date.".to_string(),
         };
         return format!("{caption}<b>{notice}</b>\n\n{}", event.message);
     }
@@ -319,7 +319,7 @@ mod tests {
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
             scheduled_message(&event, now, Tz::UTC, &EN),
-            "<b>Event created</b>\n<b>Time: 13:05 31.12.2027 (in 1d)</b>\n\nring in the new year"
+            "<b>✅ Event created</b>\n<b>Time: 13:05 31.12.2027 (in 1d)</b>\n\nring in the new year"
         );
     }
 
@@ -337,7 +337,7 @@ mod tests {
         let event = sample_event("<b>call</b> the office", Some(dt));
         assert_eq!(
             scheduled_message(&event, now, Tz::UTC, &EN),
-            "<b>Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h)</b>\n\n<b>call</b> the office"
+            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h)</b>\n\n<b>call</b> the office"
         );
     }
 
@@ -361,11 +361,9 @@ mod tests {
 
         let text = scheduled_message(&event, now, Tz::UTC, &EN);
         // The recurrence rides inside the when-line parentheses, like /event<id>.
-        assert!(
-            text.starts_with(
-                "<b>Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h, every day)</b>"
-            )
-        );
+        assert!(text.starts_with(
+            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h, every day)</b>"
+        ));
         assert!(text.contains("</b>\n\nstandup"));
         // Preview lists launches strictly after the confirmed datetime.
         assert!(text.contains("<b>Next launches:</b>"));
@@ -386,7 +384,7 @@ mod tests {
         let event = sample_event("call the office", Some(dt));
         assert_eq!(
             snoozed_message(&event, now, Tz::UTC, &EN),
-            "<b>Event snoozed</b>\n<b>Time: 09:30 22.06.2026 (in 30 mins)</b>\n\ncall the office"
+            "<b>💤 Event snoozed</b>\n<b>Time: 09:30 22.06.2026 (in 30 mins)</b>\n\ncall the office"
         );
     }
 
@@ -659,7 +657,7 @@ mod tests {
         );
         let text = event_detail(&e, now, Tz::UTC, &EN);
         assert!(
-            text.starts_with("<b>Event is out of date. Last fired at 09:30 10.06.2026</b>\n\n")
+            text.starts_with("<b>⌛ Event is out of date. Last fired at 09:30 10.06.2026</b>\n\n")
         );
         assert!(text.contains("expired reminder"));
         // Inactive: no when-line relative time, no launches block.

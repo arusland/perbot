@@ -142,7 +142,7 @@ async fn handle_dismiss(
                 .await?;
         }
         DismissOutcome::Dismissed(updated) => {
-            bot.answer_callback(q.id, Some("Dismissed.".to_owned()))
+            bot.answer_callback(q.id, Some("⏭ Dismissed.".to_owned()))
                 .await?;
             let tz = provider.tz_or_utc(chat_id.0);
             if let Err(e) =
@@ -186,7 +186,7 @@ async fn handle_dismiss_repetition(
                 .await?;
         }
         DismissOutcome::Dismissed(updated) => {
-            bot.answer_callback(q.id, Some("Repetition dismissed.".to_owned()))
+            bot.answer_callback(q.id, Some("⏩ Repetition dismissed.".to_owned()))
                 .await?;
             let tz = provider.tz_or_utc(chat_id.0);
             if let Err(e) =
@@ -307,7 +307,7 @@ async fn handle_edit_prompt(
 }
 
 /// Handles the Cancel press while editing (`eid:<id>:edno`): drops the chat's
-/// pending edit and edits the prompt to "Cancelled." (clearing the keyboard).
+/// pending edit and edits the prompt to "❌ Cancelled." (clearing the keyboard).
 async fn handle_edit_cancel(
     bot: &TgBot,
     pending_edit: &PendingEdit,
@@ -321,7 +321,7 @@ async fn handle_edit_cancel(
     let chat_id = message.chat.id;
     pending_edit.lock().unwrap().remove(&chat_id.0);
 
-    if let Err(e) = bot.edit_text(chat_id, message.id, "Cancelled.").await {
+    if let Err(e) = bot.edit_text(chat_id, message.id, "❌ Cancelled.").await {
         log::warn!(
             "Failed to edit cancelled edit prompt for chat {}: {e}",
             chat_id.0
@@ -409,7 +409,7 @@ async fn handle_delete_confirm(
 
     let owned = matches!(provider.get_event(id)?, Some(event) if event.chat_id == chat_id.0);
     let text = if owned && provider.delete(id)? {
-        "Event deleted."
+        "🗑 Event deleted."
     } else {
         "Event not found."
     };

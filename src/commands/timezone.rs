@@ -99,7 +99,7 @@ pub async fn handle_timezone_callback(
                 return Ok(());
             };
             let rescheduled = provider.set_timezone(chat_id.0, tz)?;
-            bot.answer_callback(q.id, Some(format!("Timezone set to {}.", tz.name())))
+            bot.answer_callback(q.id, Some(format!("🌍 Timezone set to {}.", tz.name())))
                 .await?;
             if let Err(e) = bot
                 .edit_html(
