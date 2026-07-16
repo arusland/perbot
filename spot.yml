@@ -5,10 +5,10 @@
 #   - spot installed locally: brew install umputun/apps/spot
 #   - SSH key access to the hosts; the remote user must be in the `docker` group (no sudo used)
 #   - server arch must match the local build arch (add --platform to docker-build.sh otherwise)
-#   - ~/perbot/perbot.env exists on each server (TG_BOT_TOKEN, TG_ADMIN_ID; never uploaded)
+#   - /home/perbot/perbot.env exists on each server (TG_BOT_TOKEN, TG_ADMIN_ID; never uploaded)
 #
 # Fill in the real host/user values below (placeholders ship in git).
-# Copy destinations are sftp paths: relative to the remote user's home (sftp does not expand ~).
+# Copy destinations are sftp paths; absolute paths are used as-is (sftp does not expand ~).
 user: ruslan
 ssh_key: ~/.ssh/id_rsa
 
@@ -32,27 +32,30 @@ tasks:
         on_exit: "rm -f /tmp/perbot-image.tar.gz"
 
       - name: upload image
-        copy: {src: "/tmp/perbot-image.tar.gz", dst: "perbot/perbot-image.tar.gz", mkdir: true}
+        copy: {src: "/tmp/perbot-image.tar.gz", dst: "/home/perbot/perbot-image.tar.gz", mkdir: true}
 
       - name: upload run script
-        copy: {src: "docker-run.sh", dst: "perbot/docker-run.sh"}
+        copy: {src: "docker-run.sh", dst: "/home/perbot/docker-run.sh"}
+
+      - name: upload backup script
+        copy: {src: "backup.sh", dst: "/home/perbot/backup.sh"}
 
       - name: check env file
         script: |
-          if [ ! -f ~/perbot/perbot.env ]; then
-            echo "ERROR: ~/perbot/perbot.env is missing on {SPOT_REMOTE_HOST}" >&2
+          if [ ! -f /home/perbot/perbot.env ]; then
+            echo "ERROR: /home/perbot/perbot.env is missing on {SPOT_REMOTE_HOST}" >&2
             echo "Create it with TG_BOT_TOKEN=... and TG_ADMIN_ID=... and re-run" >&2
             exit 1
           fi
 
       - name: load image
-        script: "gunzip -c ~/perbot/perbot-image.tar.gz | docker load"
-        on_exit: "rm -f ~/perbot/perbot-image.tar.gz"
+        script: "gunzip -c /home/perbot/perbot-image.tar.gz | docker load"
+        on_exit: "rm -f /home/perbot/perbot-image.tar.gz"
 
       - name: run
         script: |
-          chmod +x ~/perbot/docker-run.sh
-          ~/perbot/docker-run.sh
+          chmod +x /home/perbot/docker-run.sh /home/perbot/backup.sh
+          /home/perbot/docker-run.sh
 
       - name: verify running
         wait: {cmd: "docker inspect -f '{{.State.Running}}' perbot | grep -q true", timeout: "30s", interval: "2s"}
