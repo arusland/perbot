@@ -22,39 +22,36 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
     ("1 day", 1440),
 ];
 
+/// Snooze duration the collapsed keyboard offers when a chat has never snoozed
+/// (no [`crate::storage::LAST_SNOOZE_SETTING`] stored) or the stored value is
+/// unparsable.
+pub const DEFAULT_SNOOZE_MINUTES: i64 = 5;
+
 /// Hint appended below a fired reminder, explaining the snooze buttons. Purely
 /// informational — the snooze title is loaded from the stored event, not from
 /// the message text.
 const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
-/// Inline keyboard attached to a fired reminder: snooze rows (each button
-/// carries `eid:<id>:sn:<minutes>` callback data, where `<id>` is the fired
-/// event's DB id, used to load the event when pressed), a dismiss row when the
-/// event stays `active` after the fire (`eid:<id>:dis:n` skips the upcoming
+/// The button label for a snooze duration: the canonical [`SNOOZE_OPTIONS`]
+/// label when the minutes match an offered option, otherwise a plain
+/// `<minutes> mins` fallback (only reachable through a hand-edited setting).
+fn snooze_label(minutes: i64) -> String {
+    SNOOZE_OPTIONS
+        .iter()
+        .find(|(_, m)| *m == minutes)
+        .map(|(label, _)| (*label).to_owned())
+        .unwrap_or_else(|| format!("{minutes} mins"))
+}
+
+/// The action rows shared by both notification keyboards: a dismiss row when
+/// the event stays `active` after the fire (`eid:<id>:dis:n` skips the upcoming
 /// occurrence; `eid:<id>:disr:n` is added when `is_repetition` — the upcoming
 /// `source` is `Repetition` — and skips the interval fills to the next anchor),
 /// plus an Edit/Delete row (`eid:<id>:ed` starts the edit flow;
 /// `eid:<id>:del:n` starts the notification-aware delete flow, whose Cancel
-/// restores this keyboard). The `:n` suffix marks the notification flavor: the
-/// handlers keep the fired text and refresh only the keyboard. Public so the
-/// dismiss and delete-cancel handlers in `commands::event` can rebuild it.
-pub fn notification_keyboard(
-    event_id: i64,
-    active: bool,
-    is_repetition: bool,
-) -> InlineKeyboardMarkup {
-    // Four buttons on the first row, the rest on the second, to fit narrow screens.
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
-        .chunks(4)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|(label, minutes)| {
-                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
-                })
-                .collect()
-        })
-        .collect();
+/// restores the collapsed keyboard).
+fn action_rows(event_id: i64, active: bool, is_repetition: bool) -> Vec<Vec<InlineKeyboardButton>> {
+    let mut rows = Vec::new();
     // Dismiss actions get their own row (only while a future occurrence remains).
     if active {
         let mut dismiss_row = vec![InlineKeyboardButton::callback(
@@ -73,6 +70,60 @@ pub fn notification_keyboard(
         InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
         InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del:n")),
     ]);
+    rows
+}
+
+/// Inline keyboard attached to a fired reminder, in its default **collapsed**
+/// form: one snooze row — `Snooze for ...` (`eid:<id>:snx`, swaps in the
+/// [`expanded_notification_keyboard`] in place) next to a last-used shortcut
+/// `Snooze <label>` (`eid:<id>:sn:<last_snooze>`, where `<id>` is the fired
+/// event's DB id, used to load the event when pressed) — followed by the shared
+/// dismiss and Edit/Delete rows ([`action_rows`]). `last_snooze` is the chat's
+/// stored last snooze duration in minutes ([`EventProvider::last_snooze`]).
+/// The `:n` suffix marks the notification flavor: the handlers keep the fired
+/// text and refresh only the keyboard. Public so the dismiss and delete-cancel
+/// handlers in `commands::event` can rebuild it.
+///
+/// [`EventProvider::last_snooze`]: crate::state::EventProvider::last_snooze
+pub fn notification_keyboard(
+    event_id: i64,
+    active: bool,
+    is_repetition: bool,
+    last_snooze: i64,
+) -> InlineKeyboardMarkup {
+    let mut rows = vec![vec![
+        InlineKeyboardButton::callback("Snooze for ...", format!("eid:{event_id}:snx")),
+        InlineKeyboardButton::callback(
+            format!("Snooze {}", snooze_label(last_snooze)),
+            format!("eid:{event_id}:sn:{last_snooze}"),
+        ),
+    ]];
+    rows.extend(action_rows(event_id, active, is_repetition));
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// The expanded flavor of [`notification_keyboard`]: the full [`SNOOZE_OPTIONS`]
+/// rows (each button carries `eid:<id>:sn:<minutes>`) instead of the collapsed
+/// two-button row, followed by the same shared action rows. Swapped in by the
+/// `Snooze for ...` (`eid:<id>:snx`) handler in `commands::snooze`.
+pub fn expanded_notification_keyboard(
+    event_id: i64,
+    active: bool,
+    is_repetition: bool,
+) -> InlineKeyboardMarkup {
+    // Four buttons on the first row, the rest on the second, to fit narrow screens.
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = SNOOZE_OPTIONS
+        .chunks(4)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(label, minutes)| {
+                    InlineKeyboardButton::callback(*label, format!("eid:{event_id}:sn:{minutes}"))
+                })
+                .collect()
+        })
+        .collect();
+    rows.extend(action_rows(event_id, active, is_repetition));
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -82,13 +133,16 @@ pub fn notification_keyboard(
 /// preview baseline); `now` is the relative-time origin. `post_fire_active` /
 /// `post_fire_is_repetition` describe the event *after* the reschedule the
 /// caller is about to persist, so the dismiss row matches the state the buttons
-/// will act on.
+/// will act on. `last_snooze` labels the collapsed keyboard's last-used snooze
+/// shortcut (minutes).
+#[allow(clippy::too_many_arguments)]
 pub fn fired_message(
     event: &EventInfo,
     now: NaiveDateTime,
     due: NaiveDateTime,
     post_fire_active: bool,
     post_fire_is_repetition: bool,
+    last_snooze: i64,
     tz: Tz,
     loc: &dyn LocaleProvider,
 ) -> TgMessage {
@@ -113,6 +167,7 @@ pub fn fired_message(
             event.id,
             post_fire_active,
             post_fire_is_repetition,
+            last_snooze,
         )),
     }
 }
@@ -123,44 +178,82 @@ mod tests {
     use crate::locale::EN;
     use crate::view::test_support::sample_event;
 
+    /// Flattens a keyboard into its callback-data strings, in row order.
+    fn datas(kb: InlineKeyboardMarkup) -> Vec<String> {
+        use teloxide::types::InlineKeyboardButtonKind;
+        kb.inline_keyboard
+            .into_iter()
+            .flatten()
+            .map(|button| {
+                let InlineKeyboardButtonKind::CallbackData(data) = button.kind else {
+                    panic!("expected callback-data button");
+                };
+                data
+            })
+            .collect()
+    }
+
     #[test]
-    fn notification_keyboard_has_snooze_buttons_plus_action_rows() {
-        // Inactive after the fire: snooze rows + Edit/Delete only.
-        let kb = notification_keyboard(42, false, false);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 2);
+    fn snooze_label_prefers_canonical_option_labels() {
+        assert_eq!(snooze_label(5), "5 mins");
+        assert_eq!(snooze_label(60), "1 hour");
+        assert_eq!(snooze_label(1440), "1 day");
+        // Not an offered option (hand-edited setting): plain-minutes fallback.
+        assert_eq!(snooze_label(42), "42 mins");
+    }
+
+    #[test]
+    fn notification_keyboard_collapses_snooze_into_one_row() {
+        // Inactive after the fire: collapsed snooze row + Edit/Delete only.
+        let kb = notification_keyboard(42, false, false, 5);
+        assert_eq!(kb.inline_keyboard.len(), 2);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[0][0].text, "Snooze for ...");
+        assert_eq!(kb.inline_keyboard[0][1].text, "Snooze 5 mins");
         assert_eq!(kb.inline_keyboard.last().unwrap().len(), 2);
 
         // Still active: a dismiss row appears between snooze and Edit/Delete.
-        let kb = notification_keyboard(42, true, false);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 3);
+        let kb = notification_keyboard(42, true, false, 30);
+        assert_eq!(kb.inline_keyboard.len(), 3);
+        assert_eq!(kb.inline_keyboard[0][1].text, "Snooze 30 mins");
 
         // Active with a Repetition source: the dismiss row gains a second button.
-        let kb = notification_keyboard(42, true, true);
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 4);
-        let dismiss_row = &kb.inline_keyboard[kb.inline_keyboard.len() - 2];
-        assert_eq!(dismiss_row.len(), 2);
-        assert_eq!(kb.inline_keyboard.last().unwrap().len(), 2);
+        let kb = notification_keyboard(42, true, true, 5);
+        assert_eq!(kb.inline_keyboard.len(), 3);
+        assert_eq!(kb.inline_keyboard[1].len(), 2);
     }
 
     #[test]
     fn notification_keyboard_embeds_event_id_in_callback_data() {
-        use teloxide::types::InlineKeyboardButtonKind;
+        let collapsed = || ["eid:42:snx".to_owned(), "eid:42:sn:30".to_owned()].into_iter();
 
-        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
-            kb.inline_keyboard
-                .into_iter()
-                .flatten()
-                .map(|button| {
-                    let InlineKeyboardButtonKind::CallbackData(data) = button.kind else {
-                        panic!("expected callback-data button");
-                    };
-                    data
-                })
-                .collect()
-        };
+        let expected: Vec<String> = collapsed()
+            .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
+            .collect();
+        assert_eq!(datas(notification_keyboard(42, false, false, 30)), expected);
+
+        let expected: Vec<String> = collapsed()
+            .chain([
+                "eid:42:dis:n".to_owned(),
+                "eid:42:disr:n".to_owned(),
+                "eid:42:ed".to_owned(),
+                "eid:42:del:n".to_owned(),
+            ])
+            .collect();
+        assert_eq!(datas(notification_keyboard(42, true, true, 30)), expected);
+
+        let expected: Vec<String> = collapsed()
+            .chain([
+                "eid:42:dis:n".to_owned(),
+                "eid:42:ed".to_owned(),
+                "eid:42:del:n".to_owned(),
+            ])
+            .collect();
+        assert_eq!(datas(notification_keyboard(42, true, false, 30)), expected);
+    }
+
+    #[test]
+    fn expanded_notification_keyboard_has_full_snooze_rows() {
         let snoozes = || {
             SNOOZE_OPTIONS
                 .iter()
@@ -170,7 +263,10 @@ mod tests {
         let expected: Vec<String> = snoozes()
             .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
             .collect();
-        assert_eq!(datas(notification_keyboard(42, false, false)), expected);
+        assert_eq!(
+            datas(expanded_notification_keyboard(42, false, false)),
+            expected
+        );
 
         let expected: Vec<String> = snoozes()
             .chain([
@@ -180,16 +276,15 @@ mod tests {
                 "eid:42:del:n".to_owned(),
             ])
             .collect();
-        assert_eq!(datas(notification_keyboard(42, true, true)), expected);
+        assert_eq!(
+            datas(expanded_notification_keyboard(42, true, true)),
+            expected
+        );
 
-        let expected: Vec<String> = snoozes()
-            .chain([
-                "eid:42:dis:n".to_owned(),
-                "eid:42:ed".to_owned(),
-                "eid:42:del:n".to_owned(),
-            ])
-            .collect();
-        assert_eq!(datas(notification_keyboard(42, true, false)), expected);
+        // Snooze buttons split four per row.
+        let kb = expanded_notification_keyboard(42, true, false);
+        assert_eq!(kb.inline_keyboard[0].len(), 4);
+        assert_eq!(kb.inline_keyboard[1].len(), 4);
     }
 
     #[test]
@@ -205,23 +300,22 @@ mod tests {
         event.chat_id = 7;
 
         // One-off event: no launches preview between the body and the hint.
-        let msg = fired_message(&event, due, due, true, false, Tz::UTC, &EN);
+        let msg = fired_message(&event, due, due, true, false, 5, Tz::UTC, &EN);
         assert_eq!(msg.chat_id, 7);
         assert_eq!(
             msg.text,
             "<b>call</b> the office\n\n💤 Snooze this reminder:"
         );
         // The keyboard reflects the *post-fire* flags handed in: active → the
-        // dismiss row is present (snooze rows + dismiss + Edit/Delete).
+        // dismiss row is present (collapsed snooze row + dismiss + Edit/Delete).
         let kb = msg.reply_markup.expect("notification keyboard");
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 3);
+        assert_eq!(kb.inline_keyboard.len(), 3);
+        assert_eq!(kb.inline_keyboard[0][1].text, "Snooze 5 mins");
 
         // Inactive post-fire state drops the dismiss row.
-        let kb = fired_message(&event, due, due, false, false, Tz::UTC, &EN)
+        let kb = fired_message(&event, due, due, false, false, 5, Tz::UTC, &EN)
             .reply_markup
             .expect("notification keyboard");
-        let count: usize = kb.inline_keyboard.iter().map(|row| row.len()).sum();
-        assert_eq!(count, SNOOZE_OPTIONS.len() + 2);
+        assert_eq!(kb.inline_keyboard.len(), 2);
     }
 }

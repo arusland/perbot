@@ -2,13 +2,17 @@
 //! press inserts a one-off child event scheduled at `now + <minutes>` whose
 //! `parent` points at the original (root) event, leaving the original
 //! untouched. The child owns only its time — its message is resolved from the
-//! parent by storage, and deleting the parent cascade-deletes it.
+//! parent by storage, and deleting the parent cascade-deletes it. The picked
+//! duration is remembered per chat (`storage::LAST_SNOOZE_SETTING`) to label
+//! the collapsed keyboard's shortcut; `eid:<id>:snx` expands the collapsed
+//! row back to the full snooze options in place.
 
 use super::event::parse_event_callback;
 use crate::state::EventProvider;
+use crate::storage::LAST_SNOOZE_SETTING;
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
-use crate::view::{event_actions_keyboard, snoozed_message};
+use crate::view::{event_actions_keyboard, expanded_notification_keyboard, snoozed_message};
 use chrono::{Duration, Utc};
 use chrono_tz::Tz;
 use teloxide::types::CallbackQuery;
@@ -110,6 +114,12 @@ pub async fn handle_snooze_callback(
             return Ok(());
         }
     }
+    // Remember the picked duration to label the collapsed keyboard's last-used
+    // shortcut; display-only, so a failure never fails the snooze itself.
+    if let Err(e) = provider.set_setting(chat_id.0, LAST_SNOOZE_SETTING, &minutes.to_string()) {
+        log::warn!("Failed to store last snooze for chat {}: {e}", chat_id.0);
+    }
+
     // The local struct stores an empty message; reload so the confirmation
     // carries the parent-resolved text.
     let event = provider.get_event(event.id)?.unwrap_or(event);
@@ -130,6 +140,48 @@ pub async fn handle_snooze_callback(
     Ok(())
 }
 
+/// Handles the `Snooze for ...` press (`eid:<id>:snx`) on a collapsed
+/// notification keyboard: swaps in the full snooze rows
+/// ([`expanded_notification_keyboard`]) in place, keeping the fired text. The
+/// event is loaded to rebuild the action rows from its current state and is
+/// only honored when it belongs to the pressing chat (callback ids are
+/// attacker-influenceable); a missing or foreign event gets a toast.
+pub async fn handle_snooze_expand(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
+    let Some(message) = q.regular_message() else {
+        bot.answer_callback(q.id, None).await?;
+        return Ok(());
+    };
+    let chat_id = message.chat.id;
+
+    let event = match provider.get_event(id)? {
+        Some(event) if event.chat_id == chat_id.0 => event,
+        _ => {
+            bot.answer_callback(q.id, Some("Event not found.".to_owned()))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let is_repetition = event.source == Some(NextSource::Repetition);
+    if let Err(e) = bot
+        .edit_markup(
+            chat_id,
+            message.id,
+            expanded_notification_keyboard(id, event.active, is_repetition),
+        )
+        .await
+    {
+        log::warn!("Failed to expand snooze keyboard for event {id}: {e}");
+    }
+    bot.answer_callback(q.id, None).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,8 +192,10 @@ mod tests {
         assert_eq!(parse_snooze_callback("eid:42:sn:30"), Some((42, 30)));
         assert_eq!(parse_snooze_callback("eid:-7:sn:1"), Some((-7, 1)));
 
-        // Old format, non-numeric id/minutes, missing parts, and list callbacks.
+        // Old format, the expand action, non-numeric id/minutes, missing
+        // parts, and list callbacks.
         assert_eq!(parse_snooze_callback("sn:30"), None);
+        assert_eq!(parse_snooze_callback("eid:42:snx"), None);
         assert_eq!(parse_snooze_callback("eid:x:sn:30"), None);
         assert_eq!(parse_snooze_callback("eid:42:sn:"), None);
         assert_eq!(parse_snooze_callback("eid:42:sn:abc"), None);

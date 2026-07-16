@@ -6,7 +6,7 @@ use chrono_tz::Tz;
 
 use crate::error::Result;
 use crate::scheduler;
-use crate::storage::{ACTIVATED_SETTING, EventStorage};
+use crate::storage::{ACTIVATED_SETTING, EventStorage, LAST_SNOOZE_SETTING};
 use crate::types::{
     ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, PageRequest, PageResponse,
     TgMessage,
@@ -135,6 +135,24 @@ impl EventProvider {
     pub fn tz_or_utc(&self, chat_id: i64) -> Tz {
         let inner = self.inner.lock().unwrap();
         Self::tz_for_chat_locked(&inner, chat_id)
+    }
+
+    /// The chat's last-used snooze duration in minutes
+    /// (`storage::LAST_SNOOZE_SETTING`), for labeling the collapsed
+    /// notification keyboard. Missing, unparsable, or unreadable (logged)
+    /// values fall back to `view::DEFAULT_SNOOZE_MINUTES` — display-only, so
+    /// errors never bubble (same spirit as [`Self::tz_or_utc`]).
+    pub fn last_snooze(&self, chat_id: i64) -> i64 {
+        let inner = self.inner.lock().unwrap();
+        match inner.storage.get_setting(chat_id, LAST_SNOOZE_SETTING) {
+            Ok(value) => value
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(crate::view::DEFAULT_SNOOZE_MINUTES),
+            Err(e) => {
+                log::error!("Failed to read last snooze for chat {chat_id}: {e}; using default");
+                crate::view::DEFAULT_SNOOZE_MINUTES
+            }
+        }
     }
 
     /// Stores the chat's timezone and re-anchors its active events so every
@@ -668,6 +686,7 @@ impl EventProvider {
                                 dt,
                                 next.active,
                                 next.source == Some(NextSource::Repetition),
+                                provider.last_snooze(e.chat_id),
                                 tz,
                                 loc,
                             )
@@ -738,6 +757,32 @@ mod tests {
                 created_at: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn last_snooze_reads_setting_with_default_fallback() {
+        let chat_id = 42;
+        let (provider, _) = test_provider(chat_id);
+
+        // No setting yet: the default.
+        assert_eq!(
+            provider.last_snooze(chat_id),
+            crate::view::DEFAULT_SNOOZE_MINUTES
+        );
+
+        provider
+            .set_setting(chat_id, LAST_SNOOZE_SETTING, "30")
+            .unwrap();
+        assert_eq!(provider.last_snooze(chat_id), 30);
+
+        // An unparsable stored value falls back to the default.
+        provider
+            .set_setting(chat_id, LAST_SNOOZE_SETTING, "soon")
+            .unwrap();
+        assert_eq!(
+            provider.last_snooze(chat_id),
+            crate::view::DEFAULT_SNOOZE_MINUTES
+        );
     }
 
     fn ndt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {

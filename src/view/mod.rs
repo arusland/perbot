@@ -26,7 +26,9 @@ pub use message::{
     MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, clamp_message, format_when, help_message,
     inactive_event_reply, rendered_len, unparsable_message, user_registered_message,
 };
-pub use notification::{fired_message, notification_keyboard};
+pub use notification::{
+    DEFAULT_SNOOZE_MINUTES, expanded_notification_keyboard, fired_message, notification_keyboard,
+};
 pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
 };

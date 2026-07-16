@@ -77,7 +77,8 @@ pub(super) fn parse_event_callback(data: &str) -> Option<(i64, &str)> {
 /// Dispatches an event-specific callback (`eid:<id>:<action>`) to the matching
 /// handler: dismiss (`dis` → advance past the current occurrence), dismiss
 /// repetition (`disr` → skip the interval fills to the next anchor), snooze
-/// (`sn:<minutes>`), the delete flow (`del` → confirm prompt, `delyes` → delete,
+/// (`sn:<minutes>`; `snx` expands the collapsed notification keyboard to the
+/// full snooze rows), the delete flow (`del` → confirm prompt, `delyes` → delete,
 /// `delno` → restore the action buttons), or the edit flow (`ed` → start
 /// editing, `edno` → cancel editing). The `:n`-suffixed dismiss/delete variants
 /// are the notification-keyboard flavor that preserves the fired message.
@@ -102,6 +103,7 @@ pub async fn handle_event_callback(
         Some((id, "delno:n")) => handle_delete_cancel(bot, provider, id, true, q).await,
         Some((id, "ed")) => handle_edit_prompt(bot, provider, pending_edit, id, q).await,
         Some((_, "edno")) => handle_edit_cancel(bot, pending_edit, q).await,
+        Some((id, "snx")) => super::snooze::handle_snooze_expand(bot, provider, id, q).await,
         Some((_, action)) if action.starts_with("sn:") => {
             super::snooze::handle_snooze_callback(bot, provider, q).await
         }
@@ -145,9 +147,16 @@ async fn handle_dismiss(
             bot.answer_callback(q.id, Some("⏭ Dismissed.".to_owned()))
                 .await?;
             let tz = provider.tz_or_utc(chat_id.0);
-            if let Err(e) =
-                refresh_dismissed_view(bot, chat_id, message_id, &updated, tz, from_notification)
-                    .await
+            if let Err(e) = refresh_dismissed_view(
+                bot,
+                provider,
+                chat_id,
+                message_id,
+                &updated,
+                tz,
+                from_notification,
+            )
+            .await
             {
                 log::warn!("Failed to refresh dismissed event {id}: {e}");
             }
@@ -189,9 +198,16 @@ async fn handle_dismiss_repetition(
             bot.answer_callback(q.id, Some("⏩ Repetition dismissed.".to_owned()))
                 .await?;
             let tz = provider.tz_or_utc(chat_id.0);
-            if let Err(e) =
-                refresh_dismissed_view(bot, chat_id, message_id, &updated, tz, from_notification)
-                    .await
+            if let Err(e) = refresh_dismissed_view(
+                bot,
+                provider,
+                chat_id,
+                message_id,
+                &updated,
+                tz,
+                from_notification,
+            )
+            .await
             {
                 log::warn!("Failed to refresh dismissed-repetition event {id}: {e}");
             }
@@ -203,9 +219,10 @@ async fn handle_dismiss_repetition(
 /// Refreshes the message a dismiss was pressed on so its buttons match the
 /// advanced schedule: on the detail view the whole message is re-rendered with
 /// fresh action buttons; on a fired notification (`from_notification`) the
-/// fired text is kept and only the keyboard is rebuilt.
+/// fired text is kept and only the keyboard is rebuilt (in its collapsed form).
 async fn refresh_dismissed_view(
     bot: &TgBot,
+    provider: &EventProvider,
     chat_id: ChatId,
     message_id: teloxide::types::MessageId,
     updated: &EventInfo,
@@ -217,7 +234,12 @@ async fn refresh_dismissed_view(
         bot.edit_markup(
             chat_id,
             message_id,
-            notification_keyboard(updated.id, updated.active, is_repetition),
+            notification_keyboard(
+                updated.id,
+                updated.active,
+                is_repetition,
+                provider.last_snooze(chat_id.0),
+            ),
         )
         .await
     } else {
@@ -356,8 +378,8 @@ async fn handle_delete_prompt(
 }
 
 /// Handles the `❌ Cancel` press (`eid:<id>:delno` / `eid:<id>:delno:n`): restores
-/// the keyboard the flow started from — the full notification keyboard for the
-/// `:n` variant, otherwise the Dismiss/Edit/Delete action buttons — leaving the
+/// the keyboard the flow started from — the collapsed notification keyboard for
+/// the `:n` variant, otherwise the Dismiss/Edit/Delete action buttons — leaving the
 /// message text untouched. For the detail view the event is reloaded so the
 /// restored keyboard reflects its current active state (whether the Dismiss
 /// button belongs there).
@@ -375,7 +397,12 @@ async fn handle_delete_cancel(
             .as_ref()
             .is_some_and(|e| e.source == Some(NextSource::Repetition));
         let markup = if from_notification {
-            notification_keyboard(id, active, is_repetition)
+            notification_keyboard(
+                id,
+                active,
+                is_repetition,
+                provider.last_snooze(message.chat.id.0),
+            )
         } else {
             event_actions_keyboard(id, active, is_repetition)
         };
@@ -498,6 +525,7 @@ mod tests {
     #[test]
     fn parse_event_callback_splits_id_and_action() {
         assert_eq!(parse_event_callback("eid:42:sn:30"), Some((42, "sn:30")));
+        assert_eq!(parse_event_callback("eid:42:snx"), Some((42, "snx")));
         assert_eq!(parse_event_callback("eid:-7:del"), Some((-7, "del")));
         assert_eq!(parse_event_callback("eid:5:delyes"), Some((5, "delyes")));
         assert_eq!(parse_event_callback("eid:5:del:n"), Some((5, "del:n")));

@@ -104,6 +104,12 @@ const EVENT_FROM: &str = "FROM events e LEFT JOIN events p ON e.parent = p.id";
 /// a deactivated chat stays deactivated no matter how much it messages.
 pub const ACTIVATED_SETTING: &str = "activated";
 
+/// Per-chat settings key holding the last snooze duration the chat picked, as
+/// minutes in decimal (`"30"`). Written by the snooze-button handler; read to
+/// label the collapsed notification keyboard's last-used snooze button.
+/// Missing/invalid values fall back to `view::DEFAULT_SNOOZE_MINUTES`.
+pub const LAST_SNOOZE_SETTING: &str = "last_snooze";
+
 /// WHERE fragment restricting an event query to activated chats (the
 /// [`ACTIVATED_SETTING`] setting present and `"true"`). Applied only to the
 /// firing-path queries — `get_next_event`, `get_missed_events`,
