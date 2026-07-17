@@ -193,8 +193,9 @@ pub(super) fn event_when_line(
 /// fragment (formatting preserved, not truncated), and the upcoming-launches preview
 /// ([`next_launches_preview`], identical to a fired reminder; empty for
 /// one-off events). An **inactive** (out-of-date) event instead renders a
-/// single bold notice — "Event is out of date. Last fired at
-/// <last_next_datetime>" — above the message body.
+/// single bold notice above the message body — "Event is out of date. Last
+/// fired at <last_next_datetime>", or "Event was dismissed." when
+/// `last_next_datetime` is still in the future (dismissed before it fired).
 fn detail_body(
     caption: Option<&str>,
     event: &EventInfo,
@@ -207,6 +208,9 @@ fn detail_body(
         .unwrap_or_default();
     if !event.active {
         let notice = match event.last_next_datetime {
+            // A future last_next_datetime means the event never fired — it was
+            // dismissed past its final occurrence.
+            Some(dt) if dt > now => "⌛ Event was dismissed.".to_string(),
             Some(dt) => html::escape(&format!(
                 "⌛ Event is out of date. Last fired at {}",
                 loc.format_datetime(crate::tz::to_local(dt, tz))
@@ -662,6 +666,21 @@ mod tests {
         assert!(text.contains("expired reminder"));
         // Inactive: no when-line relative time, no launches block.
         assert!(!text.contains("Next launches:"));
+    }
+
+    #[test]
+    fn event_detail_dismissed_before_firing_shows_dismissed_notice() {
+        let now =
+            NaiveDateTime::parse_from_str("2026-06-15 12:00:00", "%Y-%m-%d %H:%M:%S").unwrap();
+        let mut e = sample_event("dismissed reminder", None);
+        // Dismissed one-off: last_next_datetime keeps the (future) fire time.
+        e.last_next_datetime = Some(
+            NaiveDateTime::parse_from_str("2026-06-20 09:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        let text = event_detail(&e, now, Tz::UTC, &EN);
+        assert!(text.starts_with("<b>⌛ Event was dismissed.</b>\n\n"));
+        assert!(text.contains("dismissed reminder"));
+        assert!(!text.contains("Last fired at"));
     }
 
     #[test]
