@@ -203,38 +203,46 @@ pub fn format_page_at(
 
 /// Builds the inline navigation keyboard for a page of a `kind` list.
 ///
-/// Returns `None` when everything fits on a single page (no buttons needed).
-/// Otherwise a single row holds `◀` / `▶` buttons (each present only when there
-/// is a page to move to), carrying `<tag>:<target-page>` callback data, with a
+/// A single row holds `◀` / `▶` buttons (each present only when there is a
+/// page to move to), carrying `<tag>:<target-page>` callback data, with a
 /// non-interactive `<page>/<total>` indicator button between them (callback
-/// `noop`, no handler — see `NOOP_DATA`).
+/// `noop`, no handler — see `NOOP_DATA`); the row is omitted when everything
+/// fits on one page. `/events` additionally always carries the `⚙ Settings`
+/// entry row (see `view::settings`). Returns `None` when no rows remain.
 pub fn list_keyboard(
     kind: ListKind,
     page: usize,
     total_pages: usize,
 ) -> Option<InlineKeyboardMarkup> {
-    if total_pages <= 1 {
+    let mut rows = Vec::new();
+    if total_pages > 1 {
+        let tag = kind.tag();
+        let mut row = Vec::new();
+        if page > 0 {
+            row.push(InlineKeyboardButton::callback(
+                "◀ Prev",
+                format!("{tag}:{}", page - 1),
+            ));
+        }
+        row.push(InlineKeyboardButton::callback(
+            format!("{}/{total_pages}", page + 1),
+            NOOP_DATA,
+        ));
+        if page + 1 < total_pages {
+            row.push(InlineKeyboardButton::callback(
+                "Next ▶",
+                format!("{tag}:{}", page + 1),
+            ));
+        }
+        rows.push(row);
+    }
+    if matches!(kind, ListKind::Events) {
+        rows.push(super::settings::settings_entry_row());
+    }
+    if rows.is_empty() {
         return None;
     }
-    let tag = kind.tag();
-    let mut row = Vec::new();
-    if page > 0 {
-        row.push(InlineKeyboardButton::callback(
-            "◀ Prev",
-            format!("{tag}:{}", page - 1),
-        ));
-    }
-    row.push(InlineKeyboardButton::callback(
-        format!("{}/{total_pages}", page + 1),
-        NOOP_DATA,
-    ));
-    if page + 1 < total_pages {
-        row.push(InlineKeyboardButton::callback(
-            "Next ▶",
-            format!("{tag}:{}", page + 1),
-        ));
-    }
-    Some(InlineKeyboardMarkup::new(vec![row]))
+    Some(InlineKeyboardMarkup::new(rows))
 }
 
 /// Renders one page of the missed-events list: the preview-only HTML body
@@ -499,36 +507,68 @@ mod tests {
                 .collect()
         };
 
-        // Single page → no keyboard.
-        assert!(list_keyboard(ListKind::Events, 0, 1).is_none());
+        // Single page → no keyboard (for kinds without extra rows).
+        assert!(list_keyboard(ListKind::Today, 0, 1).is_none());
 
         // Middle page: Prev, the indicator, then Next.
         assert_eq!(
-            buttons(list_keyboard(ListKind::Events, 1, 3).unwrap()),
+            buttons(list_keyboard(ListKind::Today, 1, 3).unwrap()),
             [
-                ("◀ Prev".to_string(), "ev:0".to_string()),
+                ("◀ Prev".to_string(), "td:0".to_string()),
                 ("2/3".to_string(), NOOP_DATA.to_string()),
-                ("Next ▶".to_string(), "ev:2".to_string()),
+                ("Next ▶".to_string(), "td:2".to_string()),
             ]
         );
 
         // First page: no Prev.
         assert_eq!(
-            buttons(list_keyboard(ListKind::Events, 0, 3).unwrap()),
+            buttons(list_keyboard(ListKind::Today, 0, 3).unwrap()),
             [
                 ("1/3".to_string(), NOOP_DATA.to_string()),
-                ("Next ▶".to_string(), "ev:1".to_string()),
+                ("Next ▶".to_string(), "td:1".to_string()),
             ]
         );
 
         // Last page: no Next.
         assert_eq!(
-            buttons(list_keyboard(ListKind::Events, 2, 3).unwrap()),
+            buttons(list_keyboard(ListKind::Today, 2, 3).unwrap()),
             [
-                ("◀ Prev".to_string(), "ev:1".to_string()),
+                ("◀ Prev".to_string(), "td:1".to_string()),
                 ("3/3".to_string(), NOOP_DATA.to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn events_list_keyboard_always_carries_settings_row() {
+        use crate::view::SETTINGS_OPEN_DATA;
+        use teloxide::types::InlineKeyboardButtonKind::CallbackData;
+
+        let datas = |kb: InlineKeyboardMarkup| -> Vec<String> {
+            kb.inline_keyboard
+                .concat()
+                .iter()
+                .map(|b| match &b.kind {
+                    CallbackData(d) => d.clone(),
+                    _ => panic!("expected callback data"),
+                })
+                .collect()
+        };
+
+        // Single page: the settings row alone.
+        assert_eq!(
+            datas(list_keyboard(ListKind::Events, 0, 1).unwrap()),
+            vec![SETTINGS_OPEN_DATA.to_string()]
+        );
+
+        // Several pages: nav row first, settings row last.
+        let all = datas(list_keyboard(ListKind::Events, 0, 3).unwrap());
+        assert!(all.contains(&"ev:1".to_string()));
+        assert_eq!(all.last().unwrap(), SETTINGS_OPEN_DATA);
+
+        // The other list kinds stay settings-free.
+        let today = datas(list_keyboard(ListKind::Today, 0, 3).unwrap());
+        assert!(!today.contains(&SETTINGS_OPEN_DATA.to_string()));
     }
 
     #[test]

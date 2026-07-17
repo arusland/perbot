@@ -13,6 +13,7 @@ mod help;
 mod import;
 mod list;
 mod logs;
+mod settings;
 mod snooze;
 mod start;
 mod timezone;
@@ -21,6 +22,7 @@ pub use cancel::handle_cancel_pending;
 pub use event::{handle_event_callback, handle_event_view, parse_event_command};
 pub use import::handle_import_zip;
 pub use list::handle_list_callback;
+pub use settings::handle_settings_callback;
 pub use snooze::handle_snooze_callback;
 pub use timezone::handle_timezone_callback;
 

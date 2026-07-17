@@ -12,6 +12,7 @@ mod list;
 mod message;
 mod notification;
 mod prompt;
+mod settings;
 mod timezone;
 
 pub use event::{
@@ -32,6 +33,10 @@ pub use notification::{
 };
 pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
+};
+pub use settings::{
+    DEFAULT_DIGEST_HOUR, DIGEST_TIME_ASK, SETTINGS_OPEN_DATA, digest_time_keyboard,
+    settings_entry_keyboard, settings_keyboard, settings_message,
 };
 pub use timezone::{
     TZ_ASK, TZ_REQUIRED, timezone_cities_keyboard, timezone_current_message,

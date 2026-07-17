@@ -221,7 +221,8 @@ async fn callback_handler(
 ) -> anyhow::Result<()> {
     // `eid:<id>:…` is the event-specific envelope (snooze / delete / edit); `pm:`
     // cancels a pending "send me the reminder text" prompt; `tz:` is the timezone
-    // picker; everything else is list pagination (`<tag>:<page>`).
+    // picker; `st:` is the Settings menu; everything else is list pagination
+    // (`<tag>:<page>`).
     match q.data.as_deref() {
         Some(d) if d.starts_with("eid:") => {
             commands::handle_event_callback(&bot, &provider, &pending_edit, q).await
@@ -231,6 +232,9 @@ async fn callback_handler(
         }
         Some(d) if d.starts_with("tz:") => {
             commands::handle_timezone_callback(&bot, &provider, q).await
+        }
+        Some(d) if d.starts_with("st:") => {
+            commands::handle_settings_callback(&bot, &provider, q).await
         }
         _ => commands::handle_list_callback(&bot, &provider, q).await,
     }

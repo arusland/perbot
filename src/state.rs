@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Months, NaiveDateTime, Utc};
+use chrono::{Duration, Months, NaiveDateTime, NaiveTime, Timelike, Utc};
 use chrono_tz::Tz;
 
 use crate::error::Result;
 use crate::scheduler;
-use crate::storage::{ACTIVATED_SETTING, EventStorage, LAST_SNOOZE_SETTING};
+use crate::storage::{
+    ACTIVATED_SETTING, DIGEST_OFF, DIGEST_SENT_SETTING, DIGEST_SETTING, EventStorage,
+    LAST_SNOOZE_SETTING,
+};
 use crate::types::{
     ChatInfo, EventInfo, MessageInfo, MessageSender, NextSource, PageRequest, PageResponse,
     TgMessage,
@@ -17,6 +20,12 @@ use crate::tz::{self, TIMEZONE_SETTING};
 /// batch — the upper bound on how much of the missed backlog is ever held in
 /// memory at once.
 const MISSED_MOVE_BATCH: usize = 100;
+
+/// Stored format of the `morning_digest` setting value (`"08:00"`).
+const DIGEST_TIME_FMT: &str = "%H:%M";
+
+/// Stored format of the `morning_digest_sent` stamp (a chat-local date).
+const DIGEST_DATE_FMT: &str = "%Y-%m-%d";
 
 struct EventProviderState {
     storage: EventStorage,
@@ -153,6 +162,144 @@ impl EventProvider {
                 crate::view::DEFAULT_SNOOZE_MINUTES
             }
         }
+    }
+
+    /// The chat's configured morning-digest time (chat-local wall clock), or
+    /// `None` when the digest is off — unset, switched off, or an unparsable
+    /// stored value.
+    pub fn digest_time(&self, chat_id: i64) -> Result<Option<NaiveTime>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .storage
+            .get_setting(chat_id, DIGEST_SETTING)?
+            .and_then(|v| NaiveTime::parse_from_str(&v, DIGEST_TIME_FMT).ok()))
+    }
+
+    /// Switches the chat's morning digest on at the given chat-local `time`
+    /// (or off with `None`).
+    pub fn set_digest_time(&self, chat_id: i64, time: Option<NaiveTime>) -> Result<()> {
+        self.set_digest_time_at(chat_id, time, Utc::now().naive_utc())
+    }
+
+    /// Like [`set_digest_time`](Self::set_digest_time) but with an explicit UTC
+    /// `now` (for tests). When the chosen time already passed today
+    /// (chat-local), today is stamped as sent so the first digest arrives the
+    /// next morning instead of immediately.
+    pub fn set_digest_time_at(
+        &self,
+        chat_id: i64,
+        time: Option<NaiveTime>,
+        now: NaiveDateTime,
+    ) -> Result<()> {
+        let inner = self.inner.lock().unwrap();
+        let Some(time) = time else {
+            return inner
+                .storage
+                .set_setting(chat_id, DIGEST_SETTING, DIGEST_OFF);
+        };
+        inner.storage.set_setting(
+            chat_id,
+            DIGEST_SETTING,
+            &time.format(DIGEST_TIME_FMT).to_string(),
+        )?;
+        let local = tz::to_local(now, Self::tz_for_chat_locked(&inner, chat_id));
+        if local.time() >= time {
+            inner.storage.set_setting(
+                chat_id,
+                DIGEST_SENT_SETTING,
+                &local.date().format(DIGEST_DATE_FMT).to_string(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Builds the morning-digest messages due at the UTC instant `now`: for
+    /// every digest-enabled (and activated) chat whose local clock has passed
+    /// its digest time and that hasn't been handled today, renders today's
+    /// events as the `/today` list (page 0 + its pagination keyboard) and
+    /// stamps the day as sent. Days with no events are stamped but produce no
+    /// message. Per-chat failures are logged and skipped so one broken chat
+    /// can't starve the rest; the outer `Err` covers only the enabled-chats
+    /// fetch itself. Called once per minute by the polling thread.
+    pub fn collect_due_digests_at(&self, now: NaiveDateTime) -> Result<Vec<TgMessage>> {
+        let digest_chats = {
+            let inner = self.inner.lock().unwrap();
+            inner.storage.get_digest_chats()?
+        };
+        let mut messages = Vec::new();
+        for (chat_id, value) in digest_chats {
+            match self.due_digest_for_chat(chat_id, &value, now) {
+                Ok(Some(msg)) => messages.push(msg),
+                Ok(None) => {}
+                Err(e) => log::error!("Failed to build morning digest for chat {chat_id}: {e}"),
+            }
+        }
+        Ok(messages)
+    }
+
+    /// One chat's slice of [`collect_due_digests_at`]: `None` when the digest
+    /// isn't due (time not reached, already handled today, or no events
+    /// today — the latter two both stamp the day).
+    fn due_digest_for_chat(
+        &self,
+        chat_id: i64,
+        value: &str,
+        now: NaiveDateTime,
+    ) -> Result<Option<TgMessage>> {
+        let Ok(digest_at) = NaiveTime::parse_from_str(value, DIGEST_TIME_FMT) else {
+            log::warn!("Chat {chat_id} has unparsable digest time {value:?}; skipping");
+            return Ok(None);
+        };
+        let tz = self.tz_or_utc(chat_id);
+        let local = tz::to_local(now, tz);
+        if local.time() < digest_at {
+            return Ok(None);
+        }
+        let today = local.date().format(DIGEST_DATE_FMT).to_string();
+        if self.get_setting(chat_id, DIGEST_SENT_SETTING)?.as_deref() == Some(today.as_str()) {
+            return Ok(None);
+        }
+
+        // The chat's local calendar day as UTC bounds — the same window /today
+        // uses (tz::to_utc owns the DST policy for a gapped midnight).
+        let start = tz::to_utc(local.date().and_hms_opt(0, 0, 0).unwrap(), tz);
+        let end = tz::to_utc(
+            (local.date() + Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+            tz,
+        );
+        let page = self.get_active_by_chat_in_range(
+            chat_id,
+            start,
+            end,
+            PageRequest::new(0, crate::view::LIST_PAGE_SIZE),
+        )?;
+
+        // Stamp whether or not something goes out: an empty day is done, too.
+        self.set_setting(chat_id, DIGEST_SENT_SETTING, &today)?;
+        if page.events.is_empty() {
+            return Ok(None);
+        }
+
+        let kind = crate::view::ListKind::Today;
+        let loc = crate::locale::for_chat(chat_id);
+        let (text, pages) = crate::view::format_page_at(
+            &page.events,
+            page.total,
+            now,
+            tz,
+            crate::view::LIST_PAGE_SIZE,
+            kind.title(),
+            kind.empty(),
+            kind.row_style(),
+            loc,
+        );
+        Ok(Some(TgMessage {
+            chat_id,
+            text,
+            reply_markup: crate::view::list_keyboard(kind, 0, pages),
+        }))
     }
 
     /// Stores the chat's timezone and re-anchors its active events so every
@@ -649,8 +796,26 @@ impl EventProvider {
         let provider = self.clone();
         std::thread::spawn(move || {
             let mut next_date: Option<NaiveDateTime> = None;
+            let mut last_digest_minute: Option<(chrono::NaiveDate, u32, u32)> = None;
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
+                let now = Utc::now().naive_utc();
+
+                // Morning digests: due-ness only changes at minute granularity,
+                // so check once per minute rather than every tick.
+                let minute = (now.date(), now.hour(), now.minute());
+                if last_digest_minute != Some(minute) {
+                    last_digest_minute = Some(minute);
+                    match provider.collect_due_digests_at(now) {
+                        Ok(messages) if !messages.is_empty() => {
+                            if let Err(e) = msg_tx.send(messages) {
+                                log::error!("Failed to queue digest messages: {}", e);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::error!("Failed to collect due digests: {}", e),
+                    }
+                }
 
                 let Some(event) = provider.get_next_event() else {
                     continue;
@@ -659,7 +824,6 @@ impl EventProvider {
                     continue;
                 };
 
-                let now = Utc::now().naive_utc();
                 if now >= dt {
                     let events = match provider.get_events_at(dt) {
                         Ok(events) => events,
@@ -782,6 +946,148 @@ mod tests {
         assert_eq!(
             provider.last_snooze(chat_id),
             crate::view::DEFAULT_SNOOZE_MINUTES
+        );
+    }
+
+    #[test]
+    fn digest_time_round_trips_and_reads_off_as_none() {
+        use chrono::NaiveTime;
+        let chat_id = 900;
+        let (provider, _) = test_provider(chat_id);
+
+        // No setting yet: off.
+        assert_eq!(provider.digest_time(chat_id).unwrap(), None);
+
+        let eight = NaiveTime::from_hms_opt(8, 0, 0).unwrap();
+        provider
+            .set_digest_time_at(chat_id, Some(eight), ndt(2099, 6, 15, 6, 0, 0))
+            .unwrap();
+        assert_eq!(provider.digest_time(chat_id).unwrap(), Some(eight));
+
+        provider
+            .set_digest_time_at(chat_id, None, ndt(2099, 6, 15, 6, 0, 0))
+            .unwrap();
+        assert_eq!(provider.digest_time(chat_id).unwrap(), None);
+    }
+
+    #[test]
+    fn digest_fires_once_per_day_at_the_configured_time() {
+        use chrono::NaiveTime;
+        let chat_id = 901;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // A one-off event later today (2099-06-15, chat is tz-less → UTC).
+        let mut event = base_event(chat_id, msg_id);
+        event.date = NaiveDate::from_ymd_opt(2099, 6, 15);
+        event.year_explicit = true;
+        event.time = NaiveTime::from_hms_opt(18, 0, 0);
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2099, 6, 15, 0, 0, 0))
+            .unwrap();
+
+        // Enabled before the digest time: no sent stamp, nothing due yet.
+        provider
+            .set_digest_time_at(
+                chat_id,
+                NaiveTime::from_hms_opt(8, 0, 0),
+                ndt(2099, 6, 15, 6, 0, 0),
+            )
+            .unwrap();
+        assert!(
+            provider
+                .collect_due_digests_at(ndt(2099, 6, 15, 7, 59, 0))
+                .unwrap()
+                .is_empty()
+        );
+
+        // At 08:00 the digest goes out, rendered as the /today list.
+        let messages = provider
+            .collect_due_digests_at(ndt(2099, 6, 15, 8, 0, 30))
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].chat_id, chat_id);
+        assert!(messages[0].text.contains("Today's events"));
+        assert!(messages[0].text.contains(&format!("/event{}", event.id)));
+
+        // The day is stamped: later ticks stay silent.
+        assert!(
+            provider
+                .collect_due_digests_at(ndt(2099, 6, 15, 8, 5, 0))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn digest_enabled_after_its_time_waits_for_the_next_day() {
+        use chrono::NaiveTime;
+        let chat_id = 902;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // One-off events on both days so either digest would have content.
+        for day in [15, 16] {
+            let mut event = base_event(chat_id, msg_id);
+            event.date = NaiveDate::from_ymd_opt(2099, 6, day);
+            event.year_explicit = true;
+            event.time = NaiveTime::from_hms_opt(18, 0, 0);
+            provider
+                .insert_event_and_get_at(event, ndt(2099, 6, 15, 0, 0, 0))
+                .unwrap();
+        }
+
+        // Enabled at 10:00 for 08:00: today is stamped as sent, so nothing
+        // fires today...
+        provider
+            .set_digest_time_at(
+                chat_id,
+                NaiveTime::from_hms_opt(8, 0, 0),
+                ndt(2099, 6, 15, 10, 0, 0),
+            )
+            .unwrap();
+        assert!(
+            provider
+                .collect_due_digests_at(ndt(2099, 6, 15, 10, 1, 0))
+                .unwrap()
+                .is_empty()
+        );
+
+        // ...but the next morning it does.
+        assert_eq!(
+            provider
+                .collect_due_digests_at(ndt(2099, 6, 16, 8, 0, 0))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn digest_skips_empty_days_but_stamps_them() {
+        use chrono::NaiveTime;
+        let chat_id = 903;
+        let (provider, _) = test_provider(chat_id);
+
+        provider
+            .set_digest_time_at(
+                chat_id,
+                NaiveTime::from_hms_opt(8, 0, 0),
+                ndt(2099, 6, 15, 6, 0, 0),
+            )
+            .unwrap();
+
+        // No events today: nothing goes out, but the day is marked handled.
+        assert!(
+            provider
+                .collect_due_digests_at(ndt(2099, 6, 15, 8, 0, 0))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            provider
+                .get_setting(chat_id, DIGEST_SENT_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("2099-06-15")
         );
     }
 

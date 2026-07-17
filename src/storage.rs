@@ -110,6 +110,22 @@ pub const ACTIVATED_SETTING: &str = "activated";
 /// Missing/invalid values fall back to `view::DEFAULT_SNOOZE_MINUTES`.
 pub const LAST_SNOOZE_SETTING: &str = "last_snooze";
 
+/// Per-chat settings key for the morning digest: the chat-local time
+/// (`"08:00"`) at which a daily message with today's events is sent, or
+/// [`DIGEST_OFF`] when the chat switched the digest off. Absent = off (the
+/// default). Managed by the Settings menu (`view/settings.rs`).
+pub const DIGEST_SETTING: &str = "morning_digest";
+
+/// [`DIGEST_SETTING`] value marking the morning digest as switched off.
+pub const DIGEST_OFF: &str = "off";
+
+/// Per-chat settings key remembering the last chat-local date (`"2026-07-17"`)
+/// the morning digest was handled for, so it goes out at most once per day.
+/// Also stamped on empty days (nothing was sent but the day is done) and when
+/// the digest is enabled after its time already passed (the first digest
+/// arrives the next morning, not immediately).
+pub const DIGEST_SENT_SETTING: &str = "morning_digest_sent";
+
 /// WHERE fragment restricting an event query to activated chats (the
 /// [`ACTIVATED_SETTING`] setting present and `"true"`). Applied only to the
 /// firing-path queries — `get_next_event`, `get_missed_events`,
@@ -732,6 +748,25 @@ impl EventStorage {
         log::debug!("Setting {name} set for chat {chat_id}");
 
         Ok(())
+    }
+
+    /// Returns `(chat_id, stored digest time)` for every chat with the morning
+    /// digest switched on (a [`DIGEST_SETTING`] value other than
+    /// [`DIGEST_OFF`]). Restricted to activated chats, mirroring the
+    /// firing-path queries: a deactivated chat gets no digests either.
+    pub fn get_digest_chats(&self) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.chat_id, d.value FROM settings d
+             WHERE d.name = ?1 AND d.value <> ?2
+               AND EXISTS (SELECT 1 FROM settings s
+                    WHERE s.chat_id = d.chat_id AND s.name = 'activated' AND s.value = 'true')
+             ORDER BY d.chat_id",
+        )?;
+
+        let rows = stmt.query_map(params![DIGEST_SETTING, DIGEST_OFF], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Returns the value of a per-chat setting, or `None` when unset.
@@ -1408,6 +1443,39 @@ mod tests {
         assert_eq!(
             storage.get_setting(222, "locale").unwrap(),
             Some("ru".to_string())
+        );
+    }
+
+    #[test]
+    fn get_digest_chats_lists_only_enabled_activated_chats() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        for id in 1..=4 {
+            ensure_chat(&storage, id);
+        }
+
+        // Chat 1: activated, digest on — the only row expected.
+        storage.set_setting(1, ACTIVATED_SETTING, "true").unwrap();
+        storage.set_setting(1, DIGEST_SETTING, "08:00").unwrap();
+        // Chat 2: activated but digest switched off.
+        storage.set_setting(2, ACTIVATED_SETTING, "true").unwrap();
+        storage.set_setting(2, DIGEST_SETTING, DIGEST_OFF).unwrap();
+        // Chat 3: digest on but never activated (drop the activation
+        // `ensure_chat` stamps on every test chat).
+        storage.set_setting(3, DIGEST_SETTING, "09:00").unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM settings WHERE chat_id = 3 AND name = ?1",
+                params![ACTIVATED_SETTING],
+            )
+            .unwrap();
+        // Chat 4: digest on but deactivated by the admin.
+        storage.set_setting(4, ACTIVATED_SETTING, "false").unwrap();
+        storage.set_setting(4, DIGEST_SETTING, "07:00").unwrap();
+
+        assert_eq!(
+            storage.get_digest_chats().unwrap(),
+            vec![(1, "08:00".to_string())]
         );
     }
 
