@@ -32,7 +32,6 @@ const VOCAB: GrammarVocab = GrammarVocab {
     each: "each",
     day_word: "day",
     of_the_month: r"of\s+(?:the\s+)?month",
-    month_suffix_strict: r"of\s+the\s+month",
     am: "AM",
     pm: "PM",
 };
@@ -251,7 +250,7 @@ mod tests {
         );
         assert_eq!(
             g.monthly.as_str(),
-            r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+the\s+month)?\b"
+            r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+(?:the\s+)?month)?\b"
         );
         assert_eq!(g.years.as_str(), r"\b(\d{4}(?:\s*,\s*\d{4})*)\b");
     }

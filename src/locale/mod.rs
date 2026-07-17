@@ -71,10 +71,8 @@ pub struct GrammarVocab {
     pub each: &'static str,
     /// Literal `"day"` word accepted in patterns.
     pub day_word: &'static str,
-    /// Day-of-month tail, optional `the`, e.g. `r"of\s+(?:the\s+)?month"`.
+    /// Month tail with optional `the`, e.g. `r"of\s+(?:the\s+)?month"`.
     pub of_the_month: &'static str,
-    /// Strict monthly-pattern tail (mandatory `the`), e.g. `r"of\s+the\s+month"`.
-    pub month_suffix_strict: &'static str,
     /// 12-hour ante-meridiem marker, e.g. `"AM"`.
     pub am: &'static str,
     /// 12-hour post-meridiem marker, e.g. `"PM"`.
@@ -139,7 +137,7 @@ impl TimeGrammar {
             .unwrap(),
             monthly: Regex::new(&format!(
                 r"(?i)\b({})\s+({}|{})(?:\s+{})?\b",
-                v.ordinals, wd, v.day_word, v.month_suffix_strict
+                v.ordinals, wd, v.day_word, v.of_the_month
             ))
             .unwrap(),
             years: Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap(),

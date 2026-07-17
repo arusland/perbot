@@ -120,6 +120,6 @@ Deploy: `./deploy.sh dev|prod` runs the `spot.yml` playbook ([umputun/spot](http
 - `14:55 20.05 every 2 weeks`, `15:30 every 3 days` — start datetime then interval.
 - `8 call Alex` → next 08:00; `24` → 00:00; `25` → invalid.
 - `8 min call her`, `in 8 min every 2 hours test` — relative offset, optionally repeating; leading `in` absorbed (and canonical).
-- `10:00 first sunday`, `17:00 3rd friday` — ordinal weekday (`1st`–`5th`, `last`) of the month.
-- `18:00 last day of the month`, `18:00 last day` — last day of month.
+- `10:00 first sunday`, `17:00 3rd friday` — ordinal weekday (`1st`–`5th`, `last`) of the month; an optional `of [the] month` tail is absorbed.
+- `18:00 last day of the month`, `18:00 last day of month`, `18:00 last day` — last day of month.
 - `12:05 28th of the month`, `every 28 of the month`, `each 5 of the month` — fixed calendar day (`1`–`31`); `of [the] month` required, optional `day`/ordinal/`every`/`each` absorbed. Missing days (Feb 31) skipped. Combinable with an interval (anchor has priority). Canonical `each <N><ord> day of the month`.

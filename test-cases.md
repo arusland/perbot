@@ -626,13 +626,14 @@ is independent of when the suite runs.
 | 2026-02-05 10:00:00 | USER   | 18:00 last day pay bills  | pay bills | 18:00 last day of the month |
 | 2026-02-28 18:00:01 | SYSTEM | 2026-03-31 18:00:00       | source=monthly_pattern |        |
 
-### Case 35: Last day of month — created on the last day itself (exact time not yet reached)
+### Case 34.3: Last day of month
 
-| Current Time        | Actor  | Input / Expected Next                  | Message / Source   | Normalized                  |
-|---------------------|--------|----------------------------------------|-----------|-----------------------------|
-| 2026-02-28 17:00:00 | USER   | 18:00 last day of the month pay bills  | pay bills | 18:00 last day of the month |
-| 2026-02-28 17:00:00 | SYSTEM | 2026-02-28 18:00:00                    | source=monthly_pattern |       |
-| 2026-02-28 18:00:01 | SYSTEM | 2026-03-31 18:00:00                    | source=monthly_pattern |       |
+| Current Time        | Actor  | Input / Expected Next                | Message / Source       | Normalized         |
+|---------------------|--------|--------------------------------------|------------------------|-----------------------------|
+| 2026-02-05 10:00:00 | USER   | 9:1 last day of (the) month go west! | go west!               | 09:01 last day of the month |
+| 2026-02-05 10:00:00 | SYSTEM | 2026-02-28 09:01:00                  | source=monthly_pattern |        |
+| 2026-02-28 09:01:01 | SYSTEM | 2026-03-31 09:01:00                  | source=monthly_pattern |        |
+| 2026-03-31 09:01:01 | SYSTEM | 2026-04-30 09:01:00                  | source=monthly_pattern |        |
 
 ### Case 35.2: Last day of month on last day — first and last only
 | Current Time        | Actor  | Input / Expected Next                  | Message / Source   | Normalized                  |
