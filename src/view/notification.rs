@@ -7,7 +7,6 @@ use crate::types::{EventInfo, TgMessage};
 use chrono::NaiveDateTime;
 use chrono_tz::Tz;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-use teloxide::utils::html;
 
 /// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
 /// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
@@ -26,11 +25,6 @@ const SNOOZE_OPTIONS: &[(&str, i64)] = &[
 /// (no [`crate::storage::LAST_SNOOZE_SETTING`] stored) or the stored value is
 /// unparsable.
 pub const DEFAULT_SNOOZE_MINUTES: i64 = 5;
-
-/// Hint appended below a fired reminder, explaining the snooze buttons. Purely
-/// informational — the snooze title is loaded from the stored event, not from
-/// the message text.
-const SNOOZE_HINT: &str = "💤 Snooze this reminder:";
 
 /// The button label for a snooze duration: the canonical [`SNOOZE_OPTIONS`]
 /// label when the minutes match an offered option, otherwise a plain
@@ -157,12 +151,7 @@ pub fn fired_message(
     let preview = next_launches_preview(event, now, due, tz, loc);
     TgMessage {
         chat_id: event.chat_id,
-        text: format!(
-            "{}{}\n\n{}",
-            event.message,
-            preview,
-            html::escape(SNOOZE_HINT)
-        ),
+        text: format!("{}{}", event.message, preview),
         reply_markup: Some(notification_keyboard(
             event.id,
             post_fire_active,
@@ -302,10 +291,7 @@ mod tests {
         // One-off event: no launches preview between the body and the hint.
         let msg = fired_message(&event, due, due, true, false, 5, Tz::UTC, &EN);
         assert_eq!(msg.chat_id, 7);
-        assert_eq!(
-            msg.text,
-            "<b>call</b> the office\n\n💤 Snooze this reminder:"
-        );
+        assert_eq!(msg.text, "<b>call</b> the office");
         // The keyboard reflects the *post-fire* flags handed in: active → the
         // dismiss row is present (collapsed snooze row + dismiss + Edit/Delete).
         let kb = msg.reply_markup.expect("notification keyboard");
