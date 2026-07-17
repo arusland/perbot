@@ -313,7 +313,7 @@ mod tests {
         let event = sample_event("ring in the new year", Some(dt));
         assert_eq!(
             scheduled_message(&event, now, Tz::UTC, &EN),
-            "<b>✅ Event created</b>\n<b>Time: 13:05 31.12.2027 (in 1d)</b>\n\nring in the new year"
+            "<b>✅ Event created</b>\n<b>Time: 13:05 31.12.2027, Fri (in 1d)</b>\n\nring in the new year"
         );
     }
 
@@ -331,7 +331,7 @@ mod tests {
         let event = sample_event("<b>call</b> the office", Some(dt));
         assert_eq!(
             scheduled_message(&event, now, Tz::UTC, &EN),
-            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h)</b>\n\n<b>call</b> the office"
+            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026, Mon (in 1h)</b>\n\n<b>call</b> the office"
         );
     }
 
@@ -356,12 +356,12 @@ mod tests {
         let text = scheduled_message(&event, now, Tz::UTC, &EN);
         // The recurrence rides inside the when-line parentheses, like /event<id>.
         assert!(text.starts_with(
-            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026 (in 1h, every day)</b>"
+            "<b>✅ Event created</b>\n<b>Time: 10:00 22.06.2026, Mon (in 1h, every day)</b>"
         ));
         assert!(text.contains("</b>\n\nstandup"));
         // Preview lists launches strictly after the confirmed datetime.
         assert!(text.contains("<b>Next launches:</b>"));
-        assert!(text.contains("▪ 10:00 23.06.2026"));
+        assert!(text.contains("▪ 10:00 23.06.2026, Tue"));
         assert!(text.contains("▪ ..."));
     }
 
@@ -378,7 +378,7 @@ mod tests {
         let event = sample_event("call the office", Some(dt));
         assert_eq!(
             snoozed_message(&event, now, Tz::UTC, &EN),
-            "<b>💤 Event snoozed</b>\n<b>Time: 09:30 22.06.2026 (in 30 mins)</b>\n\ncall the office"
+            "<b>💤 Event snoozed</b>\n<b>Time: 09:30 22.06.2026, Mon (in 30 mins)</b>\n\ncall the office"
         );
     }
 
@@ -410,9 +410,9 @@ mod tests {
         let preview = next_launches_preview(&event, fire, fire, Tz::UTC, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
         // Three consecutive days after the firing day, then the overflow bullet.
-        assert!(preview.contains("▪ 10:00 23.06.2026"));
-        assert!(preview.contains("▪ 10:00 24.06.2026"));
-        assert!(preview.contains("▪ 10:00 25.06.2026"));
+        assert!(preview.contains("▪ 10:00 23.06.2026, Tue"));
+        assert!(preview.contains("▪ 10:00 24.06.2026, Wed"));
+        assert!(preview.contains("▪ 10:00 25.06.2026, Thu"));
         assert!(preview.contains("▪ ..."));
         assert_eq!(preview.matches('▪').count(), 4);
     }
@@ -439,7 +439,7 @@ mod tests {
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
         );
         let preview = next_launches_preview(&event, now, fire, Tz::UTC, &EN);
-        assert!(preview.contains("▪ 10:00 23.06.2026 (2d)"));
+        assert!(preview.contains("▪ 10:00 23.06.2026, Tue (2d)"));
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
 
         let preview = next_launches_preview(&event, fire, fire, Tz::UTC, &EN);
         assert!(preview.starts_with("\n\n<b>Next launches:</b>"));
-        assert!(preview.contains("▪ 23:00 31.12.2027"));
+        assert!(preview.contains("▪ 23:00 31.12.2027, Fri"));
         assert!(!preview.contains("▪ ..."));
         assert_eq!(preview.matches('▪').count(), 1);
     }
@@ -591,7 +591,7 @@ mod tests {
         );
         let text = event_detail(&e, now, Tz::UTC, &EN);
         // Bold Time line, then the full untruncated HTML message verbatim.
-        assert!(text.starts_with("<b>Time: 14:00 15.06.2026 (in 2h)</b>\n\n"));
+        assert!(text.starts_with("<b>Time: 14:00 15.06.2026, Mon (in 2h)</b>\n\n"));
         assert!(text.contains("<b>call</b> the office and bring the documents"));
         // One-off: no upcoming-launches block.
         assert!(!text.contains("Next launches:"));
@@ -611,7 +611,7 @@ mod tests {
         });
         let text = event_detail(&e, now, Tz::UTC, &EN);
         // Under a minute away: bare "soon", never "in soon".
-        assert!(text.starts_with("<b>Time: 12:00 15.06.2026 (soon, every hour)</b>\n\n"));
+        assert!(text.starts_with("<b>Time: 12:00 15.06.2026, Mon (soon, every hour)</b>\n\n"));
         assert!(!text.contains("in soon"));
     }
 
@@ -628,11 +628,11 @@ mod tests {
             unit: TimeUnit::Days,
         });
         let text = event_detail(&e, now, Tz::UTC, &EN);
-        assert!(text.starts_with("<b>Time: 14:00 15.06.2026 (in 2h, every day)</b>\n\n"));
+        assert!(text.starts_with("<b>Time: 14:00 15.06.2026, Mon (in 2h, every day)</b>\n\n"));
         assert!(text.contains("standup"));
         // Recurring: launches block present, listing dates after the upcoming one.
         assert!(text.contains("<b>Next launches:</b>"));
-        assert!(text.contains("▪ 14:00 16.06.2026"));
+        assert!(text.contains("▪ 14:00 16.06.2026, Tue"));
     }
 
     #[test]
@@ -644,9 +644,9 @@ mod tests {
             NaiveDateTime::parse_from_str("2026-06-10 09:30:00", "%Y-%m-%d %H:%M:%S").unwrap(),
         );
         let text = event_detail(&e, now, Tz::UTC, &EN);
-        assert!(
-            text.starts_with("<b>⌛ Event is out of date. Last fired at 09:30 10.06.2026</b>\n\n")
-        );
+        assert!(text.starts_with(
+            "<b>⌛ Event is out of date. Last fired at 09:30 10.06.2026, Wed</b>\n\n"
+        ));
         assert!(text.contains("expired reminder"));
         // Inactive: no when-line relative time, no launches block.
         assert!(!text.contains("Next launches:"));

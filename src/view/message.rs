@@ -13,8 +13,8 @@ fn format_relative(now: NaiveDateTime, dt: NaiveDateTime, loc: &dyn LocaleProvid
     loc.format_relative((dt - now).num_seconds())
 }
 
-/// Plain-text "HH:MM dd.mm.yyyy (relative)" for a single datetime, e.g.
-/// `14:00 23.06.2026 (1d)`. `now`/`dt` are UTC instants; the absolute part is
+/// Plain-text "HH:MM dd.mm.yyyy, Wd (relative)" for a single datetime, e.g.
+/// `14:00 23.06.2026, Tue (1d)`. `now`/`dt` are UTC instants; the absolute part is
 /// rendered on the chat's wall clock (`tz`), the relative part is frame-free.
 /// Unescaped — for the fired-reminder preview. List replies use
 /// `write_event_row` (HTML) instead.

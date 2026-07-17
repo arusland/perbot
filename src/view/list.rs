@@ -320,7 +320,7 @@ mod tests {
         );
         assert_eq!(pages, 1);
         assert!(text.starts_with("<b>Upcoming events:</b>\n"));
-        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h)</b> /event0\n  call mom"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026, Mon (in 2h)</b> /event0\n  call mom"));
         assert!(text.contains("(in 3d)"));
         assert!(text.contains("  pay rent (urgent)"));
         // Events are separated by a blank line.
@@ -344,7 +344,7 @@ mod tests {
             &EN,
         );
         assert!(text.starts_with("<b>Today's events:</b>\n"));
-        assert!(text.contains("▪ <b>10:00 16.06.2026 (in 1h)</b> /event0\n  standup"));
+        assert!(text.contains("▪ <b>10:00 16.06.2026, Tue (in 1h)</b> /event0\n  standup"));
     }
 
     #[test]
@@ -422,7 +422,7 @@ mod tests {
         // One-off event: no recurrence suffix on the datetime line.
         assert!(!text.contains(", every"));
         // The /event<id> link ends the bold datetime line (id 0 for sample events).
-        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h)</b> /event0\n"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026, Mon (in 2h)</b> /event0\n"));
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         );
         // Recurrence sits inside the parentheses, next to the relative time; the
         // /event<id> link ends the line.
-        assert!(text.contains("▪ <b>14:00 15.06.2026 (in 2h, every 2 days)</b> /event0\n"));
+        assert!(text.contains("▪ <b>14:00 15.06.2026, Mon (in 2h, every 2 days)</b> /event0\n"));
     }
 
     #[test]
@@ -476,7 +476,7 @@ mod tests {
         // stripped, truncated) + /event<id>. No relative part — the moment is
         // in the past and would render "soon".
         assert!(text.contains(
-            "▪ 14:00 15.06.2026 — call the office right now please and bring the doc... /event42\n"
+            "▪ 14:00 15.06.2026, Mon — call the office right now please and bring the doc... /event42\n"
         ));
         assert!(!text.contains("<b>14:"));
         assert!(!text.contains("(in "));
@@ -560,7 +560,7 @@ mod tests {
         assert!(text.starts_with("<b>Missed events:</b>\n"));
         // The row leads with the event's datetime (the snapshot puts the
         // missed moment in `next_datetime`).
-        assert!(text.contains("▪ 09:00 16.06.2026 — call the office /event7"));
+        assert!(text.contains("▪ 09:00 16.06.2026, Tue — call the office /event7"));
         // One event → single page → no navigation keyboard.
         assert!(keyboard.is_none());
     }

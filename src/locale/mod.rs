@@ -202,7 +202,7 @@ pub trait LocaleProvider: Sync {
     /// `"in 13 mins"` — but bare `"soon"` (no preposition) when the delta is
     /// under a minute. The locale owns the preposition and word order.
     fn format_relative_in(&self, secs: i64) -> String;
-    /// An absolute datetime line, e.g. `"13:05 31.12.2027"`.
+    /// An absolute datetime line with the weekday, e.g. `"13:05 31.12.2027, Fri"`.
     fn format_datetime(&self, dt: NaiveDateTime) -> String;
     /// Bold header above the upcoming-launches preview (`"Next launches:"`).
     fn next_launches_header(&self) -> &'static str;

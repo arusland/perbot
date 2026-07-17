@@ -8,7 +8,7 @@
 //! [`crate::types`] so the DB serialization and the English UI stay
 //! byte-identical (and the DB stays locale-independent).
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -207,7 +207,11 @@ impl LocaleProvider for English {
     }
 
     fn format_datetime(&self, dt: NaiveDateTime) -> String {
-        dt.format("%H:%M %d.%m.%Y").to_string()
+        format!(
+            "{}, {}",
+            dt.format("%H:%M %d.%m.%Y"),
+            self.weekday_abbrev_cap(dt.weekday())
+        )
     }
     fn next_launches_header(&self) -> &'static str {
         "Next launches:"
