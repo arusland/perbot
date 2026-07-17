@@ -25,6 +25,7 @@ pub use list::{
 pub use message::{
     MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, clamp_message, format_when, help_message,
     inactive_event_reply, rendered_len, unparsable_message, user_registered_message,
+    welcome_message,
 };
 pub use notification::{
     DEFAULT_SNOOZE_MINUTES, expanded_notification_keyboard, fired_message, notification_keyboard,

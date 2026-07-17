@@ -385,10 +385,17 @@ async fn message_handler(
     // Scheduling interprets time input in the chat's timezone, so a chat that
     // never picked one gets the picker before any other handling — commands
     // and text alike. Only the `tz:` picker callbacks can get the chat past
-    // this gate.
+    // this gate. Sole carve-out: /start (a new user's first message) sends the
+    // welcome before the picker, so onboarding reads welcome → timezone.
     let Some(tz) = provider.get_timezone(msg.chat.id.0)? else {
         pending_edit.lock().unwrap().remove(&msg.chat.id.0);
         pending_msg.lock().unwrap().remove(&msg.chat.id.0);
+        if let Some(text) = msg.text()
+            && matches!(Command::parse(text, &bot_username), Ok(Command::Start))
+        {
+            bot.send_html(msg.chat.id, view::welcome_message(), None)
+                .await?;
+        }
         bot.send_html(
             msg.chat.id,
             view::TZ_REQUIRED,

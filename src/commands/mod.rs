@@ -1,6 +1,6 @@
 //! Bot commands: the [`Command`] menu, the shared [`CmdContext`], and the
-//! dispatch to one module per command (`help`, `database`, `logs`, `exit`,
-//! `import`) or per group of similar commands (`list` for the paginated
+//! dispatch to one module per command (`start`, `help`, `database`, `logs`,
+//! `exit`, `import`) or per group of similar commands (`list` for the paginated
 //! `/events`/`/today`/`/tomorrow`/`/week`/`/month` lists, `event` for the
 //! `/event<id>` view and its callbacks). `snooze` and `cancel` hold the
 //! remaining button-callback handlers routed here from `main`.
@@ -14,6 +14,7 @@ mod import;
 mod list;
 mod logs;
 mod snooze;
+mod start;
 mod timezone;
 
 pub use cancel::handle_cancel_pending;
@@ -34,6 +35,8 @@ use teloxide::utils::command::BotCommands;
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Available commands:")]
 pub enum Command {
+    #[command(description = "welcome message", hide)]
+    Start,
     #[command(description = "show this help message")]
     Help,
     #[command(description = "list upcoming scheduled events")]
@@ -79,6 +82,7 @@ impl Command {
     /// Dispatches a parsed command to its handler.
     pub async fn handle(self, ctx: CmdContext<'_>) -> anyhow::Result<()> {
         match self {
+            Command::Start => start::handle_start(&ctx).await,
             Command::Help => help::handle_help(&ctx).await,
             Command::Events => list::handle_list(&ctx, ListKind::Events).await,
             Command::Today => list::handle_list(&ctx, ListKind::Today).await,

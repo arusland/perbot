@@ -191,6 +191,17 @@ pub fn help_message(descriptions: &str, is_admin: bool) -> String {
     help
 }
 
+/// The /start reply (HTML): a short welcome — what the bot does, one
+/// tap-to-copy example, and a pointer to /help.
+pub fn welcome_message() -> String {
+    "👋 Hi! I'm a reminder bot.\n\n\
+     Start a message with a time expression and I'll remind you when it's due, \
+     for example:\n\
+     <code>13:30 call the office</code>\n\n\
+     See /help for all supported formats and commands."
+        .to_owned()
+}
+
 /// Max characters of the offending input echoed back by
 /// [`unparsable_message`] before it is truncated with a trailing `...`.
 const UNPARSABLE_ECHO_MAX: usize = 200;
@@ -307,6 +318,13 @@ mod tests {
         let admin = help_message("cmds", true);
         assert!(admin.contains("/import &lt;user_id&gt; &lt;timezone&gt;"));
         assert!(admin.find("Examples").unwrap() < admin.find("Admin commands:").unwrap());
+    }
+
+    #[test]
+    fn welcome_message_has_example_and_help_pointer() {
+        let out = welcome_message();
+        assert!(out.contains("<code>13:30 call the office</code>"));
+        assert!(out.contains("/help"));
     }
 
     #[test]
