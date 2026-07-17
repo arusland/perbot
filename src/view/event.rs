@@ -2,7 +2,7 @@
 //! preview, the `/event<id>` detail view, the re-parseable input reconstruction
 //! and edit prompt, plus the event action keyboards.
 
-use super::message::{BULLET, format_when, html_to_plain};
+use super::message::{BULLET, format_when};
 use crate::locale::LocaleProvider;
 use crate::scheduler;
 use crate::types::{EventInfo, MonthlyPattern};
@@ -84,29 +84,19 @@ pub fn snoozed_message(
     detail_body(Some("💤 Event snoozed"), event, now, tz, loc)
 }
 
-/// Reconstructs the re-parseable plain-text input for an event: its canonical time
-/// expression ([`EventInfo::normalize_time`]) followed by the plain-text message.
-/// Parsing the result yields the same event, so it can be offered as a copyable
-/// starting point for editing. Plain text; callers targeting HTML must escape it.
-pub fn event_source_input(event: &EventInfo, loc: &dyn LocaleProvider) -> String {
-    let time = event.normalize_time(loc);
-    let message = html_to_plain(&event.message);
-    if message.is_empty() {
-        time
-    } else {
-        format!("{time} {message}")
-    }
-}
-
 /// Builds the HTML edit prompt: the `lead` line followed by the event's current
-/// input wrapped in a `<code>` block, which Telegram clients copy on tap. Both
-/// parts are HTML-escaped.
+/// input — its canonical time expression ([`EventInfo::normalize_time`]) and the
+/// original message with its Telegram formatting intact (the stored HTML
+/// fragment, inserted verbatim), so the user can select, copy and paste it as a
+/// starting point. Pasting the formatted text round-trips: ingestion re-renders
+/// the entities back to the same HTML.
 pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> String {
-    format!(
-        "{}\n\n<code>{}</code>",
-        html::escape(lead),
-        html::escape(&event_source_input(event, loc))
-    )
+    let time = html::escape(&event.normalize_time(loc));
+    if event.message.is_empty() {
+        format!("{}\n\n{}", html::escape(lead), time)
+    } else {
+        format!("{}\n\n{} {}", html::escape(lead), time, event.message)
+    }
 }
 
 /// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
@@ -473,17 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn event_source_input_reconstructs_reparseable_text() {
-        use crate::parser;
-
-        // Clock time + message.
-        let mut e = sample_event("call the office", None);
-        e.time = Some(NaiveTime::from_hms_opt(13, 30, 0).unwrap());
-        assert_eq!(event_source_input(&e, &EN), "13:30 call the office");
-        // Round-trips: parsing yields the same time/message.
-        let parsed = parser::parse(&event_source_input(&e, &EN), &EN, Tz::UTC).unwrap();
-        assert_eq!(parsed.time, e.time);
-        assert_eq!(parsed.message, "call the office");
+    fn edit_prompt_shows_time_and_formatted_message() {
+        // The message keeps its Telegram formatting (HTML fragment verbatim).
+        let mut e = sample_event("<b>call</b> her", None);
+        e.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        assert_eq!(
+            edit_prompt("Edit:", &e, &EN),
+            "Edit:\n\n08:00 <b>call</b> her"
+        );
 
         // Recurrence (weekday set) is included via normalize_time.
         let mut r = sample_event("standup", None);
@@ -495,25 +482,22 @@ mod tests {
             chrono::Weekday::Thu,
             chrono::Weekday::Fri,
         ]));
-        assert_eq!(event_source_input(&r, &EN), "09:00 Mon-Fri standup");
+        assert_eq!(
+            edit_prompt("Edit:", &r, &EN),
+            "Edit:\n\n09:00 Mon-Fri standup"
+        );
 
-        // HTML formatting in the message is reduced to plain text.
-        let mut b = sample_event("<b>call</b> her", None);
-        b.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
-        assert_eq!(event_source_input(&b, &EN), "08:00 call her");
-    }
+        // An already-escaped message body passes through unchanged; the lead is
+        // escaped for HTML output.
+        let mut s = sample_event("a &amp; b &lt;c&gt;", None);
+        s.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        let prompt = edit_prompt("Edit <now>:", &s, &EN);
+        assert_eq!(prompt, "Edit &lt;now&gt;:\n\n10:00 a &amp; b &lt;c&gt;");
 
-    #[test]
-    fn edit_prompt_wraps_input_in_code_and_escapes() {
-        let mut e = sample_event("a &amp; b &lt;c&gt;", None);
-        e.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
-        let prompt = edit_prompt("Edit:", &e, &EN);
-        // The copyable block is a <code> span...
-        assert!(prompt.contains("<code>"));
-        assert!(prompt.contains("</code>"));
-        // ...holding the plain input with HTML specials re-escaped for HTML output.
-        assert!(prompt.contains("<code>10:00 a &amp; b &lt;c&gt;</code>"));
-        assert!(prompt.starts_with("Edit:\n\n"));
+        // A body-less event (snoozed child) renders just the time expression.
+        let mut t = sample_event("", None);
+        t.time = Some(NaiveTime::from_hms_opt(11, 0, 0).unwrap());
+        assert_eq!(edit_prompt("Edit:", &t, &EN), "Edit:\n\n11:00");
     }
 
     #[test]

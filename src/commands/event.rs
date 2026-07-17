@@ -281,7 +281,8 @@ fn resolve_edit_target(
 /// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
 /// the chat the button was pressed in (callback ids are user-influenceable),
 /// records the chat as editing that event, and prompts for the replacement input
-/// with the event's current input as a copyable `<code>` block ([`edit_prompt`])
+/// with the event's current input — time expression plus the original formatted
+/// message, selectable for copy-paste ([`edit_prompt`]) —
 /// and a Cancel button. An Edit press on a snoozed event starts the flow for its
 /// parent instead ([`resolve_edit_target`]). Replies "Event not found." for a
 /// missing or foreign id.

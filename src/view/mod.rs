@@ -16,7 +16,7 @@ mod timezone;
 
 pub use event::{
     delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt, event_actions_keyboard,
-    event_detail, event_source_input, next_launches_preview, scheduled_message, snoozed_message,
+    event_detail, next_launches_preview, scheduled_message, snoozed_message,
 };
 pub use list::{
     LIST_PAGE_SIZE, ListKind, RowStyle, format_missed_page, format_page_at, list_keyboard,

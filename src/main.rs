@@ -474,7 +474,7 @@ async fn message_handler(
                 send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
-                // edit) with the copyable current input still attached.
+                // edit) with the current input still attached.
                 let lead = if parser::parse_time_only(text, loc, tz).is_some() {
                     view::EDIT_NEED_TEXT
                 } else {
