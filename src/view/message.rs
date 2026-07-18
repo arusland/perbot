@@ -163,6 +163,20 @@ pub fn user_registered_message(chat: &crate::types::ChatInfo) -> String {
     out
 }
 
+/// Admin notice sent on startup. When the build's git revision is known (the
+/// Docker image sets `GIT_HASH`/`GIT_COMMIT_MSG`), the short hash and last
+/// commit subject follow on a second line, HTML-escaped.
+pub fn bot_started_message(git_hash: Option<&str>, git_commit_msg: Option<&str>) -> String {
+    let mut out = "<b>Bot started</b>".to_owned();
+    if let Some(hash) = git_hash {
+        out.push_str(&format!("\n<code>{}</code>", html::escape(hash)));
+        if let Some(msg) = git_commit_msg {
+            out.push_str(&format!(" {}", html::escape(msg)));
+        }
+    }
+    out
+}
+
 /// Tap-to-copy example reminders shown by /help right after the command list:
 /// one `<code>` line per major datetime format, each with a short plain-text
 /// annotation.
@@ -325,6 +339,20 @@ mod tests {
         let out = welcome_message();
         assert!(out.contains("<code>13:30 call the office</code>"));
         assert!(out.contains("/help"));
+    }
+
+    #[test]
+    fn bot_started_message_with_and_without_revision() {
+        assert_eq!(bot_started_message(None, None), "<b>Bot started</b>");
+        assert_eq!(
+            bot_started_message(Some("ab12cd3"), Some("Fix <a> & b")),
+            "<b>Bot started</b>\n<code>ab12cd3</code> Fix &lt;a&gt; &amp; b"
+        );
+        // Hash without a commit subject still renders the hash line.
+        assert_eq!(
+            bot_started_message(Some("ab12cd3"), None),
+            "<b>Bot started</b>\n<code>ab12cd3</code>"
+        );
     }
 
     #[test]

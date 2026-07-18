@@ -14,7 +14,15 @@ use tokio::sync::mpsc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     perbot::logger::init();
-    log::info!("Starting bot... (pid {})", std::process::id());
+    // Build revision baked into the Docker image by docker-build.sh; absent on
+    // a plain `cargo run`.
+    let git_hash = std::env::var("GIT_HASH").ok();
+    let git_commit_msg = std::env::var("GIT_COMMIT_MSG").ok();
+    log::info!(
+        "Starting bot... (pid {}, rev {})",
+        std::process::id(),
+        git_hash.as_deref().unwrap_or("unknown")
+    );
 
     // Held for the whole process lifetime; dropping it would release the lock.
     let _instance_lock = acquire_instance_lock(std::path::Path::new("/tmp/perbot.lock"))?;
@@ -32,7 +40,8 @@ async fn main() -> anyhow::Result<()> {
     // Every outbound call goes through the logging wrapper; the raw `bot` is kept
     // only to hand to the dispatcher's updater below.
     let tg = TgBot::new(bot.clone());
-    if let Err(e) = tg.send_html(admin_id, "<b>Bot started</b>", None).await {
+    let started_msg = view::bot_started_message(git_hash.as_deref(), git_commit_msg.as_deref());
+    if let Err(e) = tg.send_html(admin_id, started_msg, None).await {
         log::warn!("Failed to send startup message: {}", e);
     }
 

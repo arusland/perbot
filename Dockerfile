@@ -40,5 +40,12 @@ USER perbot
 # process-local time (e.g. log timestamps). Default it to Berlin.
 ENV TZ=Europe/Berlin
 
+# Git revision of this build (set by docker-build.sh), reported in the admin
+# startup message. Declared in the runtime stage only so a new commit does not
+# invalidate the cached cargo build layer.
+ARG GIT_HASH=unknown
+ARG GIT_COMMIT_MSG=unknown
+ENV GIT_HASH=$GIT_HASH GIT_COMMIT_MSG=$GIT_COMMIT_MSG
+
 # Required at runtime: TG_BOT_TOKEN, TG_ADMIN_ID. Optional: RUST_LOG, TZ.
 ENTRYPOINT ["perbot"]

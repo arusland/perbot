@@ -24,9 +24,9 @@ pub use list::{
     total_pages,
 };
 pub use message::{
-    MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, clamp_message, format_when, help_message,
-    inactive_event_reply, rendered_len, unparsable_message, user_registered_message,
-    welcome_message,
+    MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, bot_started_message, clamp_message,
+    format_when, help_message, inactive_event_reply, rendered_len, unparsable_message,
+    user_registered_message, welcome_message,
 };
 pub use notification::{
     DEFAULT_SNOOZE_MINUTES, dismissed_notification_text, expanded_notification_keyboard,

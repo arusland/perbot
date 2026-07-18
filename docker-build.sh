@@ -5,4 +5,10 @@ cd "$(dirname "$0")"
 
 IMAGE="${IMAGE:-perbot}"
 
-docker build -t "$IMAGE" .
+# Embed the current git revision so the bot can report which build is running
+GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_COMMIT_MSG="$(git log -1 --pretty=%s 2>/dev/null || echo unknown)"
+
+docker build -t "$IMAGE" \
+    --build-arg GIT_HASH="$GIT_HASH" \
+    --build-arg GIT_COMMIT_MSG="$GIT_COMMIT_MSG" .
