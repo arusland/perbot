@@ -53,6 +53,8 @@ pub enum Command {
     Month,
     #[command(description = "show or change the chat timezone")]
     Timezone,
+    #[command(description = "open the settings menu")]
+    Settings,
     #[command(
         description = "import legacy alerts for a chat: /import <user_id> <timezone> (admin only)",
         hide
@@ -92,6 +94,7 @@ impl Command {
             Command::Week => list::handle_list(&ctx, ListKind::Week).await,
             Command::Month => list::handle_list(&ctx, ListKind::Month).await,
             Command::Timezone => timezone::handle_timezone(&ctx).await,
+            Command::Settings => settings::handle_settings(&ctx).await,
             Command::Import(args) => import::handle_import(&ctx, &args).await,
             Command::Database => database::handle_database(&ctx).await,
             Command::Logs => logs::handle_logs(&ctx).await,

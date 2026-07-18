@@ -23,6 +23,9 @@ pub const SETTINGS_OPEN_DATA: &str = "st:o";
 /// Prompt shown above the hour picker opened by the digest-time button.
 pub const DIGEST_TIME_ASK: &str = "🕗 Choose the morning digest time:";
 
+/// Footer appended to every morning-digest message, pointing at /settings.
+pub const DIGEST_NOTE: &str = "<i>This message was sent because the morning digest is on. You can turn it off in /settings.</i>";
+
 /// Hour buttons per picker row (24 hours → 4 rows).
 const DIGEST_HOURS_PER_ROW: usize = 6;
 
@@ -118,6 +121,11 @@ mod tests {
         let on = settings_message(NaiveTime::from_hms_opt(8, 0, 0));
         assert!(on.contains("Morning digest: <b>on, 08:00</b>"));
         assert!(on.contains("today's events"));
+    }
+
+    #[test]
+    fn digest_note_points_at_settings_command() {
+        assert!(DIGEST_NOTE.contains("/settings"));
     }
 
     #[test]

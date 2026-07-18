@@ -297,7 +297,7 @@ impl EventProvider {
         );
         Ok(Some(TgMessage {
             chat_id,
-            text,
+            text: format!("{text}\n\n{}", crate::view::DIGEST_NOTE),
             reply_markup: crate::view::list_keyboard(kind, 0, pages),
         }))
     }
@@ -1008,6 +1008,7 @@ mod tests {
         assert_eq!(messages[0].chat_id, chat_id);
         assert!(messages[0].text.contains("Today's events"));
         assert!(messages[0].text.contains(&format!("/event{}", event.id)));
+        assert!(messages[0].text.ends_with(crate::view::DIGEST_NOTE));
 
         // The day is stamped: later ticks stay silent.
         assert!(

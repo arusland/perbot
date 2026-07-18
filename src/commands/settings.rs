@@ -1,11 +1,13 @@
-//! The `st:` Settings-menu callbacks (the menu itself lives in
-//! `view/settings.rs`): `st:o` opens the menu as a new message (keeping the
-//! /events list or /help reply it was pressed under), `st:s` re-renders it in
-//! place (the picker's Back button), `st:on`/`st:off` toggle the morning
-//! digest, `st:t` opens the hour picker, `st:h:<H>` sets the digest hour
-//! (which also turns the digest on). Every change applies to the chat the
-//! pressed message lives in — the same authority model as list pagination.
+//! The `/settings` command and the `st:` Settings-menu callbacks (the menu
+//! itself lives in `view/settings.rs`): the command and `st:o` open the menu
+//! as a new message (keeping the /events list or /help reply it was pressed
+//! under), `st:s` re-renders it in place (the picker's Back button),
+//! `st:on`/`st:off` toggle the morning digest, `st:t` opens the hour picker,
+//! `st:h:<H>` sets the digest hour (which also turns the digest on). Every
+//! change applies to the chat the pressed message lives in — the same
+//! authority model as list pagination.
 
+use super::CmdContext;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::view::{
@@ -43,6 +45,27 @@ fn parse_settings_callback(data: &str) -> Option<SettingsAction> {
             (hour < 24).then_some(SettingsAction::SetHour(hour))
         }
     }
+}
+
+/// Sends the current Settings menu as a new message.
+async fn send_settings_menu(
+    bot: &TgBot,
+    provider: &EventProvider,
+    chat_id: ChatId,
+) -> anyhow::Result<()> {
+    let digest = provider.digest_time(chat_id.0)?;
+    bot.send_html(
+        chat_id,
+        settings_message(digest),
+        Some(settings_keyboard(digest)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Handles `/settings`: opens the Settings menu.
+pub async fn handle_settings(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
+    send_settings_menu(ctx.bot, ctx.provider, ctx.chat_id).await
 }
 
 /// Edits the pressed message into the current Settings menu.
@@ -87,13 +110,7 @@ pub async fn handle_settings_callback(
     match q.data.as_deref().and_then(parse_settings_callback) {
         Some(SettingsAction::Open) => {
             bot.answer_callback(q.id, None).await?;
-            let digest = provider.digest_time(chat_id.0)?;
-            bot.send_html(
-                chat_id,
-                settings_message(digest),
-                Some(settings_keyboard(digest)),
-            )
-            .await?;
+            send_settings_menu(bot, provider, chat_id).await?;
         }
         Some(SettingsAction::Show) => {
             bot.answer_callback(q.id, None).await?;

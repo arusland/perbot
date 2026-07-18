@@ -36,7 +36,7 @@ pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
 };
 pub use settings::{
-    DEFAULT_DIGEST_HOUR, DIGEST_TIME_ASK, SETTINGS_OPEN_DATA, digest_time_keyboard,
+    DEFAULT_DIGEST_HOUR, DIGEST_NOTE, DIGEST_TIME_ASK, SETTINGS_OPEN_DATA, digest_time_keyboard,
     settings_entry_keyboard, settings_keyboard, settings_message,
 };
 pub use timezone::{
