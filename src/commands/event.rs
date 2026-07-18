@@ -8,8 +8,8 @@ use crate::state::{DismissOutcome, EventProvider};
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
 use crate::view::{
-    EDIT_ASK_TEXT, delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt,
-    event_actions_keyboard, event_detail, notification_keyboard,
+    EDIT_ASK_TEXT, delete_confirm_keyboard, dismissed_notification_text, edit_cancel_keyboard,
+    edit_prompt, event_actions_keyboard, event_detail, notification_keyboard,
 };
 use chrono::Utc;
 use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardMarkup};
@@ -216,10 +216,11 @@ async fn handle_dismiss_repetition(
     Ok(())
 }
 
-/// Refreshes the message a dismiss was pressed on so its buttons match the
-/// advanced schedule: on the detail view the whole message is re-rendered with
-/// fresh action buttons; on a fired notification (`from_notification`) the
-/// fired text is kept and only the keyboard is rebuilt (in its collapsed form).
+/// Refreshes the message a dismiss was pressed on so it matches the advanced
+/// schedule: on the detail view the whole message is re-rendered with fresh
+/// action buttons; on a fired notification (`from_notification`) the fired text
+/// is rebuilt with an updated launches preview and the keyboard in its
+/// collapsed form.
 async fn refresh_dismissed_view(
     bot: &TgBot,
     provider: &EventProvider,
@@ -231,15 +232,18 @@ async fn refresh_dismissed_view(
 ) -> teloxide::prelude::ResponseResult<()> {
     let is_repetition = updated.source == Some(NextSource::Repetition);
     if from_notification {
-        bot.edit_markup(
+        let loc = crate::locale::for_chat(chat_id.0);
+        let text = dismissed_notification_text(updated, Utc::now().naive_utc(), tz, loc);
+        bot.edit_html(
             chat_id,
             message_id,
-            notification_keyboard(
+            text.as_str(),
+            Some(notification_keyboard(
                 updated.id,
                 updated.active,
                 is_repetition,
                 provider.last_snooze(chat_id.0),
-            ),
+            )),
         )
         .await
     } else {

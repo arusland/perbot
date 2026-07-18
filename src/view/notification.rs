@@ -74,9 +74,9 @@ fn action_rows(event_id: i64, active: bool, is_repetition: bool) -> Vec<Vec<Inli
 /// event's DB id, used to load the event when pressed) — followed by the shared
 /// dismiss and Edit/Delete rows ([`action_rows`]). `last_snooze` is the chat's
 /// stored last snooze duration in minutes ([`EventProvider::last_snooze`]).
-/// The `:n` suffix marks the notification flavor: the handlers keep the fired
-/// text and refresh only the keyboard. Public so the dismiss and delete-cancel
-/// handlers in `commands::event` can rebuild it.
+/// The `:n` suffix marks the notification flavor: the handlers refresh the
+/// fired message in place instead of swapping in the detail view. Public so
+/// the dismiss and delete-cancel handlers in `commands::event` can rebuild it.
 ///
 /// [`EventProvider::last_snooze`]: crate::state::EventProvider::last_snooze
 pub fn notification_keyboard(
@@ -159,6 +159,27 @@ pub fn fired_message(
             last_snooze,
         )),
     }
+}
+
+/// Rebuilds a fired reminder's text after a dismiss advanced its schedule: the
+/// stored HTML body plus a fresh upcoming-launches preview led by the new
+/// `next_datetime`. The fired text has no `Time:` line, so the preview baseline
+/// sits one second before the new occurrence (mirroring the `+ 1s` step the
+/// dismiss itself used) to keep that occurrence in the list. An event with
+/// nothing further to fire renders the bare body, like a one-off fire.
+pub fn dismissed_notification_text(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> String {
+    let preview = match event.next_datetime {
+        Some(next) => {
+            next_launches_preview(event, now, next - chrono::Duration::seconds(1), tz, loc)
+        }
+        None => String::new(),
+    };
+    format!("{}{}", event.message, preview)
 }
 
 #[cfg(test)]
@@ -274,6 +295,52 @@ mod tests {
         let kb = expanded_notification_keyboard(42, true, false);
         assert_eq!(kb.inline_keyboard[0].len(), 4);
         assert_eq!(kb.inline_keyboard[1].len(), 4);
+    }
+
+    #[test]
+    fn dismissed_notification_text_previews_from_new_next_datetime() {
+        use crate::types::{NextSource, Repetition, TimeUnit};
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        // Daily repetition, already dismissed past tomorrow: next is 2026-06-24.
+        let next = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 6, 24).unwrap(),
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+        );
+        // A `10:00 every 1 day` event: time + repetition, like the parser builds.
+        let mut event = sample_event("<b>call</b> the office", Some(next));
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        event.source = Some(NextSource::Repetition);
+
+        // The preview leads with the post-dismiss `next_datetime` itself, not
+        // the occurrence the dismiss skipped.
+        let text = dismissed_notification_text(&event, now, Tz::UTC, &EN);
+        assert!(text.starts_with("<b>call</b> the office\n\n"));
+        assert!(text.contains("Next launches:"));
+        let first_bullet = text
+            .lines()
+            .find(|l| l.starts_with('▪'))
+            .expect("preview bullet");
+        assert!(
+            first_bullet.contains("24.06.2026"),
+            "first preview entry should be the new next_datetime: {first_bullet}"
+        );
+        assert!(!text.contains("23.06.2026"));
+
+        // Nothing further to fire: the bare body, like a one-off fire.
+        let inactive = sample_event("done", None);
+        assert_eq!(
+            dismissed_notification_text(&inactive, now, Tz::UTC, &EN),
+            "done"
+        );
     }
 
     #[test]

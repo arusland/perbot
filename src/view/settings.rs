@@ -117,7 +117,7 @@ mod tests {
 
         let on = settings_message(NaiveTime::from_hms_opt(8, 0, 0));
         assert!(on.contains("Morning digest: <b>on, 08:00</b>"));
-        assert!(on.contains("/today"));
+        assert!(on.contains("today's events"));
     }
 
     #[test]

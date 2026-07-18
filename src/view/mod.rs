@@ -29,7 +29,8 @@ pub use message::{
     welcome_message,
 };
 pub use notification::{
-    DEFAULT_SNOOZE_MINUTES, expanded_notification_keyboard, fired_message, notification_keyboard,
+    DEFAULT_SNOOZE_MINUTES, dismissed_notification_text, expanded_notification_keyboard,
+    fired_message, notification_keyboard,
 };
 pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
