@@ -425,153 +425,194 @@ async fn message_handler(
         return Ok(());
     };
 
-    let reply_text = if let Some(text) = msg.text() {
-        // Resolve the chat's locale once; every parse/format below threads it.
-        let loc = perbot::locale::for_chat(msg.chat.id.0);
-        // Store every incoming user message
-        let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
-            Ok(id) => id,
-            Err(e) => {
-                log::error!("Failed to save message: {}", e);
-                return Ok(());
-            }
+    if let Some(text) = msg.text() {
+        handle_text_message(
+            &bot,
+            &msg,
+            text,
+            &provider,
+            admin_id,
+            &bot_username,
+            is_admin,
+            tz,
+            &pending_import,
+            &pending_msg,
+            &pending_edit,
+        )
+        .await?;
+    } else {
+        bot.send_html(
+            msg.chat.id,
+            "⚠️ Received an unknown message type!\n\nSee /help for the examples.",
+            None,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Handles an incoming text message: stores it, dispatches commands and the
+/// `/event<id>` view, completes the pending edit/body flows, or parses a new
+/// event (replying with the unparsable notice when nothing matches).
+// The dispatch context arrives as individual values, so the arg count is expected.
+#[allow(clippy::too_many_arguments)]
+async fn handle_text_message(
+    bot: &TgBot,
+    msg: &Message,
+    text: &str,
+    provider: &EventProvider,
+    admin_id: ChatId,
+    bot_username: &str,
+    is_admin: bool,
+    tz: chrono_tz::Tz,
+    pending_import: &PendingImport,
+    pending_msg: &PendingMessage,
+    pending_edit: &PendingEdit,
+) -> anyhow::Result<()> {
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
+    // Resolve the chat's locale once; every parse/format below threads it.
+    let loc = perbot::locale::for_chat(msg.chat.id.0);
+    // Store every incoming user message
+    let msg_id = match provider.insert_message(user_id, msg.chat.id.0, text) {
+        Ok(id) => id,
+        Err(e) => {
+            log::error!("Failed to save message: {}", e);
+            return Ok(());
+        }
+    };
+    if let Ok(cmd) = Command::parse(text, bot_username) {
+        let ctx = CmdContext {
+            bot,
+            chat_id: msg.chat.id,
+            tz,
+            provider,
+            admin_id,
+            is_admin,
+            pending_import,
         };
-        if let Ok(cmd) = Command::parse(text, &bot_username) {
-            let ctx = CmdContext {
-                bot: &bot,
-                chat_id: msg.chat.id,
-                tz,
-                provider: &provider,
-                admin_id,
-                is_admin,
-                pending_import: &pending_import,
-            };
-            cmd.handle(ctx).await?;
+        cmd.handle(ctx).await?;
+        return Ok(());
+    }
+
+    // `/event<id>` (no space before the id) opens the single-event detail view.
+    // It can't go through the `BotCommands` parser, so it is matched manually.
+    if let Some(id) = commands::parse_event_command(text, bot_username) {
+        commands::handle_event_view(bot, provider, msg.chat.id, id).await?;
+        return Ok(());
+    }
+
+    // Completing a pending edit (the chat tapped Edit on an `/event<id>` view):
+    // the next message replaces the event's time and message. A time-only or
+    // unparsable reply re-prompts instead of applying.
+    let editing = pending_edit.lock().unwrap().get(&msg.chat.id.0).copied();
+    if let Some(event_id) = editing {
+        // Re-load the event once and verify it still belongs to this chat; a
+        // pending edit can outlive the event (deleted meanwhile).
+        let Some(old) = provider
+            .get_event(event_id)?
+            .filter(|e| e.chat_id == msg.chat.id.0)
+        else {
+            pending_edit.lock().unwrap().remove(&msg.chat.id.0);
+            bot.send_text(msg.chat.id, "Event not found.", None).await?;
             return Ok(());
-        }
-
-        // `/event<id>` (no space before the id) opens the single-event detail view.
-        // It can't go through the `BotCommands` parser, so it is matched manually.
-        if let Some(id) = commands::parse_event_command(text, &bot_username) {
-            commands::handle_event_view(&bot, &provider, msg.chat.id, id).await?;
-            return Ok(());
-        }
-
-        // Completing a pending edit (the chat tapped Edit on an `/event<id>` view):
-        // the next message replaces the event's time and message. A time-only or
-        // unparsable reply re-prompts instead of applying.
-        let editing = pending_edit.lock().unwrap().get(&msg.chat.id.0).copied();
-        if let Some(event_id) = editing {
-            // Re-load the event once and verify it still belongs to this chat; a
-            // pending edit can outlive the event (deleted meanwhile).
-            let Some(old) = provider
-                .get_event(event_id)?
-                .filter(|e| e.chat_id == msg.chat.id.0)
-            else {
-                pending_edit.lock().unwrap().remove(&msg.chat.id.0);
-                bot.send_text(msg.chat.id, "Event not found.", None).await?;
-                return Ok(());
-            };
-
-            if let Some((mut event, spans)) = parser::parse_full(text, loc, tz) {
-                let entities = msg.parse_entities().unwrap_or_default();
-                event.id = old.id;
-                event.chat_id = old.chat_id;
-                event.created_at = old.created_at;
-                event.msg_id = msg_id;
-                event.legacy = old.legacy;
-                event.parent = old.parent;
-                let rendered = perbot::richtext::render_html(text, &spans, &entities);
-                let (clamped, truncated) = clamp_message(&rendered);
-                event.message = clamped;
-
-                let stored = provider.update_event_and_get(event)?;
-                pending_edit.lock().unwrap().remove(&msg.chat.id.0);
-                if truncated {
-                    bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
-                        .await?;
-                }
-                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, true, tz, loc).await?;
-            } else {
-                // A time-only or unparsable reply: re-prompt (keeping the pending
-                // edit) with the current input still attached.
-                let lead = if parser::parse_time_only(text, loc, tz).is_some() {
-                    view::EDIT_NEED_TEXT
-                } else {
-                    view::EDIT_NEED_TIME
-                };
-                bot.send_html(
-                    msg.chat.id,
-                    edit_prompt(lead, &old, loc),
-                    Some(view::edit_cancel_keyboard(event_id)),
-                )
-                .await?;
-            }
-            return Ok(());
-        }
-
-        // Completing a pending "send me the reminder text": once a chat is waiting
-        // for a body, the next non-command text is used verbatim as that body.
-        let pending_event = pending_msg.lock().unwrap().remove(&msg.chat.id.0);
-        if let Some(mut event) = pending_event {
-            let entities = msg.parse_entities().unwrap_or_default();
-            // The whole reply text is the body, so a single span covers all of it.
-            let span = 0..text.len();
-            let body = perbot::richtext::render_html(text, std::slice::from_ref(&span), &entities);
-            if body.is_empty() {
-                // Whitespace-only reply carries no usable body: keep waiting and
-                // re-prompt with the Cancel button.
-                pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
-                bot.send_text(msg.chat.id, view::ASK_TEXT, Some(view::cancel_keyboard()))
-                    .await?;
-                return Ok(());
-            }
-            event.chat_id = msg.chat.id.0;
-            event.msg_id = msg_id;
-            let (clamped, truncated) = clamp_message(&body);
-            event.message = clamped;
-            let stored = provider.insert_event_and_get(event)?;
-            if truncated {
-                bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
-                    .await?;
-            }
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, false, tz, loc).await?;
-            return Ok(());
-        }
+        };
 
         if let Some((mut event, spans)) = parser::parse_full(text, loc, tz) {
-            event.chat_id = msg.chat.id.0;
-            event.msg_id = msg_id;
-            // Preserve the user's formatting: render the surviving message body
-            // as an HTML fragment, re-mapping the message's entities onto it.
             let entities = msg.parse_entities().unwrap_or_default();
+            event.id = old.id;
+            event.chat_id = old.chat_id;
+            event.created_at = old.created_at;
+            event.msg_id = msg_id;
+            event.legacy = old.legacy;
+            event.parent = old.parent;
             let rendered = perbot::richtext::render_html(text, &spans, &entities);
             let (clamped, truncated) = clamp_message(&rendered);
             event.message = clamped;
 
-            let stored = provider.insert_event_and_get(event)?;
+            let stored = provider.update_event_and_get(event)?;
+            pending_edit.lock().unwrap().remove(&msg.chat.id.0);
             if truncated {
                 bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
+            send_schedule_confirmation(bot, msg.chat.id, &stored, text, true, tz, loc).await?;
+        } else {
+            // A time-only or unparsable reply: re-prompt (keeping the pending
+            // edit) with the current input still attached.
+            let lead = if parser::parse_time_only(text, loc, tz).is_some() {
+                view::EDIT_NEED_TEXT
+            } else {
+                view::EDIT_NEED_TIME
+            };
+            bot.send_html(
+                msg.chat.id,
+                edit_prompt(lead, &old, loc),
+                Some(view::edit_cancel_keyboard(event_id)),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
 
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, false, tz, loc).await?;
-            return Ok(());
-        } else if let Some(event) = parser::parse_time_only(text, loc, tz) {
-            // A time was given but no reminder body: hold the parsed event and ask
-            // for the text, offering a Cancel button.
+    // Completing a pending "send me the reminder text": once a chat is waiting
+    // for a body, the next non-command text is used verbatim as that body.
+    let pending_event = pending_msg.lock().unwrap().remove(&msg.chat.id.0);
+    if let Some(mut event) = pending_event {
+        let entities = msg.parse_entities().unwrap_or_default();
+        // The whole reply text is the body, so a single span covers all of it.
+        let span = 0..text.len();
+        let body = perbot::richtext::render_html(text, std::slice::from_ref(&span), &entities);
+        if body.is_empty() {
+            // Whitespace-only reply carries no usable body: keep waiting and
+            // re-prompt with the Cancel button.
             pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
             bot.send_text(msg.chat.id, view::ASK_TEXT, Some(view::cancel_keyboard()))
                 .await?;
             return Ok(());
-        } else {
-            view::unparsable_message(text)
         }
-    } else {
-        "⚠️ Received an unknown message type!\n\nSee /help for the examples.".to_string()
-    };
+        event.chat_id = msg.chat.id.0;
+        event.msg_id = msg_id;
+        let (clamped, truncated) = clamp_message(&body);
+        event.message = clamped;
+        let stored = provider.insert_event_and_get(event)?;
+        if truncated {
+            bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
+                .await?;
+        }
+        send_schedule_confirmation(bot, msg.chat.id, &stored, text, false, tz, loc).await?;
+        return Ok(());
+    }
 
-    bot.send_html(msg.chat.id, reply_text, None).await?;
+    if let Some((mut event, spans)) = parser::parse_full(text, loc, tz) {
+        event.chat_id = msg.chat.id.0;
+        event.msg_id = msg_id;
+        // Preserve the user's formatting: render the surviving message body
+        // as an HTML fragment, re-mapping the message's entities onto it.
+        let entities = msg.parse_entities().unwrap_or_default();
+        let rendered = perbot::richtext::render_html(text, &spans, &entities);
+        let (clamped, truncated) = clamp_message(&rendered);
+        event.message = clamped;
+
+        let stored = provider.insert_event_and_get(event)?;
+        if truncated {
+            bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
+                .await?;
+        }
+
+        send_schedule_confirmation(bot, msg.chat.id, &stored, text, false, tz, loc).await?;
+        return Ok(());
+    } else if let Some(event) = parser::parse_time_only(text, loc, tz) {
+        // A time was given but no reminder body: hold the parsed event and ask
+        // for the text, offering a Cancel button.
+        pending_msg.lock().unwrap().insert(msg.chat.id.0, event);
+        bot.send_text(msg.chat.id, view::ASK_TEXT, Some(view::cancel_keyboard()))
+            .await?;
+        return Ok(());
+    } else {
+        bot.send_html(msg.chat.id, view::unparsable_message(text), None)
+            .await?;
+    }
 
     Ok(())
 }
