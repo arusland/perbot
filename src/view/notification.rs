@@ -151,7 +151,7 @@ pub fn fired_message(
     let preview = next_launches_preview(event, now, due, tz, loc);
     TgMessage {
         chat_id: event.chat_id,
-        text: format!("{}{}", event.message, preview),
+        text: format!("⏰ {}{}", event.message, preview),
         reply_markup: Some(notification_keyboard(
             event.id,
             post_fire_active,
@@ -179,7 +179,7 @@ pub fn dismissed_notification_text(
         }
         None => String::new(),
     };
-    format!("{}{}", event.message, preview)
+    format!("⏰ {}{}", event.message, preview)
 }
 
 #[cfg(test)]
@@ -323,7 +323,7 @@ mod tests {
         // The preview leads with the post-dismiss `next_datetime` itself, not
         // the occurrence the dismiss skipped.
         let text = dismissed_notification_text(&event, now, Tz::UTC, &EN);
-        assert!(text.starts_with("<b>call</b> the office\n\n"));
+        assert!(text.starts_with("⏰ <b>call</b> the office\n\n"));
         assert!(text.contains("Next launches:"));
         let first_bullet = text
             .lines()
@@ -339,7 +339,7 @@ mod tests {
         let inactive = sample_event("done", None);
         assert_eq!(
             dismissed_notification_text(&inactive, now, Tz::UTC, &EN),
-            "done"
+            "⏰ done"
         );
     }
 
@@ -358,7 +358,7 @@ mod tests {
         // One-off event: no launches preview between the body and the hint.
         let msg = fired_message(&event, due, due, true, false, 5, Tz::UTC, &EN);
         assert_eq!(msg.chat_id, 7);
-        assert_eq!(msg.text, "<b>call</b> the office");
+        assert_eq!(msg.text, "⏰ <b>call</b> the office");
         // The keyboard reflects the *post-fire* flags handed in: active → the
         // dismiss row is present (collapsed snooze row + dismiss + Edit/Delete).
         let kb = msg.reply_markup.expect("notification keyboard");
