@@ -78,7 +78,6 @@ fn fetch_page(
 pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
     let tz = ctx.tz;
     let PageResponse { events, total } = fetch_page(kind, ctx.provider, ctx.chat_id.0, tz, 0)?;
-    let loc = crate::locale::for_chat(ctx.chat_id.0);
     let (text, total_pages) = format_page_at(
         &events,
         total,
@@ -88,7 +87,7 @@ pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow:
         kind.title(),
         kind.empty(),
         kind.row_style(),
-        loc,
+        ctx.loc,
     );
 
     if let Err(e) = ctx

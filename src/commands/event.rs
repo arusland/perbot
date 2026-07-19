@@ -39,27 +39,23 @@ pub fn parse_event_command(text: &str, bot_username: &str) -> Option<i64> {
 /// line, the full rich-text message, and the upcoming-launches preview. The event is
 /// loaded by id and shown only when it belongs to the requesting chat (ids are
 /// user-influenceable), otherwise the chat is told the event was not found.
-pub async fn handle_event_view(
-    bot: &TgBot,
-    provider: &EventProvider,
-    chat_id: ChatId,
-    id: i64,
-) -> anyhow::Result<()> {
-    match provider.get_event(id)? {
-        Some(event) if event.chat_id == chat_id.0 => {
+pub async fn handle_event_view(ctx: &super::CmdContext<'_>, id: i64) -> anyhow::Result<()> {
+    match ctx.provider.get_event(id)? {
+        Some(event) if event.chat_id == ctx.chat_id.0 => {
             let now = Utc::now().naive_utc();
-            let loc = crate::locale::for_chat(chat_id.0);
-            let tz = provider.tz_or_utc(chat_id.0);
             let is_repetition = event.source == Some(NextSource::Repetition);
-            bot.send_html(
-                chat_id,
-                event_detail(&event, now, tz, loc),
-                Some(event_actions_keyboard(id, event.active, is_repetition)),
-            )
-            .await?;
+            ctx.bot
+                .send_html(
+                    ctx.chat_id,
+                    event_detail(&event, now, ctx.tz, ctx.loc),
+                    Some(event_actions_keyboard(id, event.active, is_repetition)),
+                )
+                .await?;
         }
         _ => {
-            bot.send_text(chat_id, "Event not found.", None).await?;
+            ctx.bot
+                .send_text(ctx.chat_id, "Event not found.", None)
+                .await?;
         }
     }
     Ok(())
