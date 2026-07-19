@@ -280,8 +280,8 @@ pub fn event_actions_keyboard(
 }
 
 /// The single Cancel button shown while the chat is editing an event (callback
-/// `eid:<id>:edno`, drops the pending edit). Public so `main`'s edit-completion
-/// re-prompts can reuse it.
+/// `eid:<id>:edno`, drops the pending edit). Public so the edit-completion
+/// re-prompts in [`crate::pending`] can reuse it.
 pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
         "Cancel",
