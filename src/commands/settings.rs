@@ -3,15 +3,17 @@
 //! as a new message (keeping the /events list or /help reply it was pressed
 //! under), `st:s` re-renders it in place (the picker's Back button),
 //! `st:on`/`st:off` toggle the morning digest, `st:t` opens the hour picker,
-//! `st:h:<H>` sets the digest hour (which also turns the digest on). Every
-//! change applies to the chat the pressed message lives in — the same
-//! authority model as list pagination.
+//! `st:h:<H>` sets the digest hour (which also turns the digest on), `st:tz`
+//! swaps the menu for the timezone region picker (the `tz:` flow takes over
+//! from there). Every change applies to the chat the pressed message lives in
+//! — the same authority model as list pagination.
 
 use super::CmdContext;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::view::{
-    DEFAULT_DIGEST_HOUR, DIGEST_TIME_ASK, digest_time_keyboard, settings_keyboard, settings_message,
+    DEFAULT_DIGEST_HOUR, DIGEST_TIME_ASK, digest_time_keyboard, settings_keyboard,
+    settings_message, timezone_current_message, timezone_regions_keyboard,
 };
 use chrono::NaiveTime;
 use teloxide::types::{CallbackQuery, ChatId, MessageId};
@@ -30,6 +32,8 @@ enum SettingsAction {
     PickTime,
     /// `st:h:<H>` — set the digest hour (0..=23).
     SetHour(u32),
+    /// `st:tz` — swap the menu for the timezone region picker.
+    PickTimezone,
 }
 
 /// Decodes an `st:` callback payload. `None` for anything malformed.
@@ -40,6 +44,7 @@ fn parse_settings_callback(data: &str) -> Option<SettingsAction> {
         "on" => Some(SettingsAction::DigestOn),
         "off" => Some(SettingsAction::DigestOff),
         "t" => Some(SettingsAction::PickTime),
+        "tz" => Some(SettingsAction::PickTimezone),
         rest => {
             let hour = rest.strip_prefix("h:")?.parse::<u32>().ok()?;
             (hour < 24).then_some(SettingsAction::SetHour(hour))
@@ -54,10 +59,11 @@ async fn send_settings_menu(
     chat_id: ChatId,
 ) -> anyhow::Result<()> {
     let digest = provider.digest_time(chat_id.0)?;
+    let tz = provider.get_timezone(chat_id.0)?;
     bot.send_html(
         chat_id,
-        settings_message(digest),
-        Some(settings_keyboard(digest)),
+        settings_message(digest, tz),
+        Some(settings_keyboard(digest, tz)),
     )
     .await?;
     Ok(())
@@ -76,12 +82,13 @@ async fn render_settings_in_place(
     message_id: MessageId,
 ) -> anyhow::Result<()> {
     let digest = provider.digest_time(chat_id.0)?;
+    let tz = provider.get_timezone(chat_id.0)?;
     if let Err(e) = bot
         .edit_html(
             chat_id,
             message_id,
-            settings_message(digest),
-            Some(settings_keyboard(digest)),
+            settings_message(digest, tz),
+            Some(settings_keyboard(digest, tz)),
         )
         .await
     {
@@ -146,6 +153,21 @@ pub async fn handle_settings_callback(
                 );
             }
         }
+        Some(SettingsAction::PickTimezone) => {
+            bot.answer_callback(q.id, None).await?;
+            let current = provider.get_timezone(chat_id.0)?;
+            if let Err(e) = bot
+                .edit_html(
+                    chat_id,
+                    message_id,
+                    timezone_current_message(current),
+                    Some(timezone_regions_keyboard()),
+                )
+                .await
+            {
+                log::warn!("Failed to show timezone picker for chat {}: {e}", chat_id.0);
+            }
+        }
         Some(SettingsAction::SetHour(hour)) => {
             let time = NaiveTime::from_hms_opt(hour, 0, 0).unwrap();
             provider.set_digest_time(chat_id.0, Some(time))?;
@@ -185,6 +207,10 @@ mod tests {
         assert!(matches!(
             parse_settings_callback("st:t"),
             Some(SettingsAction::PickTime)
+        ));
+        assert!(matches!(
+            parse_settings_callback("st:tz"),
+            Some(SettingsAction::PickTimezone)
         ));
         assert!(matches!(
             parse_settings_callback("st:h:0"),

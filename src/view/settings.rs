@@ -1,17 +1,22 @@
 //! The Settings menu, reached from the `⚙ Settings` button under the /events
-//! list and the /help reply. Today it holds one setting: the **morning
-//! digest** — a daily message with today's events (the `/today` list), off by
-//! default, sent at a chat-local time the user picks (whole hours, default
-//! [`DEFAULT_DIGEST_HOUR`]).
+//! list and the /help reply. It holds the **morning digest** — a daily message
+//! with today's events (the `/today` list), off by default, sent at a
+//! chat-local time the user picks (whole hours, default
+//! [`DEFAULT_DIGEST_HOUR`]) — and shows the chat's **timezone** with a button
+//! into the region picker.
 //!
 //! Callback envelope `st:`: [`SETTINGS_OPEN_DATA`] (`st:o`) opens the menu as
 //! a new message; `st:s` re-renders it in place (the picker's Back button);
 //! `st:on` / `st:off` toggle the digest; `st:t` opens the hour picker;
-//! `st:h:<H>` picks the digest hour. The setting applies to the chat the
-//! pressed message lives in — the same authority model as list pagination.
+//! `st:h:<H>` picks the digest hour; `st:tz` swaps in the timezone region
+//! picker (the `tz:` flow takes over from there). The setting applies to the
+//! chat the pressed message lives in — the same authority model as list
+//! pagination.
 
 use chrono::NaiveTime;
+use chrono_tz::Tz;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::utils::html;
 
 /// Digest hour applied when the morning digest is switched on (08:00).
 pub const DEFAULT_DIGEST_HOUR: u32 = 8;
@@ -30,23 +35,29 @@ pub const DIGEST_NOTE: &str = "<i>This message was sent because the morning dige
 const DIGEST_HOURS_PER_ROW: usize = 6;
 
 /// The Settings menu text (HTML): the morning digest's state — its chat-local
-/// time when on — and what the digest does.
-pub fn settings_message(digest: Option<NaiveTime>) -> String {
+/// time when on — what the digest does, and the chat's timezone.
+pub fn settings_message(digest: Option<NaiveTime>, tz: Option<Tz>) -> String {
     let state = match digest {
         Some(t) => format!("<b>on, {}</b>", t.format("%H:%M")),
         None => "<b>off</b>".to_string(),
     };
+    let tz_state = match tz {
+        Some(tz) => format!("<b>{}</b>", html::escape(tz.name())),
+        None => "<b>not set</b>".to_string(),
+    };
     format!(
         "⚙️ <b>Settings</b>\n\n\
          🌅 Morning digest: {state}\n\
-         A daily message with today's events."
+         A daily message with today's events.\n\n\
+         🌍 Timezone: {tz_state}"
     )
 }
 
-/// The Settings menu keyboard: a digest on/off toggle, plus the time button
-/// (opening the hour picker) while the digest is on.
-pub fn settings_keyboard(digest: Option<NaiveTime>) -> InlineKeyboardMarkup {
-    let rows = match digest {
+/// The Settings menu keyboard: a digest on/off toggle, the time button
+/// (opening the hour picker) while the digest is on, and the timezone button
+/// (opening the region picker).
+pub fn settings_keyboard(digest: Option<NaiveTime>, tz: Option<Tz>) -> InlineKeyboardMarkup {
+    let mut rows = match digest {
         Some(t) => vec![
             vec![InlineKeyboardButton::callback(
                 "🌅 Turn morning digest off",
@@ -62,6 +73,11 @@ pub fn settings_keyboard(digest: Option<NaiveTime>) -> InlineKeyboardMarkup {
             "st:on",
         )]],
     };
+    let tz_label = match tz {
+        Some(tz) => format!("🌍 Timezone: {}", tz.name()),
+        None => "🌍 Set timezone".to_string(),
+    };
+    rows.push(vec![InlineKeyboardButton::callback(tz_label, "st:tz")]);
     InlineKeyboardMarkup::new(rows)
 }
 
@@ -114,13 +130,15 @@ mod tests {
 
     #[test]
     fn settings_message_shows_digest_state() {
-        let off = settings_message(None);
+        let off = settings_message(None, None);
         assert!(off.starts_with("⚙️ <b>Settings</b>"));
         assert!(off.contains("Morning digest: <b>off</b>"));
+        assert!(off.contains("Timezone: <b>not set</b>"));
 
-        let on = settings_message(NaiveTime::from_hms_opt(8, 0, 0));
+        let on = settings_message(NaiveTime::from_hms_opt(8, 0, 0), Some(Tz::Europe__Berlin));
         assert!(on.contains("Morning digest: <b>on, 08:00</b>"));
         assert!(on.contains("today's events"));
+        assert!(on.contains("Timezone: <b>Europe/Berlin</b>"));
     }
 
     #[test]
@@ -130,13 +148,19 @@ mod tests {
 
     #[test]
     fn settings_keyboard_toggles_and_offers_time_when_on() {
-        assert_eq!(datas(&settings_keyboard(None)), vec!["st:on"]);
+        assert_eq!(
+            datas(&settings_keyboard(None, None)),
+            vec!["st:on", "st:tz"]
+        );
 
-        let on = settings_keyboard(NaiveTime::from_hms_opt(9, 0, 0));
-        assert_eq!(datas(&on), vec!["st:off", "st:t"]);
+        let on = settings_keyboard(NaiveTime::from_hms_opt(9, 0, 0), Some(Tz::Europe__Berlin));
+        assert_eq!(datas(&on), vec!["st:off", "st:t", "st:tz"]);
         // The time button carries the current time in its label.
         let time_label = &on.inline_keyboard[1][0].text;
         assert!(time_label.contains("09:00"), "{time_label}");
+        // The timezone button carries the current zone in its label.
+        let tz_label = &on.inline_keyboard[2][0].text;
+        assert!(tz_label.contains("Europe/Berlin"), "{tz_label}");
     }
 
     #[test]
