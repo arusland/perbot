@@ -16,7 +16,7 @@ ssh_key: ~/.ssh/id_rsa
 targets:
   dev:
     hosts:
-      - {host: "bothost", user: "root", name: "dev"}
+      - {host: "arusdev3", user: "root", name: "dev"}
   prod:
     hosts:
       - {host: "bothost", user: "root", name: "prod"}
