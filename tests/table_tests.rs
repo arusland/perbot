@@ -262,6 +262,7 @@ fn run_table(table_idx: usize, table: &Table) {
             username: None,
             first_name: None,
             last_name: None,
+            banned: false,
             updated_at: None,
             created_at: None,
         })

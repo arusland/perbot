@@ -199,7 +199,7 @@ async fn callback_handler_safe(
     let bot_for_err = bot.clone();
     let callback_id = q.id.clone();
 
-    if let Err(e) = callback_handler(bot, q, provider, pending_msg, pending_edit).await {
+    if let Err(e) = callback_handler(bot, q, provider, admin_id, pending_msg, pending_edit).await {
         log::error!("callback_handler failed: {}", e);
 
         // Best-effort notifications: ignore secondary send errors so reporting a
@@ -219,19 +219,43 @@ async fn callback_handler_safe(
     Ok(())
 }
 
+/// Whether a chat's incoming updates must be dropped (the `chats.banned`
+/// flag). A DB error falls open (logged) so input isn't silently lost.
+fn is_banned_checked(provider: &EventProvider, chat_id: i64) -> bool {
+    match provider.is_banned(chat_id) {
+        Ok(banned) => banned,
+        Err(e) => {
+            log::error!("Failed to check banned flag for chat {}: {}", chat_id, e);
+            false
+        }
+    }
+}
+
 /// Handles an inline-button callback (list pagination for `/events`, `/today`,
 /// `/tomorrow`, `/week`, `/month`).
 async fn callback_handler(
     bot: TgBot,
     q: CallbackQuery,
     provider: EventProvider,
+    admin_id: ChatId,
     pending_msg: PendingMessage,
     pending_edit: PendingEdit,
 ) -> anyhow::Result<()> {
+    // Banned chats' button presses are ignored like their messages: no answer
+    // (the client spinner times out), only a log line. The admin is exempt,
+    // mirroring the message gate.
+    if q.from.id.0 as i64 != admin_id.0
+        && let Some(message) = q.regular_message()
+        && is_banned_checked(&provider, message.chat.id.0)
+    {
+        log::warn!("Ignoring callback from banned chat {}", message.chat.id.0);
+        return Ok(());
+    }
+
     // `eid:<id>:…` is the event-specific envelope (snooze / delete / edit); `pm:`
     // cancels a pending "send me the reminder text" prompt; `tz:` is the timezone
-    // picker; `st:` is the Settings menu; everything else is list pagination
-    // (`<tag>:<page>`).
+    // picker; `st:` is the Settings menu; `us:` is the admin ban toggle;
+    // everything else is list pagination (`<tag>:<page>`).
     match q.data.as_deref() {
         Some(d) if d.starts_with("eid:") => {
             commands::handle_event_callback(&bot, &provider, &pending_edit, q).await
@@ -244,6 +268,9 @@ async fn callback_handler(
         }
         Some(d) if d.starts_with("st:") => {
             commands::handle_settings_callback(&bot, &provider, q).await
+        }
+        Some(d) if d.starts_with("us:") => {
+            commands::handle_user_callback(&bot, &provider, admin_id, q).await
         }
         _ => commands::handle_list_callback(&bot, &provider, q).await,
     }
@@ -321,6 +348,17 @@ async fn message_handler(
     pending_msg: PendingMessage,
     pending_edit: PendingEdit,
 ) -> anyhow::Result<()> {
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
+    let is_admin = user_id == Some(admin_id.0);
+
+    // Banned chats are ignored outright — no reply, no chat upsert, only a log
+    // line. The admin is exempt so a mis-set flag can't lock the bot's owner
+    // out.
+    if !is_admin && is_banned_checked(&provider, msg.chat.id.0) {
+        log::warn!("Ignoring message from banned chat {}", msg.chat.id.0);
+        return Ok(());
+    }
+
     // Save/update chat info
     let chat_info = ChatInfo::from_chat(&msg.chat);
     if let Err(e) = provider.upsert_chat(&chat_info) {
@@ -343,9 +381,6 @@ async fn message_handler(
         Ok(false) => {}
         Err(e) => log::error!("Failed to activate chat {}: {}", msg.chat.id.0, e),
     }
-
-    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64);
-    let is_admin = user_id == Some(admin_id.0);
 
     // Legacy import: the admin sends the zip after `/import <user_id> <timezone>`.
     let pending_target = *pending_import.lock().unwrap();
@@ -439,6 +474,13 @@ async fn handle_text_message(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
     // It can't go through the `BotCommands` parser, so it is matched manually.
     if let Some(id) = commands::parse_event_command(ctx.text, ctx.bot_username) {
         commands::handle_event_view(ctx, id).await?;
+        return Ok(());
+    }
+
+    // `/user<id>` (admin-only, no space before the id either) opens the stored
+    // chat-info card with the ban toggle.
+    if let Some(id) = commands::parse_user_command(ctx.text, ctx.bot_username) {
+        commands::handle_user_view(ctx, id).await?;
         return Ok(());
     }
 

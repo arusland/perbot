@@ -365,6 +365,7 @@ mod tests {
             username: Some("jo_hn".into()),
             first_name: Some("Jo <b>".into()),
             last_name: Some("Doe & Co".into()),
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -383,6 +384,7 @@ mod tests {
             username: None,
             first_name: None,
             last_name: None,
+            banned: false,
             updated_at: None,
             created_at: None,
         };

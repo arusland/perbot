@@ -71,6 +71,35 @@ impl EventProvider {
         inner.storage.upsert_chat(chat)
     }
 
+    /// Retrieves a stored chat by id (see `EventStorage::get_chat`).
+    pub fn get_chat(&self, chat_id: i64) -> Result<Option<ChatInfo>> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.get_chat(chat_id)
+    }
+
+    /// Sets a chat's `banned` flag (see `EventStorage::set_banned`). Banning
+    /// changes the firing predicate — the firing-path queries skip banned
+    /// chats — so the next-event cache is reloaded: a ban drops the chat's
+    /// events from scheduling immediately, an unban restores them (a past-due
+    /// backlog fires right away, like activation).
+    pub fn set_banned(&self, chat_id: i64, banned: bool) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.storage.set_banned(chat_id, banned)?;
+        Self::load_next_event(&mut inner)
+    }
+
+    /// Returns whether a chat is banned; unknown chats are not.
+    pub fn is_banned(&self, chat_id: i64) -> Result<bool> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.is_banned(chat_id)
+    }
+
+    /// Counts a chat's active events (the `/events` list total).
+    pub fn count_active_events(&self, chat_id: i64) -> Result<usize> {
+        let inner = self.inner.lock().unwrap();
+        inner.storage.count_active_by_chat(chat_id)
+    }
+
     /// Inserts or updates a per-chat setting (see `EventStorage::set_setting`).
     pub fn set_setting(&self, chat_id: i64, name: &str, value: &str) -> Result<()> {
         let inner = self.inner.lock().unwrap();
@@ -917,6 +946,7 @@ mod tests {
                 username: None,
                 first_name: None,
                 last_name: None,
+                banned: false,
                 updated_at: None,
                 created_at: None,
             })
@@ -1406,6 +1436,31 @@ mod tests {
 
         // Any further message is a no-op.
         assert!(!provider.activate_chat(chat_id).unwrap());
+    }
+
+    #[test]
+    fn set_banned_gates_firing_and_reloads_cache() {
+        use chrono::NaiveTime;
+        let chat_id = 702;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.date = NaiveDate::from_ymd_opt(2099, 1, 1);
+        event.year_explicit = true;
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2098, 1, 1, 0, 0, 0))
+            .unwrap();
+        assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
+
+        // Banning drops the chat's events from the firing cache immediately…
+        provider.set_banned(chat_id, true).unwrap();
+        assert!(provider.is_banned(chat_id).unwrap());
+        assert!(provider.get_next_event().is_none());
+
+        // …and unbanning restores them.
+        provider.set_banned(chat_id, false).unwrap();
+        assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
     }
 
     #[test]

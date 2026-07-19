@@ -415,7 +415,9 @@ pub enum MonthlyPattern {
 
 /// Chat information. Used both for upserting and for reading from the database.
 /// `updated_at` and `created_at` are `None` when constructing a value to upsert
-/// and `Some` when reading back from the database.
+/// and `Some` when reading back from the database. `banned` is admin-set (never
+/// derived from Telegram data): the upsert ignores it, only
+/// `EventStorage::set_banned` changes it.
 #[derive(Debug, Clone)]
 pub struct ChatInfo {
     pub id: i64,
@@ -424,6 +426,7 @@ pub struct ChatInfo {
     pub username: Option<String>,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    pub banned: bool,
     pub updated_at: Option<NaiveDateTime>,
     pub created_at: Option<NaiveDateTime>,
 }
@@ -463,6 +466,7 @@ impl ChatInfo {
             username,
             first_name,
             last_name,
+            banned: false,
             updated_at: None,
             created_at: None,
         }

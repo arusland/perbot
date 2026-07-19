@@ -126,14 +126,16 @@ pub const DIGEST_OFF: &str = "off";
 /// arrives the next morning, not immediately).
 pub const DIGEST_SENT_SETTING: &str = "morning_digest_sent";
 
-/// WHERE fragment restricting an event query to activated chats (the
-/// [`ACTIVATED_SETTING`] setting present and `"true"`). Applied only to the
-/// firing-path queries — `get_next_event`, `get_missed_events`,
-/// `get_events_at` — so events of never-registered (setting absent) or
-/// deactivated (`"false"`) chats sit untouched. Interactive per-chat queries
-/// stay unfiltered: replying to a chat implies it already registered.
-const ACTIVATED_ONLY: &str = "EXISTS (SELECT 1 FROM settings s \
-     WHERE s.chat_id = e.chat_id AND s.name = 'activated' AND s.value = 'true')";
+/// WHERE fragment restricting an event query to fireable chats: activated
+/// (the [`ACTIVATED_SETTING`] setting present and `"true"`) and not banned.
+/// Applied only to the firing-path queries — `get_next_event`,
+/// `get_missed_events`, `get_events_at` — so events of never-registered
+/// (setting absent), deactivated (`"false"`), or banned chats sit untouched.
+/// Interactive per-chat queries stay unfiltered: replying to a chat implies it
+/// already registered.
+const FIREABLE_ONLY: &str = "EXISTS (SELECT 1 FROM settings s \
+     WHERE s.chat_id = e.chat_id AND s.name = 'activated' AND s.value = 'true') \
+     AND EXISTS (SELECT 1 FROM chats c WHERE c.id = e.chat_id AND c.banned = 0)";
 
 /// SQLite-based storage for parsed events.
 pub struct EventStorage {
@@ -179,6 +181,7 @@ impl EventStorage {
                 username    TEXT,
                 first_name  TEXT,
                 last_name   TEXT,
+                banned      INTEGER NOT NULL DEFAULT 0,
                 updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 created_at  TEXT NOT NULL DEFAULT (datetime('now'))
             )",
@@ -567,10 +570,10 @@ impl EventStorage {
     }
 
     /// Returns the single nearest active event from `now`, considering only
-    /// activated chats (see [`ACTIVATED_ONLY`]).
+    /// fireable — activated, not banned — chats (see [`FIREABLE_ONLY`]).
     pub fn get_next_event(&self) -> Result<Option<EventInfo>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND {ACTIVATED_ONLY}
+            "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND {FIREABLE_ONLY}
              ORDER BY e.next_datetime ASC LIMIT 1",
             event_cols("e.next_datetime")
         ))?;
@@ -584,8 +587,8 @@ impl EventStorage {
     }
 
     /// Returns up to `limit` active events whose `next_datetime` is before `now`
-    /// (missed events), earliest first, considering only activated chats (see
-    /// [`ACTIVATED_ONLY`]). Callers batch through the backlog by rescheduling
+    /// (missed events), earliest first, considering only fireable chats (see
+    /// [`FIREABLE_ONLY`]). Callers batch through the backlog by rescheduling
     /// each batch (which removes it from this predicate) and fetching again —
     /// no offset needed.
     pub fn get_missed_events(&self, now: NaiveDateTime, limit: usize) -> Result<Vec<EventInfo>> {
@@ -593,7 +596,7 @@ impl EventStorage {
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime < ?1
-             AND {ACTIVATED_ONLY}
+             AND {FIREABLE_ONLY}
              ORDER BY e.next_datetime ASC LIMIT ?2",
             event_cols("e.next_datetime")
         ))?;
@@ -680,13 +683,13 @@ impl EventStorage {
     }
 
     /// Returns all active events with the exact given `next_datetime`,
-    /// considering only activated chats (see [`ACTIVATED_ONLY`]).
+    /// considering only fireable — activated, not banned — chats (see [`FIREABLE_ONLY`]).
     pub fn get_events_at(&self, dt: NaiveDateTime) -> Result<Vec<EventInfo>> {
         let dt_str = dt.format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {} {EVENT_FROM} WHERE e.active = 1 AND e.next_datetime = ?1
-             AND {ACTIVATED_ONLY}
+             AND {FIREABLE_ONLY}
              ORDER BY e.id ASC",
             event_cols("e.next_datetime")
         ))?;
@@ -732,6 +735,33 @@ impl EventStorage {
         Ok(())
     }
 
+    /// Sets a chat's admin-managed `banned` flag. Messages from a banned chat
+    /// are dropped at ingress (see `main`'s banned gate). A no-op for unknown
+    /// chat ids.
+    pub fn set_banned(&self, chat_id: i64, banned: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET banned = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![banned as i32, chat_id],
+        )?;
+
+        log::debug!("Chat {chat_id} banned flag set to {banned}");
+
+        Ok(())
+    }
+
+    /// Returns whether a chat is banned. Unknown chats are not banned.
+    pub fn is_banned(&self, chat_id: i64) -> Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT banned FROM chats WHERE id = ?1")?;
+        let mut rows = stmt.query(params![chat_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, i64>(0)? != 0)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Inserts or updates a per-chat setting. Overwriting an existing
     /// `(chat_id, name)` pair replaces the value and bumps `updated_at`,
     /// leaving `created_at` untouched.
@@ -752,14 +782,16 @@ impl EventStorage {
 
     /// Returns `(chat_id, stored digest time)` for every chat with the morning
     /// digest switched on (a [`DIGEST_SETTING`] value other than
-    /// [`DIGEST_OFF`]). Restricted to activated chats, mirroring the
-    /// firing-path queries: a deactivated chat gets no digests either.
+    /// [`DIGEST_OFF`]). Restricted to activated, non-banned chats, mirroring
+    /// the firing-path queries: a deactivated or banned chat gets no digests
+    /// either.
     pub fn get_digest_chats(&self) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT d.chat_id, d.value FROM settings d
              WHERE d.name = ?1 AND d.value <> ?2
                AND EXISTS (SELECT 1 FROM settings s
                     WHERE s.chat_id = d.chat_id AND s.name = 'activated' AND s.value = 'true')
+               AND EXISTS (SELECT 1 FROM chats c WHERE c.id = d.chat_id AND c.banned = 0)
              ORDER BY d.chat_id",
         )?;
 
@@ -795,7 +827,7 @@ impl EventStorage {
     /// Retrieves chat information by ID.
     pub fn get_chat(&self, id: i64) -> Result<Option<ChatInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
+            "SELECT id, chat_type, title, username, first_name, last_name, banned, updated_at, created_at
              FROM chats WHERE id = ?1",
         )?;
 
@@ -811,7 +843,7 @@ impl EventStorage {
     /// Retrieves all stored chats.
     pub fn get_all_chats(&self) -> Result<Vec<ChatInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_type, title, username, first_name, last_name, updated_at, created_at
+            "SELECT id, chat_type, title, username, first_name, last_name, banned, updated_at, created_at
              FROM chats ORDER BY updated_at DESC",
         )?;
 
@@ -823,8 +855,8 @@ impl EventStorage {
     /// Converts a database row to a ChatInfo.
     fn row_to_chat(row: &rusqlite::Row) -> rusqlite::Result<ChatInfo> {
         let chat_type_str: String = row.get(1)?;
-        let updated_str: String = row.get(6)?;
-        let created_str: String = row.get(7)?;
+        let updated_str: String = row.get(7)?;
+        let created_str: String = row.get(8)?;
 
         let chat_type = chat_type_str.parse().unwrap_or(ChatType::Private);
         let updated_at = NaiveDateTime::parse_from_str(&updated_str, "%Y-%m-%d %H:%M:%S").ok();
@@ -837,6 +869,7 @@ impl EventStorage {
             username: row.get(3)?,
             first_name: row.get(4)?,
             last_name: row.get(5)?,
+            banned: row.get::<_, i64>(6)? != 0,
             updated_at,
             created_at,
         })
@@ -934,6 +967,7 @@ mod tests {
                 username: None,
                 first_name: None,
                 last_name: None,
+                banned: false,
                 updated_at: None,
                 created_at: None,
             })
@@ -1301,6 +1335,7 @@ mod tests {
             username: Some("testuser".to_string()),
             first_name: Some("John".to_string()),
             last_name: Some("Doe".to_string()),
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -1326,6 +1361,7 @@ mod tests {
             username: Some("olduser".to_string()),
             first_name: Some("Old".to_string()),
             last_name: Some("Name".to_string()),
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -1339,6 +1375,7 @@ mod tests {
             username: Some("newuser".to_string()),
             first_name: Some("New".to_string()),
             last_name: Some("Name".to_string()),
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -1361,6 +1398,7 @@ mod tests {
             username: Some("user1".to_string()),
             first_name: Some("User".to_string()),
             last_name: Some("One".to_string()),
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -1372,6 +1410,7 @@ mod tests {
             username: None,
             first_name: None,
             last_name: None,
+            banned: false,
             updated_at: None,
             created_at: None,
         };
@@ -1381,6 +1420,40 @@ mod tests {
 
         let chats = storage.get_all_chats().unwrap();
         assert_eq!(chats.len(), 2);
+    }
+
+    #[test]
+    fn test_banned_flag_round_trips_and_survives_upsert() {
+        let storage = EventStorage::open_in_memory().unwrap();
+
+        // Unknown chats are not banned.
+        assert!(!storage.is_banned(12345).unwrap());
+
+        let chat = ChatInfo {
+            id: 12345,
+            chat_type: ChatType::Private,
+            title: None,
+            username: Some("testuser".to_string()),
+            first_name: None,
+            last_name: None,
+            banned: false,
+            updated_at: None,
+            created_at: None,
+        };
+        storage.upsert_chat(&chat).unwrap();
+        assert!(!storage.is_banned(12345).unwrap());
+        assert!(!storage.get_chat(12345).unwrap().unwrap().banned);
+
+        storage.set_banned(12345, true).unwrap();
+        assert!(storage.is_banned(12345).unwrap());
+        assert!(storage.get_chat(12345).unwrap().unwrap().banned);
+
+        // The per-message chat upsert must not reset an admin-set ban.
+        storage.upsert_chat(&chat).unwrap();
+        assert!(storage.is_banned(12345).unwrap());
+
+        storage.set_banned(12345, false).unwrap();
+        assert!(!storage.is_banned(12345).unwrap());
     }
 
     #[test]
@@ -1449,7 +1522,7 @@ mod tests {
     #[test]
     fn get_digest_chats_lists_only_enabled_activated_chats() {
         let storage = EventStorage::open_in_memory().unwrap();
-        for id in 1..=4 {
+        for id in 1..=5 {
             ensure_chat(&storage, id);
         }
 
@@ -1472,6 +1545,10 @@ mod tests {
         // Chat 4: digest on but deactivated by the admin.
         storage.set_setting(4, ACTIVATED_SETTING, "false").unwrap();
         storage.set_setting(4, DIGEST_SETTING, "07:00").unwrap();
+        // Chat 5: activated, digest on, but banned.
+        storage.set_setting(5, ACTIVATED_SETTING, "true").unwrap();
+        storage.set_setting(5, DIGEST_SETTING, "10:00").unwrap();
+        storage.set_banned(5, true).unwrap();
 
         assert_eq!(
             storage.get_digest_chats().unwrap(),
@@ -1865,6 +1942,7 @@ mod tests {
                 username: None,
                 first_name: None,
                 last_name: None,
+                banned: false,
                 updated_at: None,
                 created_at: None,
             })
@@ -1900,6 +1978,48 @@ mod tests {
         // Activation makes the chat's events eligible.
         storage.set_setting(2, ACTIVATED_SETTING, "true").unwrap();
         assert_eq!(storage.get_next_event().unwrap().unwrap().id, silent);
+        assert_eq!(
+            storage.get_events_at(dt(2026, 1, 1, 10, 0)).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_firing_queries_ignore_banned_chats() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 1);
+        ensure_chat(&storage, 2);
+        storage.set_banned(2, true).unwrap();
+        let msg1 = ensure_message(&storage, 1);
+        let msg2 = ensure_message(&storage, 2);
+
+        // The banned chat's event is strictly nearer than the other chat's.
+        let banned = storage
+            .insert_event(&event_at(2, msg2, dt(2026, 1, 1, 10, 0)))
+            .unwrap();
+        let visible = storage
+            .insert_event(&event_at(1, msg1, dt(2026, 6, 1, 10, 0)))
+            .unwrap();
+
+        // The nearer event is invisible to every firing-path query.
+        assert_eq!(storage.get_next_event().unwrap().unwrap().id, visible);
+        let missed = storage.get_missed_events(dt(2027, 1, 1, 0, 0), 10).unwrap();
+        assert_eq!(
+            missed.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![visible]
+        );
+        assert!(
+            storage
+                .get_events_at(dt(2026, 1, 1, 10, 0))
+                .unwrap()
+                .is_empty()
+        );
+        // Interactive per-chat reads stay unfiltered.
+        assert_eq!(storage.get_active_by_chat(2, 10, 0).unwrap().len(), 1);
+
+        // Unbanning makes the chat's events eligible again.
+        storage.set_banned(2, false).unwrap();
+        assert_eq!(storage.get_next_event().unwrap().unwrap().id, banned);
         assert_eq!(
             storage.get_events_at(dt(2026, 1, 1, 10, 0)).unwrap().len(),
             1

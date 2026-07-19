@@ -54,6 +54,7 @@ fn main() -> anyhow::Result<()> {
         username: Some("bench_user".into()),
         first_name: Some("Bench".into()),
         last_name: None,
+        banned: false,
         updated_at: None,
         created_at: None,
     })?;

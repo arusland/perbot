@@ -14,6 +14,7 @@ mod notification;
 mod prompt;
 mod settings;
 mod timezone;
+mod user;
 
 pub use event::{
     delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt, event_actions_keyboard,
@@ -43,6 +44,7 @@ pub use timezone::{
     TZ_ASK, TZ_REQUIRED, timezone_cities_keyboard, timezone_current_message,
     timezone_regions_keyboard, timezone_set_message,
 };
+pub use user::{user_ban_data, user_ban_keyboard, user_detail_message, user_unban_data};
 
 #[cfg(test)]
 pub(crate) mod test_support {
