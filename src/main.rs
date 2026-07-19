@@ -7,7 +7,7 @@ use perbot::state::EventProvider;
 use perbot::storage::EventStorage;
 use perbot::tgbot::TgBot;
 use perbot::types::{ChatInfo, EventInfo, NextSource, TgMessage};
-use perbot::view::{self, clamp_message, edit_prompt, scheduled_message};
+use perbot::view::{self, clamp_message, edit_prompt, scheduled_message, updated_message};
 use teloxide::{prelude::*, types::BotCommandScope, utils::command::BotCommands, utils::html};
 use tokio::sync::mpsc;
 
@@ -308,7 +308,8 @@ async fn message_handler_safe(
 }
 
 /// Confirms a freshly stored event: the captioned detail view
-/// (`view::scheduled_message`) with the same action keyboard as `/event<id>`
+/// (`view::scheduled_message`, or `view::updated_message` when `updated` —
+/// the edit-completion flow) with the same action keyboard as `/event<id>`
 /// when a launch is scheduled, or the inactive-event notice (echoing the
 /// user's `input`) with no keyboard.
 async fn send_schedule_confirmation(
@@ -316,15 +317,21 @@ async fn send_schedule_confirmation(
     chat_id: ChatId,
     stored: &EventInfo,
     input: &str,
+    updated: bool,
     tz: chrono_tz::Tz,
     loc: &dyn perbot::locale::LocaleProvider,
 ) -> anyhow::Result<()> {
     if stored.next_datetime.is_some() {
         let now = chrono::Utc::now().naive_utc();
         let is_repetition = stored.source == Some(NextSource::Repetition);
+        let text = if updated {
+            updated_message(stored, now, tz, loc)
+        } else {
+            scheduled_message(stored, now, tz, loc)
+        };
         bot.send_html(
             chat_id,
-            scheduled_message(stored, now, tz, loc),
+            text,
             Some(view::event_actions_keyboard(
                 stored.id,
                 stored.active,
@@ -484,7 +491,7 @@ async fn message_handler(
                     bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                         .await?;
                 }
-                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
+                send_schedule_confirmation(&bot, msg.chat.id, &stored, text, true, tz, loc).await?;
             } else {
                 // A time-only or unparsable reply: re-prompt (keeping the pending
                 // edit) with the current input still attached.
@@ -528,7 +535,7 @@ async fn message_handler(
                 bot.send_text(msg.chat.id, view::MESSAGE_TRUNCATED, None)
                     .await?;
             }
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, false, tz, loc).await?;
             return Ok(());
         }
 
@@ -548,7 +555,7 @@ async fn message_handler(
                     .await?;
             }
 
-            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, tz, loc).await?;
+            send_schedule_confirmation(&bot, msg.chat.id, &stored, text, false, tz, loc).await?;
             return Ok(());
         } else if let Some(event) = parser::parse_time_only(text, loc, tz) {
             // A time was given but no reminder body: hold the parsed event and ask

@@ -73,6 +73,17 @@ pub fn scheduled_message(
     detail_body(Some("✅ Event created"), event, now, tz, loc)
 }
 
+/// Confirmation sent when a pending edit is applied: the same captioned
+/// detail view as [`scheduled_message`], but titled `Event updated`.
+pub fn updated_message(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> String {
+    detail_body(Some("✅ Event updated"), event, now, tz, loc)
+}
+
 /// Confirmation sent when a snooze button creates its one-off copy: the same
 /// captioned detail view as [`scheduled_message`], but titled `Event snoozed`.
 pub fn snoozed_message(
@@ -314,6 +325,24 @@ mod tests {
         assert_eq!(
             scheduled_message(&event, now, Tz::UTC, &EN),
             "<b>✅ Event created</b>\n<b>Time: 13:05 31.12.2027, Fri (in 1d)</b>\n\nring in the new year"
+        );
+    }
+
+    #[test]
+    fn updated_message_uses_updated_caption() {
+        let now = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 30).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
+        let dt = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(13, 5, 0).unwrap(),
+        );
+        // Same body as the created confirmation, only the caption differs.
+        let event = sample_event("ring in the new year", Some(dt));
+        assert_eq!(
+            updated_message(&event, now, Tz::UTC, &EN),
+            "<b>✅ Event updated</b>\n<b>Time: 13:05 31.12.2027, Fri (in 1d)</b>\n\nring in the new year"
         );
     }
 
