@@ -43,7 +43,6 @@ pub async fn send_schedule_confirmation(
 }
 pub mod converter;
 pub mod error;
-pub mod import;
 pub mod locale;
 pub mod logger;
 pub mod parser;

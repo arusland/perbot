@@ -5,7 +5,7 @@
 //! (`YYYYMMDD_HHMMSS_mmm.alert`) is the creation datetime. The old grammar is
 //! `HH:MM [date|weekdays] [message]` with an optional `/N` period on any
 //! component (see `OLD-SPEC.md`). This module is pure and unit-tested; the
-//! Telegram/zip plumbing lives in [`crate::import`].
+//! Telegram/zip plumbing lives in [`crate::commands::import`].
 
 use std::collections::HashSet;
 

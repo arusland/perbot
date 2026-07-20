@@ -1,6 +1,5 @@
 use anyhow::Context as _;
-use perbot::commands::{self, CmdContext, Command};
-use perbot::import::{self, PendingImport};
+use perbot::commands::{self, CmdContext, Command, PendingImport};
 use perbot::parser;
 use perbot::pending::{self, PendingEdit, PendingMessage};
 use perbot::state::EventProvider;
@@ -103,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Pending legacy import target (chat id) recorded by `/import <user_id>`.
-    let pending_import: PendingImport = import::new_pending();
+    let pending_import: PendingImport = commands::new_pending();
 
     // Per-chat events awaiting a reminder body after a time-only message.
     let pending_msg: PendingMessage = pending::new_pending();

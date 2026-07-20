@@ -22,14 +22,13 @@ mod user;
 
 pub use cancel::handle_cancel_pending;
 pub use event::{handle_event_callback, handle_event_view, parse_event_command};
-pub use import::handle_import_zip;
+pub use import::{PendingImport, handle_import_zip, new_pending};
 pub use list::handle_list_callback;
 pub use settings::handle_settings_callback;
 pub use snooze::handle_snooze_callback;
 pub use timezone::handle_timezone_callback;
 pub use user::{handle_user_callback, handle_user_view, parse_user_command};
 
-use crate::import::PendingImport;
 use crate::locale::LocaleProvider;
 use crate::pending::{PendingEdit, PendingMessage};
 use crate::state::EventProvider;
