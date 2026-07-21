@@ -245,9 +245,10 @@ fn fmt_dt(dt: Option<chrono::NaiveDateTime>) -> String {
 ///
 /// A USER row whose Input starts with `!` is an *action* row, not text to parse:
 /// `!Dismiss` / `!Dismiss repetition` (case-insensitive after the `!`) invoke
-/// `EventProvider::dismiss` / `dismiss_repetition` on the current event; any
-/// other `!command` fails the table. The row's timestamp is not fed to the
-/// method (both advance from the stored `next_datetime + 1s`); the following
+/// `EventProvider::dismiss` on the current event, the latter with `repetition`
+/// set; any other `!command` fails the table. The row's timestamp goes in as
+/// `now`, which only matters for a stale stored occurrence (both otherwise
+/// advance from the stored `next_datetime + 1s`); the following
 /// SYSTEM row asserts the resulting schedule. `Dismissed`/`Inactive` outcomes
 /// both pass, `NotFound` fails.
 fn run_table(table_idx: usize, table: &Table) {
@@ -294,11 +295,9 @@ fn run_table(table_idx: usize, table: &Table) {
                             fail_at(table_idx, table, step, "no current event to dismiss", "");
                         }
                     };
-                    let outcome = if action == "dismiss" {
-                        provider.dismiss(id, CHAT_ID).unwrap()
-                    } else {
-                        provider.dismiss_repetition(id, CHAT_ID).unwrap()
-                    };
+                    let outcome = provider
+                        .dismiss(id, CHAT_ID, action != "dismiss", row.ts)
+                        .unwrap();
                     if let DismissOutcome::NotFound = outcome {
                         fail_at(
                             table_idx,

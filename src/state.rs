@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Months, NaiveDateTime, NaiveTime, Timelike, Utc};
+use chrono::{Duration, NaiveDateTime, NaiveTime, Timelike, Utc};
 use chrono_tz::Tz;
 
 use crate::error::Result;
@@ -665,19 +665,57 @@ impl EventProvider {
     /// further. Access-checks `chat_id` against the stored event (callback ids are
     /// user-influenceable). Returns [`DismissOutcome::NotFound`] for a missing or
     /// foreign id and [`DismissOutcome::Inactive`] when the event has no
-    /// `next_datetime` to advance past; otherwise persists the new schedule,
-    /// reloads the next-event cache, and returns the updated event.
-    pub fn dismiss(&self, id: i64, chat_id: i64) -> Result<DismissOutcome> {
+    /// `next_datetime` to advance past; otherwise persists the new schedule (schedule
+    /// columns only — the event's parsed time fields stay as stored), reloads the
+    /// next-event cache, and returns the updated event.
+    ///
+    /// With `repetition` set — the `/event<id>` "Dismiss repetition" action, offered
+    /// only while the current `source` is `Repetition` — the reschedule additionally
+    /// drops the `every <n> <unit>` interval, so the next occurrence is the next
+    /// anchor (a yearly short-date `Date` or a `MonthlyPattern`), or nothing at all
+    /// when the interval was everything the event had. The interval is dropped from
+    /// an in-memory copy only: `repetition` stays in the DB row, since
+    /// `update_schedule` writes schedule columns alone. When the current occurrence
+    /// came from another field there is no repetition to dismiss and this is exactly
+    /// an ordinary dismiss.
+    ///
+    /// A **stale** stored occurrence — one already at or before `now`, because the
+    /// poll thread never got to reschedule it (a banned or not-yet-activated chat, a
+    /// long downtime) — is actualized against `now` first, so the dismiss advances
+    /// from what is really next instead of landing on yet another past occurrence. A
+    /// future occurrence is left alone: recomputing it from `now` could rewind the
+    /// event onto an occurrence an earlier dismiss already skipped. An actualization
+    /// that yields nothing (a one-shot the scheduler considers spent) also keeps the
+    /// stored occurrence, so the dismiss still deactivates the event.
+    pub fn dismiss(
+        &self,
+        id: i64,
+        chat_id: i64,
+        repetition: bool,
+        now: NaiveDateTime,
+    ) -> Result<DismissOutcome> {
         let mut inner = self.inner.lock().unwrap();
-        let event = match inner.storage.get_event(id)? {
+        let mut event = match inner.storage.get_event(id)? {
             Some(event) if event.chat_id == chat_id => event,
             _ => return Ok(DismissOutcome::NotFound),
         };
-        let Some(next_dt) = event.next_datetime else {
+        let Some(mut next_dt) = event.next_datetime else {
             return Ok(DismissOutcome::Inactive);
         };
 
         let tz = Self::tz_for_chat_locked(&inner, chat_id);
+        if next_dt <= now {
+            // actualize the event to the next scheduled time
+            let actualized = scheduler::calc_next_at(event.clone(), now, tz);
+            if let Some(actual_next) = actualized.next_datetime {
+                next_dt = actual_next;
+                event = actualized;
+            }
+        }
+        if repetition && event.repetition.is_some() {
+            event.repetition = None;
+        }
+
         let calculated = scheduler::calc_next_at(event, next_dt + Duration::seconds(1), tz);
         inner.storage.update_schedule(
             id,
@@ -689,76 +727,6 @@ impl EventProvider {
         Self::load_next_event(&mut inner)?;
 
         let updated = inner.storage.get_event(id)?.unwrap_or(calculated);
-        Ok(DismissOutcome::Dismissed(Box::new(updated)))
-    }
-
-    /// Dismisses the *repetition fills* of an event: advances it past every
-    /// consecutive `NextSource::Repetition` occurrence to the next occurrence whose
-    /// source is something else — the next anchor (a yearly short-date `Date` or a
-    /// `MonthlyPattern`). Used by the `/event<id>` "Dismiss repetition" action, which
-    /// is only offered when the current `source` is `Repetition`.
-    ///
-    /// Access-checks `chat_id` like [`dismiss`](Self::dismiss); returns
-    /// [`DismissOutcome::NotFound`]/[`DismissOutcome::Inactive`] the same way.
-    ///
-    /// Only a short date (`date` set, year not explicit) or a `monthly_pattern` can
-    /// ever produce a non-`Repetition` source once repeating; an event with neither
-    /// anchor stays `Repetition` forever, so for those we skip the search and fall
-    /// straight back to the ordinary single-step dismiss. When an anchored event's
-    /// anchor somehow stays out of reach for 100 years, we likewise fall back to the
-    /// single step. Advancing one interval at a time via `calc_next_at(_, prev + 1s)`
-    /// mirrors [`dismiss`], so the fallback is exactly one ordinary dismiss.
-    pub fn dismiss_repetition(&self, id: i64, chat_id: i64) -> Result<DismissOutcome> {
-        let mut inner = self.inner.lock().unwrap();
-        let event = match inner.storage.get_event(id)? {
-            Some(event) if event.chat_id == chat_id => event,
-            _ => return Ok(DismissOutcome::NotFound),
-        };
-        let Some(next_dt) = event.next_datetime else {
-            return Ok(DismissOutcome::Inactive);
-        };
-
-        let has_anchor =
-            (event.date.is_some() && !event.year_explicit) || event.monthly_pattern.is_some();
-
-        // The single-step advance — identical to `dismiss`. Also the fallback when no
-        // non-repetition occurrence is reachable.
-        let tz = Self::tz_for_chat_locked(&inner, chat_id);
-        let fallback = scheduler::calc_next_at(event.clone(), next_dt + Duration::seconds(1), tz);
-
-        let chosen = if !has_anchor {
-            fallback
-        } else {
-            let horizon = next_dt
-                .checked_add_months(Months::new(1200))
-                .unwrap_or(NaiveDateTime::MAX);
-            let mut current = fallback.clone();
-            loop {
-                match current.source {
-                    // Reached the next anchor (or the event went inactive): done.
-                    Some(NextSource::Repetition) => {}
-                    _ => break current,
-                }
-                let Some(cur_dt) = current.next_datetime else {
-                    break current;
-                };
-                if cur_dt > horizon {
-                    break fallback;
-                }
-                current = scheduler::calc_next_at(current, cur_dt + Duration::seconds(1), tz);
-            }
-        };
-
-        inner.storage.update_schedule(
-            id,
-            chosen.active,
-            chosen.next_datetime,
-            chosen.last_next_datetime,
-            chosen.source,
-        )?;
-        Self::load_next_event(&mut inner)?;
-
-        let updated = inner.storage.get_event(id)?.unwrap_or(chosen);
         Ok(DismissOutcome::Dismissed(Box::new(updated)))
     }
 
@@ -1192,7 +1160,10 @@ mod tests {
         assert_eq!(stepped.source, Some(NextSource::Repetition));
 
         // Dismiss repetition → skip the interval fills to the next yearly anchor.
-        match provider.dismiss_repetition(event.id, chat_id).unwrap() {
+        match provider
+            .dismiss(event.id, chat_id, true, ndt(2099, 11, 6, 9, 0, 0))
+            .unwrap()
+        {
             DismissOutcome::Dismissed(updated) => {
                 assert_eq!(updated.next_datetime, Some(ndt(2100, 11, 5, 11, 7, 0)));
                 assert_eq!(updated.source, Some(NextSource::Date));
@@ -1203,14 +1174,14 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_repetition_without_anchor_advances_one_step() {
+    fn dismiss_repetition_without_anchor_deactivates() {
         use crate::types::{Repetition, TimeUnit};
         use chrono::NaiveTime;
         let chat_id = 556;
         let (provider, msg_id) = test_provider(chat_id);
 
-        // Time-only + every 3 days: no anchor, so `source` is Repetition forever.
-        // Dismiss repetition falls back to a single ordinary step.
+        // Time-only + every 3 days: the interval is all the event has, so dropping
+        // it leaves nothing to fire — the event goes inactive.
         let mut event = base_event(chat_id, msg_id);
         event.time = NaiveTime::from_hms_opt(15, 30, 0);
         event.repetition = Some(Repetition {
@@ -1222,9 +1193,59 @@ mod tests {
             .unwrap();
         let first = event.next_datetime.unwrap();
 
-        match provider.dismiss_repetition(event.id, chat_id).unwrap() {
+        // Advance once so the current occurrence comes from the repetition.
+        provider
+            .update_at_and_reload(vec![event.clone()], first + Duration::seconds(1))
+            .unwrap();
+        let stepped = provider.get_event(event.id).unwrap().unwrap();
+        assert_eq!(stepped.source, Some(NextSource::Repetition));
+
+        match provider
+            .dismiss(event.id, chat_id, true, first + Duration::seconds(1))
+            .unwrap()
+        {
             DismissOutcome::Dismissed(updated) => {
-                assert_eq!(updated.next_datetime, Some(first + Duration::days(3)));
+                assert!(!updated.active);
+                assert_eq!(updated.next_datetime, None);
+                assert_eq!(updated.source, None);
+                assert_eq!(
+                    updated.last_next_datetime,
+                    Some(first + Duration::days(3)),
+                    "the dismissed occurrence is retained"
+                );
+            }
+            _ => panic!("expected Dismissed"),
+        }
+    }
+
+    #[test]
+    fn dismiss_advances_from_the_occurrence_current_at_now() {
+        use crate::types::{Repetition, TimeUnit};
+        use chrono::NaiveTime;
+        let chat_id = 558;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // 09:00 every day, stored with its first occurrence — then dismissed a week
+        // later, as if the poll thread never got to reschedule it (a banned or
+        // not-yet-activated chat). The stale stored occurrence is actualized against
+        // `now` first, so the dismiss lands on the day after `now`, not on day two.
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(9, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Days,
+        });
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2099, 10, 1, 8, 0, 0))
+            .unwrap();
+        assert_eq!(event.next_datetime, Some(ndt(2099, 10, 1, 9, 0, 0)));
+
+        match provider
+            .dismiss(event.id, chat_id, false, ndt(2099, 10, 8, 12, 0, 0))
+            .unwrap()
+        {
+            DismissOutcome::Dismissed(updated) => {
+                assert_eq!(updated.next_datetime, Some(ndt(2099, 10, 10, 9, 0, 0)));
                 assert_eq!(updated.source, Some(NextSource::Repetition));
             }
             _ => panic!("expected Dismissed"),
@@ -1278,7 +1299,9 @@ mod tests {
     fn dismiss_repetition_rejects_foreign_and_missing() {
         let (provider, _) = test_provider(1);
         assert!(matches!(
-            provider.dismiss_repetition(9999, 1).unwrap(),
+            provider
+                .dismiss(9999, 1, true, ndt(2099, 1, 1, 0, 0, 0))
+                .unwrap(),
             DismissOutcome::NotFound
         ));
     }

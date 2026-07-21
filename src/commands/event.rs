@@ -87,10 +87,10 @@ pub async fn handle_event_callback(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     match q.data.as_deref().and_then(parse_event_callback) {
-        Some((id, "dis")) => handle_dismiss(bot, provider, id, false, q).await,
-        Some((id, "dis:n")) => handle_dismiss(bot, provider, id, true, q).await,
-        Some((id, "disr")) => handle_dismiss_repetition(bot, provider, id, false, q).await,
-        Some((id, "disr:n")) => handle_dismiss_repetition(bot, provider, id, true, q).await,
+        Some((id, "dis")) => handle_dismiss(bot, provider, id, false, false, q).await,
+        Some((id, "dis:n")) => handle_dismiss(bot, provider, id, false, true, q).await,
+        Some((id, "disr")) => handle_dismiss(bot, provider, id, true, false, q).await,
+        Some((id, "disr:n")) => handle_dismiss(bot, provider, id, true, true, q).await,
         Some((id, "del")) => handle_delete_prompt(bot, id, false, q).await,
         Some((id, "del:n")) => handle_delete_prompt(bot, id, true, q).await,
         Some((id, "delyes")) => handle_delete_confirm(bot, provider, id, false, q).await,
@@ -110,16 +110,19 @@ pub async fn handle_event_callback(
     }
 }
 
-/// Handles the `⏭ Dismiss` press (`eid:<id>:dis` / `eid:<id>:dis:n`): delegates
-/// to [`EventProvider::dismiss`] (which advances the event past its current
-/// occurrence and access-checks the chat), then re-renders the detail view in
-/// place — or, for the notification flavor (`from_notification`), keeps the
-/// fired text and refreshes only the keyboard. Replies with a toast for a
-/// missing/foreign id or an already-inactive event.
+/// Handles both dismiss presses: `⏭ Dismiss` (`eid:<id>:dis` / `eid:<id>:dis:n`)
+/// and, with `repetition`, `⏩ Dismiss repetition` (`eid:<id>:disr` /
+/// `eid:<id>:disr:n`). Delegates to [`EventProvider::dismiss`] (which advances the
+/// event past its current occurrence — dropping its repetition interval when
+/// asked, leaving the next anchor or nothing at all — and access-checks the chat),
+/// then re-renders the detail view in place — or, for the notification flavor
+/// (`from_notification`), keeps the fired text and refreshes only the keyboard.
+/// Replies with a toast for a missing/foreign id or an already-inactive event.
 async fn handle_dismiss(
     bot: &TgBot,
     provider: &EventProvider,
     id: i64,
+    repetition: bool,
     from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
@@ -130,7 +133,7 @@ async fn handle_dismiss(
     let chat_id = message.chat.id;
     let message_id = message.id;
 
-    match provider.dismiss(id, chat_id.0)? {
+    match provider.dismiss(id, chat_id.0, repetition, Utc::now().naive_utc())? {
         DismissOutcome::NotFound => {
             bot.answer_callback(q.id, Some("Event not found.".to_owned()))
                 .await?;
@@ -140,8 +143,12 @@ async fn handle_dismiss(
                 .await?;
         }
         DismissOutcome::Dismissed(updated) => {
-            bot.answer_callback(q.id, Some("⏭ Dismissed.".to_owned()))
-                .await?;
+            let toast = if repetition {
+                "⏩ Repetition dismissed."
+            } else {
+                "⏭ Dismissed."
+            };
+            bot.answer_callback(q.id, Some(toast.to_owned())).await?;
             let tz = provider.tz_or_utc(chat_id.0);
             if let Err(e) = refresh_dismissed_view(
                 bot,
@@ -155,57 +162,6 @@ async fn handle_dismiss(
             .await
             {
                 log::warn!("Failed to refresh dismissed event {id}: {e}");
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Handles the `⏩ Dismiss repetition` press (`eid:<id>:disr` / `eid:<id>:disr:n`):
-/// delegates to [`EventProvider::dismiss_repetition`] (which skips the event's
-/// repetition fills to the next anchor and access-checks the chat), then
-/// re-renders the detail view in place — or, for the notification flavor
-/// (`from_notification`), keeps the fired text and refreshes only the keyboard.
-/// Replies with a toast for a missing/foreign id or an already-inactive event.
-async fn handle_dismiss_repetition(
-    bot: &TgBot,
-    provider: &EventProvider,
-    id: i64,
-    from_notification: bool,
-    q: CallbackQuery,
-) -> anyhow::Result<()> {
-    let Some(message) = q.regular_message() else {
-        bot.answer_callback(q.id, None).await?;
-        return Ok(());
-    };
-    let chat_id = message.chat.id;
-    let message_id = message.id;
-
-    match provider.dismiss_repetition(id, chat_id.0)? {
-        DismissOutcome::NotFound => {
-            bot.answer_callback(q.id, Some("Event not found.".to_owned()))
-                .await?;
-        }
-        DismissOutcome::Inactive => {
-            bot.answer_callback(q.id, Some("Nothing to dismiss.".to_owned()))
-                .await?;
-        }
-        DismissOutcome::Dismissed(updated) => {
-            bot.answer_callback(q.id, Some("⏩ Repetition dismissed.".to_owned()))
-                .await?;
-            let tz = provider.tz_or_utc(chat_id.0);
-            if let Err(e) = refresh_dismissed_view(
-                bot,
-                provider,
-                chat_id,
-                message_id,
-                &updated,
-                tz,
-                from_notification,
-            )
-            .await
-            {
-                log::warn!("Failed to refresh dismissed-repetition event {id}: {e}");
             }
         }
     }

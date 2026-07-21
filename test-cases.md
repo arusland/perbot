@@ -5,7 +5,7 @@
 * First column contains current time in format YYYY-MM-DD HH:MM:SS
 * Second column is actor's type: USER or SYSTEM
 * When actor is USER, third column contains user's input in chat like "12:45 call Poly", test framework should parse it as EventInfo and than map it to StoredEvent (now it's current StoredEvent)
-* When actor is USER and third column starts with `!`, it is a command, not text to parse: `!Dismiss` / `!Dismiss repetition` call `EventProvider::dismiss` / `dismiss_repetition` on the current event (the `/event<id>` button actions). Both methods advance from the stored `next_datetime + 1s`, so the first column's time is not used (it must still be a valid timestamp). Fourth and fifth columns stay empty; the following SYSTEM row asserts the resulting schedule (or `NONE`).
+* When actor is USER and third column starts with `!`, it is a command, not text to parse: `!Dismiss` / `!Dismiss repetition` call `EventProvider::dismiss` on the current event, the latter with `repetition` set (the `/event<id>` button actions). Both advance from the stored `next_datetime + 1s`; the first column's time is passed as `now` and only matters when the stored occurrence is already past — it is then actualized against that time first (see Case 51). Fourth and fifth columns stay empty; the following SYSTEM row asserts the resulting schedule (or `NONE`).
 * When actor is SYSTEM, test framework call function storage::play_at with current StoredEvent and current time from first column. Now returned value is new current StoredEvent. And current event's next_datetime must be equals to the time in third column (format YYYY-MM-DD HH:MM:SS). If after call play_at new StoredEvent.active==false then third column must be NONE.
 * Fourth column: when actor is USER it holds the pure reminder message (must equal the parsed `event.message`); when actor is SYSTEM it holds the source of the computed `next_datetime` as `source=<name>` (must equal `event.source.as_str()`, e.g. `source=repetition`, `source=bare_hour`, `source=monthly_pattern`). It is left empty on `NONE` rows (an inactive event has no source).
 * Fifth column holds the canonical normalized time expression. When actor is USER it must equal `event.normalize_time()` (the re-parseable canonical form of the time/recurrence — e.g. `12:2` → `12:02`, `8 call Alex` → `08:00`, `mon-fri` → `Mon-Fri`); when actor is SYSTEM it is left empty. It is also left empty on USER rows whose input does not parse.
@@ -760,9 +760,24 @@ is independent of when the suite runs.
 | 2026-02-19 10:00:00 | USER   | 10:25 mon-fri Daily standup  | Daily standup | 10:25 Mon-Fri |
 | 2026-02-19 10:00:00 | SYSTEM | 2026-02-19 10:25:00          | source=weekdays |             |
 | 2026-02-19 11:00:00 | USER   | !Dismiss                     |               |               |
-| 2026-02-19 11:00:00 | SYSTEM | 2026-02-20 10:25:00          | source=weekdays |             |
-| 2026-02-19 11:00:00 | USER   | !Dismiss                     |               |               |
-| 2026-02-19 11:00:00 | SYSTEM | 2026-02-23 10:25:00          | source=weekdays |             |
+| 2026-02-19 11:00:01 | SYSTEM | 2026-02-23 10:25:00          | source=weekdays |             |
+| 2026-02-19 11:00:02 | USER   | !Dismiss                     |               |               |
+| 2026-02-19 11:00:03 | SYSTEM | 2026-02-24 10:25:00          | source=weekdays |             |
+
+### Case 45.2: Dismiss repetition with weekdays — skips the interval fills to the next weekday
+
+| Current Time        | Actor  | Input / Expected Next        | Message / Source  | Normalized    |
+|---------------------|--------|------------------------------|-------------------|---------------|
+| 2026-02-19 10:00:00 | USER   | 10:25 mon-fri every 2 hours Daily standup | Daily standup | 10:25 Mon-Fri every 2 hours |
+| 2026-02-19 10:00:00 | SYSTEM | 2026-02-19 10:25:00          | source=weekdays   |             |
+| 2026-02-19 10:25:01 | SYSTEM | 2026-02-19 12:25:00          | source=repetition |             |
+| 2026-02-19 12:25:01 | SYSTEM | 2026-02-19 14:25:00          | source=repetition |             |
+| 2026-02-19 14:30:00 | USER   | !Dismiss repetition          |                   |             |
+| 2026-02-19 14:30:01 | SYSTEM | 2026-02-20 10:25:00          | source=weekdays   |             |
+| 2026-02-19 14:30:02 | USER   | !Dismiss                     |                   |             |
+| 2026-02-19 14:30:03 | SYSTEM | 2026-02-20 12:25:00          | source=repetition |             |
+| 2026-02-19 14:30:04 | USER   | !Dismiss repetition          |                   |             |
+| 2026-02-19 14:30:04 | SYSTEM | 2026-02-23 10:25:00          | source=weekdays   |             |
 
 ### Case 46: Dismiss an already-inactive event — stays NONE
 
@@ -793,14 +808,14 @@ is independent of when the suite runs.
 | 2026-03-17 09:00:00 | SYSTEM | 2026-04-03 10:00:00                         | source=monthly_pattern |             |
 | 2026-04-03 10:00:01 | SYSTEM | 2026-04-13 10:00:00                         | source=repetition |                                  |
 
-### Case 49: Dismiss repetition — no anchor, falls back to a single dismiss
+### Case 49: Dismiss repetition — no anchor left, the event goes inactive
 
 | Current Time        | Actor  | Input / Expected Next          | Message / Source    | Normalized         |
 |---------------------|--------|--------------------------------|------------|--------------------|
 | 2026-02-20 10:00:00 | USER   | 15:30 every 3 days run backup  | run backup | 15:30 every 3 days |
 | 2026-02-20 15:30:01 | SYSTEM | 2026-02-23 15:30:00            | source=repetition |             |
 | 2026-02-21 09:00:00 | USER   | !Dismiss repetition            |            |                    |
-| 2026-02-21 09:00:00 | SYSTEM | 2026-02-26 15:30:00            | source=repetition |             |
+| 2026-02-21 09:00:00 | SYSTEM | NONE                           |            |                    |
 
 ### Case 50: In-offset "mins" spelling with minute repetition
 
@@ -811,6 +826,19 @@ is independent of when the suite runs.
 | 2026-02-20 10:02:01 | SYSTEM | 2026-02-20 10:08:00                | source=repetition |                         |
 | 2026-02-20 10:08:01 | SYSTEM | 2026-02-20 10:14:00                | source=repetition |                         |
 | 2026-02-20 10:08:02 | USER   | !Dismiss repetition                |                   |                         |
-| 2026-02-20 10:08:03 | SYSTEM | 2026-02-20 10:20:00                | source=repetition |                         |
+| 2026-02-20 10:08:03 | SYSTEM | NONE                               |                   |                         |
 | 2026-02-20 10:08:04 | USER   | !Dismiss                           |                   |                         |
-| 2026-02-20 10:08:05 | SYSTEM | 2026-02-20 10:26:00                | source=repetition |                         |
+| 2026-02-20 10:08:05 | SYSTEM | NONE                               |                   |                         |
+
+### Case 51: Dismiss actualizes a stale schedule before advancing
+
+A week of downtime leaves the stored occurrence in the past; the dismiss first
+brings it up to the row's time (Feb 28 09:00, the next real occurrence) and only
+then advances past it.
+
+| Current Time        | Actor  | Input / Expected Next          | Message / Source    | Normalized         |
+|---------------------|--------|--------------------------------|------------|--------------------|
+| 2026-02-20 08:00:00 | USER   | 9:00 every day water plants    | water plants | 09:00 every day  |
+| 2026-02-20 08:00:00 | SYSTEM | 2026-02-20 09:00:00            | source=time |                   |
+| 2026-02-27 12:00:00 | USER   | !Dismiss                       |            |                    |
+| 2026-02-27 12:00:00 | SYSTEM | 2026-03-01 09:00:00            | source=repetition |             |
