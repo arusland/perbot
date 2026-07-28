@@ -18,7 +18,7 @@ use crate::converter::{self, Status};
 use crate::locale;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
-use crate::types::{ChatInfo, ChatType};
+use crate::types::{ChatInfo, ChatType, fmt_dt};
 
 /// Pending import target (chat id + the timezone the legacy wall-clock data is
 /// read in) recorded by `/import <user_id> <timezone>` until the admin sends
@@ -137,11 +137,6 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-fn fmt_dt(dt: Option<NaiveDateTime>) -> String {
-    dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "—".to_string())
 }
 
 /// Imports every `.alert` entry of `zip_bytes` for `target_user_id`, writing the

@@ -600,6 +600,11 @@ pub fn format_time_left(delta: chrono::Duration) -> String {
     }
 }
 
+pub fn fmt_dt(dt: Option<NaiveDateTime>) -> String {
+    dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "—".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

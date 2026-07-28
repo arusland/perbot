@@ -23,8 +23,9 @@ pub struct Converted {
     pub status: Status,
     /// Short human description of the extracted fields, for the report.
     pub summary: String,
-    /// `true` when a stale `lastActivePeriodTime` was rolled forward using the
-    /// input's period. Surfaced as a red note in the report.
+    /// `true` when the stored `lastActivePeriodTime` was stale (fires were
+    /// missed) and the alert was rescheduled into the future anyway. Surfaced
+    /// as a red note in the report.
     pub recalculated: bool,
 }
 
@@ -250,10 +251,10 @@ fn base_event(chat_id: i64, created_at: NaiveDateTime, message: String) -> Event
 
 /// Builds an [`EventInfo`] from a single legacy alert.
 ///
-/// `last_active_ms` (from `lastActivePeriodTime`) is authoritative for periodic
-/// alerts: when present it is used directly as `next_datetime` and the scheduler
-/// is *not* run; an event whose stored activation is already past is inactive.
-/// Otherwise the next occurrence is computed with [`scheduler::calc_next_at`].
+/// The next occurrence is always computed from the parsed fields with
+/// [`scheduler::calc_next_at`]; `last_active_ms` (from `lastActivePeriodTime`)
+/// never overrides it. A stale stamp (at or before `now`) marks a still-active
+/// alert `recalculated` for the report.
 ///
 /// `now` and `created_at` are UTC; `tz` is the target chat's timezone, in which
 /// the legacy wall-clock fields (time/date/day-month) are interpreted.
@@ -297,30 +298,17 @@ pub fn convert(
         }
     }
 
-    // Schedule. Periodic alerts carry a stored next activation: use it directly
-    // when it is still in the future. When it is stale, roll it forward using the
-    // input's period (treating the stale activation as the previous fire), and
-    // flag the recalculation for the report.
+    // Schedule from the parsed fields alone. A stored `lastActivePeriodTime`
+    // never overrides the computation (its instant may disagree with the
+    // event's own anchors); a stale one — at or before `now`, meaning fires
+    // were missed — flags the alert as recalculated for the report.
     let mut recalculated = false;
-    if let Some(ms) = last_active_ms {
-        match ms_to_naive_utc(ms) {
-            Some(dt) if dt > now => {
-                event.next_datetime = Some(dt);
-                event.active = true;
-            }
-            Some(stale) => {
-                event.next_datetime = Some(stale);
-                let scheduled = scheduler::calc_next_at(event.clone(), now, tz);
-                event.next_datetime = scheduled.next_datetime;
-                event.active = scheduled.active;
-                recalculated = event.active;
-            }
-            None => event.active = false,
-        }
-    } else if parse.is_some() {
+    if parse.is_some() {
         let scheduled = scheduler::calc_next_at(event.clone(), now, tz);
         event.next_datetime = scheduled.next_datetime;
         event.active = scheduled.active;
+        recalculated = event.active
+            && matches!(last_active_ms.and_then(ms_to_naive_utc), Some(dt) if dt <= now);
     }
 
     let status = if parse.is_none() {
@@ -395,6 +383,7 @@ fn summarize(event: &EventInfo) -> String {
 mod tests {
     use super::*;
     use crate::locale::EN;
+    use crate::types::fmt_dt;
 
     fn now() -> NaiveDateTime {
         // Fixed "today" matching the project's reference date.
@@ -437,9 +426,7 @@ mod tests {
         let created = created_at_from_filename("20170925_124839_126.alert").unwrap();
         let c = convert("10:00 26:09 birthday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Scheduled);
-        let next = c.event.next_datetime.unwrap();
-        assert_eq!(next.date(), NaiveDate::from_ymd_opt(2026, 9, 26).unwrap());
-        assert_eq!(next.time(), NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        assert_eq!("2026-09-26 10:00", fmt_dt(c.event.next_datetime));
         assert!(!c.event.year_explicit);
         assert!(c.event.legacy);
         assert_eq!(c.event.normalize_time(&EN), "10:00 26.09 yearly");
@@ -458,6 +445,7 @@ mod tests {
         );
         assert_eq!(c.status, Status::Inactive);
         assert!(!c.event.active);
+        assert_eq!("—", fmt_dt(c.event.next_datetime));
         assert!(c.event.year_explicit);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 4, 9));
         assert_eq!(c.event.normalize_time(&EN), "08:22 09.04.2026");
@@ -468,10 +456,7 @@ mod tests {
         let created = created_at_from_filename("20260612_143809_036.alert").unwrap();
         let c = convert("18:50 20:06:2026 match", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.status, Status::Scheduled);
-        assert_eq!(
-            c.event.next_datetime.unwrap().date(),
-            NaiveDate::from_ymd_opt(2026, 6, 20).unwrap()
-        );
+        assert_eq!("2026-06-20 18:50", fmt_dt(c.event.next_datetime));
         assert_eq!(c.event.normalize_time(&EN), "18:50 20.06.2026");
     }
 
@@ -485,6 +470,7 @@ mod tests {
         assert!(days.contains(&Weekday::Mon) && days.contains(&Weekday::Fri));
         assert!(!days.contains(&Weekday::Sat));
         assert!(c.event.date.is_none());
+        assert_eq!("2026-06-16 17:00", fmt_dt(c.event.next_datetime));
         assert_eq!(c.event.normalize_time(&EN), "17:00 Mon-Fri");
     }
 
@@ -493,13 +479,7 @@ mod tests {
         // Created 2024-10-12; day 27 -> recurring "each 27th day of the month".
         let created = created_at_from_filename("20241012_105344_580.alert").unwrap();
         let c = convert("16:33 27: concert", created, None, 42, now(), Tz::UTC);
-        assert_eq!(
-            c.event.next_datetime,
-            Some(NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2026, 6, 27).unwrap(),
-                NaiveTime::from_hms_opt(16, 33, 0).unwrap(),
-            ))
-        );
+        assert_eq!("2026-06-27 16:33", fmt_dt(c.event.next_datetime));
         assert_eq!(c.status, Status::Scheduled);
         assert_eq!(
             c.event.normalize_time(&EN),
@@ -527,6 +507,7 @@ mod tests {
             c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
         );
+        assert_eq!("2026-06-28 22:15", fmt_dt(c.event.next_datetime));
         // "05/2:11:" -> day 5 of month 11 (start anchor), every 2 days.
         let c = convert("11:07 05/2:11: bday", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.date, NaiveDate::from_ymd_opt(2026, 11, 5));
@@ -535,6 +516,7 @@ mod tests {
             c.event.normalize_time(&EN),
             "11:07 05.11 every 2 days yearly"
         );
+        assert_eq!("2026-11-05 11:07", fmt_dt(c.event.next_datetime));
         // Minute period "11:36/90 4:" -> each 4th day of the month, every 90 minutes.
         let c = convert("11:36/90 4: pay", created, None, 42, now(), Tz::UTC);
         assert_eq!(c.event.monthly_pattern, Some(MonthlyPattern::DayOfMonth(4)));
@@ -543,6 +525,7 @@ mod tests {
             c.event.normalize_time(&EN),
             "11:36 each 4th day of the month every 90 minutes"
         );
+        assert_eq!("2026-07-04 11:36", fmt_dt(c.event.next_datetime));
     }
 
     #[test]
@@ -555,6 +538,7 @@ mod tests {
         assert!(!c.event.year_explicit);
         assert!(c.event.repetition.is_none());
         assert_eq!(c.event.message, "bday");
+        assert_eq!("2026-11-05 11:07", fmt_dt(c.event.next_datetime));
         assert_eq!(c.event.normalize_time(&EN), "11:07 05.11 yearly");
     }
 
@@ -575,6 +559,7 @@ mod tests {
             })
         );
         assert_eq!(c.event.message, "bday");
+        assert_eq!("2026-11-05 11:07", fmt_dt(c.event.next_datetime));
         assert_eq!(
             c.event.normalize_time(&EN),
             "11:07 05.11 every 2 days yearly"
@@ -597,13 +582,14 @@ mod tests {
             Tz::UTC,
         );
         assert_eq!(c.status, Status::Scheduled);
-        assert!(c.event.next_datetime.is_some());
+        assert_eq!("2026-06-28 22:15", fmt_dt(c.event.next_datetime));
         assert_eq!(
             c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
         );
 
-        // Stale activation is rolled forward using the input's period (every 1 day).
+        // Stale activation is discarded; the next occurrence is recomputed from
+        // the parsed fields (the day-of-month anchor at the event's own time).
         let past_ms = chrono::Utc
             .from_utc_datetime(&(now() - chrono::Duration::days(10)))
             .timestamp_millis();
@@ -618,7 +604,7 @@ mod tests {
         assert_eq!(c.status, Status::Scheduled);
         assert!(c.event.active);
         assert!(c.recalculated);
-        assert!(c.event.next_datetime.unwrap() > now());
+        assert_eq!("2026-06-28 22:15", fmt_dt(c.event.next_datetime));
         assert_eq!(
             c.event.normalize_time(&EN),
             "22:15 each 28th day of the month every day"
@@ -633,6 +619,7 @@ mod tests {
         assert_eq!(c.event.message, "no time here at all");
         assert!(c.event.time.is_none());
         assert!(!c.event.active);
+        assert_eq!("—", fmt_dt(c.event.next_datetime));
         assert!(c.event.legacy);
     }
 }
