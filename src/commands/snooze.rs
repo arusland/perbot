@@ -127,9 +127,20 @@ pub async fn handle_snooze_callback(
     bot.answer_callback(q.id, None).await?;
     let loc = crate::locale::for_chat(chat_id.0);
     let is_repetition = event.source == Some(NextSource::Repetition);
+    let mut text = snoozed_message(&event, now, tz, loc);
+    // Same footer as the create/update confirmations: warn that the snoozed
+    // copy will not fire while all events are disabled. Display-only — a read
+    // failure falls open (no note) rather than failing the confirmation.
+    if !provider.is_activated(chat_id.0).unwrap_or_else(|e| {
+        log::warn!("Failed to read activation for chat {}: {e}", chat_id.0);
+        true
+    }) {
+        text.push_str("\n\n");
+        text.push_str(crate::view::EVENTS_DISABLED_NOTE);
+    }
     bot.send_html(
         chat_id,
-        snoozed_message(&event, now, tz, loc),
+        text,
         Some(event_actions_keyboard(
             event.id,
             event.active,

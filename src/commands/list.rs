@@ -8,7 +8,10 @@ use super::CmdContext;
 use crate::state::EventProvider;
 use crate::tgbot::TgBot;
 use crate::types::{PageRequest, PageResponse};
-use crate::view::{LIST_PAGE_SIZE, ListKind, format_page_at, list_keyboard, total_pages};
+use crate::view::{
+    EVENTS_DISABLED, LIST_PAGE_SIZE, ListKind, format_page_at, list_keyboard,
+    settings_entry_keyboard, total_pages,
+};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use chrono_tz::Tz;
 use teloxide::types::CallbackQuery;
@@ -76,6 +79,18 @@ fn fetch_page(
 /// Replies with the first page of a `kind` list, attaching navigation buttons
 /// when the list spans more than one page.
 pub(super) async fn handle_list(ctx: &CmdContext<'_>, kind: ListKind) -> anyhow::Result<()> {
+    // All events disabled (the Settings toggle) → the scheduled lists would be
+    // misleading; reply with the notice + the Settings entry button instead.
+    if !ctx.provider.is_activated(ctx.chat_id.0)? {
+        ctx.bot
+            .send_html(
+                ctx.chat_id,
+                EVENTS_DISABLED,
+                Some(settings_entry_keyboard()),
+            )
+            .await?;
+        return Ok(());
+    }
     let tz = ctx.tz;
     let PageResponse { events, total } = fetch_page(kind, ctx.provider, ctx.chat_id.0, tz, 0)?;
     let (text, total_pages) = format_page_at(
@@ -146,6 +161,29 @@ pub async fn handle_list_callback(
     };
     let chat_id = message.chat.id;
     let message_id = message.id;
+
+    // Same gate as `handle_list`: a page turn while all events are disabled
+    // replaces the list with the notice. The Missed list is exempt — its
+    // startup snapshot is historical, not scheduled.
+    if !matches!(kind, ListKind::Missed) && !provider.is_activated(chat_id.0)? {
+        if let Err(e) = bot
+            .edit_html(
+                chat_id,
+                message_id,
+                EVENTS_DISABLED,
+                Some(settings_entry_keyboard()),
+            )
+            .await
+        {
+            // "message is not modified" (e.g. double-tap) is benign; just log.
+            log::warn!(
+                "Failed to edit /{} page for chat {}: {e}",
+                kind.tag(),
+                chat_id.0
+            );
+        }
+        return Ok(());
+    }
 
     let tz = provider.tz_or_utc(chat_id.0);
     let PageResponse { events, total } = fetch_page(kind, provider, chat_id.0, tz, page)?;

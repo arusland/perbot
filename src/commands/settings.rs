@@ -2,7 +2,8 @@
 //! itself lives in `view/settings.rs`): the command and `st:o` open the menu
 //! as a new message (keeping the /events list or /help reply it was pressed
 //! under), `st:s` re-renders it in place (the picker's Back button),
-//! `st:on`/`st:off` toggle the morning digest, `st:t` opens the hour picker,
+//! `st:en`/`st:dis` enable/disable all of the chat's events (the `activated`
+//! setting), `st:on`/`st:off` toggle the morning digest, `st:t` opens the hour picker,
 //! `st:h:<H>` sets the digest hour (which also turns the digest on), `st:tz`
 //! swaps the menu for the timezone region picker (the `tz:` flow takes over
 //! from there). Every change applies to the chat the pressed message lives in
@@ -24,6 +25,10 @@ enum SettingsAction {
     Open,
     /// `st:s` — re-render the menu in place (Back from the hour picker).
     Show,
+    /// `st:en` — enable all of the chat's events (`activated` = true).
+    EnableAll,
+    /// `st:dis` — disable all of the chat's events (`activated` = false).
+    DisableAll,
     /// `st:on` — switch the morning digest on at the default hour.
     DigestOn,
     /// `st:off` — switch the morning digest off.
@@ -41,6 +46,8 @@ fn parse_settings_callback(data: &str) -> Option<SettingsAction> {
     match data.strip_prefix("st:")? {
         "o" => Some(SettingsAction::Open),
         "s" => Some(SettingsAction::Show),
+        "en" => Some(SettingsAction::EnableAll),
+        "dis" => Some(SettingsAction::DisableAll),
         "on" => Some(SettingsAction::DigestOn),
         "off" => Some(SettingsAction::DigestOff),
         "t" => Some(SettingsAction::PickTime),
@@ -60,10 +67,11 @@ async fn send_settings_menu(
 ) -> anyhow::Result<()> {
     let digest = provider.digest_time(chat_id.0)?;
     let tz = provider.get_timezone(chat_id.0)?;
+    let activated = provider.is_activated(chat_id.0)?;
     bot.send_html(
         chat_id,
-        settings_message(digest, tz),
-        Some(settings_keyboard(digest, tz)),
+        settings_message(digest, tz, activated),
+        Some(settings_keyboard(digest, tz, activated)),
     )
     .await?;
     Ok(())
@@ -83,12 +91,13 @@ async fn render_settings_in_place(
 ) -> anyhow::Result<()> {
     let digest = provider.digest_time(chat_id.0)?;
     let tz = provider.get_timezone(chat_id.0)?;
+    let activated = provider.is_activated(chat_id.0)?;
     if let Err(e) = bot
         .edit_html(
             chat_id,
             message_id,
-            settings_message(digest, tz),
-            Some(settings_keyboard(digest, tz)),
+            settings_message(digest, tz, activated),
+            Some(settings_keyboard(digest, tz, activated)),
         )
         .await
     {
@@ -121,6 +130,18 @@ pub async fn handle_settings_callback(
         }
         Some(SettingsAction::Show) => {
             bot.answer_callback(q.id, None).await?;
+            render_settings_in_place(bot, provider, chat_id, message_id).await?;
+        }
+        Some(SettingsAction::EnableAll) => {
+            provider.set_activated(chat_id.0, true)?;
+            bot.answer_callback(q.id, Some("🔔 All events enabled.".to_owned()))
+                .await?;
+            render_settings_in_place(bot, provider, chat_id, message_id).await?;
+        }
+        Some(SettingsAction::DisableAll) => {
+            provider.set_activated(chat_id.0, false)?;
+            bot.answer_callback(q.id, Some("🔕 All events disabled.".to_owned()))
+                .await?;
             render_settings_in_place(bot, provider, chat_id, message_id).await?;
         }
         Some(SettingsAction::DigestOn) => {
@@ -195,6 +216,14 @@ mod tests {
         assert!(matches!(
             parse_settings_callback("st:s"),
             Some(SettingsAction::Show)
+        ));
+        assert!(matches!(
+            parse_settings_callback("st:en"),
+            Some(SettingsAction::EnableAll)
+        ));
+        assert!(matches!(
+            parse_settings_callback("st:dis"),
+            Some(SettingsAction::DisableAll)
         ));
         assert!(matches!(
             parse_settings_callback("st:on"),

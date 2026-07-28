@@ -138,6 +138,33 @@ impl EventProvider {
         Ok(true)
     }
 
+    /// Sets a chat's `activated` setting explicitly (the Settings-menu
+    /// "enable/disable all events" toggle). Unlike `activate_chat`, this
+    /// overwrites any existing value — it is a deliberate user action, not a
+    /// side effect of messaging. The firing predicate changes, so the
+    /// next-event cache is reloaded: disabling drops the chat's events from
+    /// scheduling immediately, re-enabling restores them (a past-due backlog
+    /// fires right away, like activation).
+    pub fn set_activated(&self, chat_id: i64, activated: bool) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        let value = if activated { "true" } else { "false" };
+        inner
+            .storage
+            .set_setting(chat_id, ACTIVATED_SETTING, value)?;
+        Self::load_next_event(&mut inner)
+    }
+
+    /// Returns whether a chat is activated (display read for the Settings
+    /// menu). Absent counts as `false`, matching the firing predicate.
+    pub fn is_activated(&self, chat_id: i64) -> Result<bool> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .storage
+            .get_setting(chat_id, ACTIVATED_SETTING)?
+            .as_deref()
+            == Some("true"))
+    }
+
     /// Resolves a chat's timezone from the settings table for callers already
     /// holding the lock. Unset or unparsable (logged) values fall back to UTC —
     /// scheduling for tz-less chats is blocked upstream, so the fallback only
@@ -1483,6 +1510,34 @@ mod tests {
 
         // …and unbanning restores them.
         provider.set_banned(chat_id, false).unwrap();
+        assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
+    }
+
+    #[test]
+    fn set_activated_gates_firing_and_reloads_cache() {
+        use chrono::NaiveTime;
+        let chat_id = 703;
+        let (provider, msg_id) = test_provider(chat_id);
+        assert!(provider.is_activated(chat_id).unwrap());
+
+        let mut event = base_event(chat_id, msg_id);
+        event.time = NaiveTime::from_hms_opt(10, 0, 0);
+        event.date = NaiveDate::from_ymd_opt(2099, 1, 1);
+        event.year_explicit = true;
+        let event = provider
+            .insert_event_and_get_at(event, ndt(2098, 1, 1, 0, 0, 0))
+            .unwrap();
+        assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
+
+        // Disabling drops the chat's events from the firing cache immediately…
+        provider.set_activated(chat_id, false).unwrap();
+        assert!(!provider.is_activated(chat_id).unwrap());
+        assert!(provider.get_next_event().is_none());
+
+        // …and re-enabling restores them, overwriting the existing "false"
+        // (unlike activate_chat, which never touches an existing value).
+        provider.set_activated(chat_id, true).unwrap();
+        assert!(provider.is_activated(chat_id).unwrap());
         assert_eq!(provider.get_next_event().map(|e| e.id), Some(event.id));
     }
 

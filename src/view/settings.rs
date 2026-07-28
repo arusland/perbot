@@ -7,10 +7,11 @@
 //!
 //! Callback envelope `st:`: [`SETTINGS_OPEN_DATA`] (`st:o`) opens the menu as
 //! a new message; `st:s` re-renders it in place (the picker's Back button);
-//! `st:on` / `st:off` toggle the digest; `st:t` opens the hour picker;
-//! `st:h:<H>` picks the digest hour; `st:tz` swaps in the timezone region
-//! picker (the `tz:` flow takes over from there). The setting applies to the
-//! chat the pressed message lives in — the same authority model as list
+//! `st:en` / `st:dis` enable/disable all of the chat's events (the `activated`
+//! setting); `st:on` / `st:off` toggle the digest; `st:t` opens the hour
+//! picker; `st:h:<H>` picks the digest hour; `st:tz` swaps in the timezone
+//! region picker (the `tz:` flow takes over from there). The setting applies
+//! to the chat the pressed message lives in — the same authority model as list
 //! pagination.
 
 use chrono::NaiveTime;
@@ -31,12 +32,24 @@ pub const DIGEST_TIME_ASK: &str = "🕗 Choose the morning digest time:";
 /// Footer appended to every morning-digest message, pointing at /settings.
 pub const DIGEST_NOTE: &str = "<i>This message was sent because the morning digest is on. You can turn it off in /settings.</i>";
 
+/// Footer appended to the schedule confirmations (`Event created` /
+/// `Event updated` / `Event snoozed`) while the chat has all events disabled
+/// (the Settings toggle): the event is stored but will not fire until events
+/// are re-enabled in /settings.
+pub const EVENTS_DISABLED_NOTE: &str = "<i>🔕 All events are disabled, so this event will not fire. You can enable all events in /settings.</i>";
+
 /// Hour buttons per picker row (24 hours → 4 rows).
 const DIGEST_HOURS_PER_ROW: usize = 6;
 
-/// The Settings menu text (HTML): the morning digest's state — its chat-local
-/// time when on — what the digest does, and the chat's timezone.
-pub fn settings_message(digest: Option<NaiveTime>, tz: Option<Tz>) -> String {
+/// The Settings menu text (HTML): whether the chat's events are enabled, the
+/// morning digest's state — its chat-local time when on — what the digest
+/// does, and the chat's timezone.
+pub fn settings_message(digest: Option<NaiveTime>, tz: Option<Tz>, activated: bool) -> String {
+    let events_state = if activated {
+        "<b>enabled</b>"
+    } else {
+        "<b>disabled</b>"
+    };
     let state = match digest {
         Some(t) => format!("<b>on, {}</b>", t.format("%H:%M")),
         None => "<b>off</b>".to_string(),
@@ -47,17 +60,35 @@ pub fn settings_message(digest: Option<NaiveTime>, tz: Option<Tz>) -> String {
     };
     format!(
         "⚙️ <b>Settings</b>\n\n\
+         🔔 All events: {events_state}\n\
+         Turn off to pause all reminders.\n\n\
          🌅 Morning digest: {state}\n\
          A daily message with today's events.\n\n\
          🌍 Timezone: {tz_state}"
     )
 }
 
-/// The Settings menu keyboard: a digest on/off toggle, the time button
-/// (opening the hour picker) while the digest is on, and the timezone button
-/// (opening the region picker).
-pub fn settings_keyboard(digest: Option<NaiveTime>, tz: Option<Tz>) -> InlineKeyboardMarkup {
-    let mut rows = match digest {
+/// The Settings menu keyboard: an enable/disable-all-events toggle, a digest
+/// on/off toggle, the time button (opening the hour picker) while the digest
+/// is on, and the timezone button (opening the region picker).
+pub fn settings_keyboard(
+    digest: Option<NaiveTime>,
+    tz: Option<Tz>,
+    activated: bool,
+) -> InlineKeyboardMarkup {
+    let events_row = if activated {
+        vec![InlineKeyboardButton::callback(
+            "🔕 Disable all events",
+            "st:dis",
+        )]
+    } else {
+        vec![InlineKeyboardButton::callback(
+            "🔔 Enable all events",
+            "st:en",
+        )]
+    };
+    let mut rows = vec![events_row];
+    rows.extend(match digest {
         Some(t) => vec![
             vec![InlineKeyboardButton::callback(
                 "🌅 Turn morning digest off",
@@ -72,7 +103,7 @@ pub fn settings_keyboard(digest: Option<NaiveTime>, tz: Option<Tz>) -> InlineKey
             "🌅 Turn morning digest on",
             "st:on",
         )]],
-    };
+    });
     let tz_label = match tz {
         Some(tz) => format!("🌍 Timezone: {}", tz.name()),
         None => "🌍 Set timezone".to_string(),
@@ -130,12 +161,18 @@ mod tests {
 
     #[test]
     fn settings_message_shows_digest_state() {
-        let off = settings_message(None, None);
+        let off = settings_message(None, None, false);
         assert!(off.starts_with("⚙️ <b>Settings</b>"));
+        assert!(off.contains("All events: <b>disabled</b>"));
         assert!(off.contains("Morning digest: <b>off</b>"));
         assert!(off.contains("Timezone: <b>not set</b>"));
 
-        let on = settings_message(NaiveTime::from_hms_opt(8, 0, 0), Some(Tz::Europe__Berlin));
+        let on = settings_message(
+            NaiveTime::from_hms_opt(8, 0, 0),
+            Some(Tz::Europe__Berlin),
+            true,
+        );
+        assert!(on.contains("All events: <b>enabled</b>"));
         assert!(on.contains("Morning digest: <b>on, 08:00</b>"));
         assert!(on.contains("today's events"));
         assert!(on.contains("Timezone: <b>Europe/Berlin</b>"));
@@ -147,19 +184,29 @@ mod tests {
     }
 
     #[test]
+    fn events_disabled_note_points_at_settings_command() {
+        assert!(EVENTS_DISABLED_NOTE.contains("/settings"));
+        assert!(EVENTS_DISABLED_NOTE.contains("will not fire"));
+    }
+
+    #[test]
     fn settings_keyboard_toggles_and_offers_time_when_on() {
         assert_eq!(
-            datas(&settings_keyboard(None, None)),
-            vec!["st:on", "st:tz"]
+            datas(&settings_keyboard(None, None, false)),
+            vec!["st:en", "st:on", "st:tz"]
         );
 
-        let on = settings_keyboard(NaiveTime::from_hms_opt(9, 0, 0), Some(Tz::Europe__Berlin));
-        assert_eq!(datas(&on), vec!["st:off", "st:t", "st:tz"]);
+        let on = settings_keyboard(
+            NaiveTime::from_hms_opt(9, 0, 0),
+            Some(Tz::Europe__Berlin),
+            true,
+        );
+        assert_eq!(datas(&on), vec!["st:dis", "st:off", "st:t", "st:tz"]);
         // The time button carries the current time in its label.
-        let time_label = &on.inline_keyboard[1][0].text;
+        let time_label = &on.inline_keyboard[2][0].text;
         assert!(time_label.contains("09:00"), "{time_label}");
         // The timezone button carries the current zone in its label.
-        let tz_label = &on.inline_keyboard[2][0].text;
+        let tz_label = &on.inline_keyboard[3][0].text;
         assert!(tz_label.contains("Europe/Berlin"), "{tz_label}");
     }
 

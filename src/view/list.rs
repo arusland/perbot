@@ -151,6 +151,14 @@ fn write_event_row_two_line(
     );
 }
 
+/// Notice shown instead of a scheduled-events list while the chat has all
+/// events disabled (the Settings-menu toggle): the lists would be misleading —
+/// nothing is scheduled to fire. The missed list is exempt (its snapshot is
+/// historical, not scheduled). Callers attach the `⚙ Settings` entry keyboard
+/// so re-enabling is one tap away.
+pub const EVENTS_DISABLED: &str =
+    "🔕 All events are disabled, so nothing is scheduled. You can enable them in /settings.";
+
 /// Number of events shown per page in a paginated list reply.
 pub const LIST_PAGE_SIZE: usize = 10;
 
@@ -569,6 +577,11 @@ mod tests {
         // The other list kinds stay settings-free.
         let today = datas(list_keyboard(ListKind::Today, 0, 3).unwrap());
         assert!(!today.contains(&SETTINGS_OPEN_DATA.to_string()));
+    }
+
+    #[test]
+    fn events_disabled_notice_points_at_settings() {
+        assert!(EVENTS_DISABLED.contains("/settings"));
     }
 
     #[test]

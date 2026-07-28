@@ -21,8 +21,8 @@ pub use event::{
     event_detail, next_launches_preview, scheduled_message, snoozed_message, updated_message,
 };
 pub use list::{
-    LIST_PAGE_SIZE, ListKind, RowStyle, format_missed_page, format_page_at, list_keyboard,
-    total_pages,
+    EVENTS_DISABLED, LIST_PAGE_SIZE, ListKind, RowStyle, format_missed_page, format_page_at,
+    list_keyboard, total_pages,
 };
 pub use message::{
     MESSAGE_MAX_LEN, MESSAGE_TRUNCATED, TELEGRAM_MAX_LEN, bot_started_message, clamp_message,
@@ -37,8 +37,8 @@ pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
 };
 pub use settings::{
-    DEFAULT_DIGEST_HOUR, DIGEST_NOTE, DIGEST_TIME_ASK, SETTINGS_OPEN_DATA, digest_time_keyboard,
-    settings_entry_keyboard, settings_keyboard, settings_message,
+    DEFAULT_DIGEST_HOUR, DIGEST_NOTE, DIGEST_TIME_ASK, EVENTS_DISABLED_NOTE, SETTINGS_OPEN_DATA,
+    digest_time_keyboard, settings_entry_keyboard, settings_keyboard, settings_message,
 };
 pub use timezone::{
     TZ_ASK, TZ_REQUIRED, timezone_cities_keyboard, timezone_current_message,
