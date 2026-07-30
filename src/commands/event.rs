@@ -3,13 +3,14 @@
 //! the edit flow. Snooze (`sn:<minutes>`) is dispatched from here to
 //! [`super::snooze`].
 
-use crate::pending::PendingEdit;
+use crate::pending::{EditKind, PendingEdit};
 use crate::state::{DismissOutcome, EventProvider};
 use crate::tgbot::TgBot;
 use crate::types::{EventInfo, NextSource};
 use crate::view::{
-    EDIT_ASK_TEXT, delete_confirm_keyboard, dismissed_notification_text, edit_cancel_keyboard,
-    edit_prompt, event_actions_keyboard, event_detail, notification_keyboard,
+    EDIT_ASK_TEXT, EDIT_TEXT_ASK, delete_confirm_keyboard, dismissed_notification_text,
+    edit_cancel_keyboard, edit_choice_keyboard, edit_prompt, edit_text_prompt,
+    event_actions_keyboard, event_detail, notification_keyboard,
 };
 use chrono::Utc;
 use teloxide::types::{CallbackQuery, ChatId, InlineKeyboardMarkup};
@@ -75,11 +76,12 @@ pub(super) fn parse_event_callback(data: &str) -> Option<(i64, &str)> {
 /// repetition (`disr` → skip the interval fills to the next anchor), snooze
 /// (`sn:<minutes>`; `snx` expands the collapsed notification keyboard to the
 /// full snooze rows), the delete flow (`del` → confirm prompt, `delyes` → delete,
-/// `delno` → restore the action buttons), or the edit flow (`ed` → start
-/// editing, `edno` → cancel editing). The `:n`-suffixed dismiss/delete variants
-/// are the notification-keyboard flavor that preserves the fired message.
-/// Unknown actions are acknowledged and ignored. Routed from `main`'s
-/// `eid:`-prefixed callback branch.
+/// `delno` → restore the action buttons), or the edit flow (`ed` → the
+/// full/text-only chooser, `edf` → start a full edit, `edt` → start a text-only
+/// edit, `edcn` → close the chooser, `edno` → cancel the pending edit). The
+/// `:n`-suffixed variants are the notification-keyboard flavor that preserves
+/// the fired message. Unknown actions are acknowledged and ignored. Routed from
+/// `main`'s `eid:`-prefixed callback branch.
 pub async fn handle_event_callback(
     bot: &TgBot,
     provider: &EventProvider,
@@ -97,7 +99,31 @@ pub async fn handle_event_callback(
         Some((id, "delyes:n")) => handle_delete_confirm(bot, provider, id, true, q).await,
         Some((id, "delno")) => handle_delete_cancel(bot, provider, id, false, q).await,
         Some((id, "delno:n")) => handle_delete_cancel(bot, provider, id, true, q).await,
-        Some((id, "ed")) => handle_edit_prompt(bot, provider, pending_edit, id, q).await,
+        Some((id, "ed")) => handle_edit_choice(bot, id, false, q).await,
+        Some((id, "ed:n")) => handle_edit_choice(bot, id, true, q).await,
+        Some((id, "edf")) => {
+            handle_edit_start(bot, provider, pending_edit, id, EditKind::Full, false, q).await
+        }
+        Some((id, "edf:n")) => {
+            handle_edit_start(bot, provider, pending_edit, id, EditKind::Full, true, q).await
+        }
+        Some((id, "edt")) => {
+            handle_edit_start(
+                bot,
+                provider,
+                pending_edit,
+                id,
+                EditKind::TextOnly,
+                false,
+                q,
+            )
+            .await
+        }
+        Some((id, "edt:n")) => {
+            handle_edit_start(bot, provider, pending_edit, id, EditKind::TextOnly, true, q).await
+        }
+        Some((id, "edcn")) => handle_choice_cancel(bot, provider, id, false, q).await,
+        Some((id, "edcn:n")) => handle_choice_cancel(bot, provider, id, true, q).await,
         Some((_, "edno")) => handle_edit_cancel(bot, pending_edit, q).await,
         Some((id, "snx")) => super::snooze::handle_snooze_expand(bot, provider, id, q).await,
         Some((_, action)) if action.starts_with("sn:") => {
@@ -234,19 +260,77 @@ fn resolve_edit_target(
     }
 }
 
-/// Handles the `✏️ Edit` press (`eid:<id>:ed`): access-checks the event against
-/// the chat the button was pressed in (callback ids are user-influenceable),
-/// records the chat as editing that event, and prompts for the replacement input
-/// with the event's current input — time expression plus the original formatted
-/// message, selectable for copy-paste ([`edit_prompt`]) —
-/// and a Cancel button. An Edit press on a snoozed event starts the flow for its
-/// parent instead ([`resolve_edit_target`]). Replies "Event not found." for a
-/// missing or foreign id.
-async fn handle_edit_prompt(
+/// Handles the `✏️ Edit` press (`eid:<id>:ed` / `eid:<id>:ed:n`): swaps the
+/// keyboard in place for the edit chooser — full edit, text-only edit, cancel —
+/// leaving the message text untouched. `from_notification` is carried into the
+/// chooser so the follow-up presses know which keyboard to restore.
+async fn handle_edit_choice(
+    bot: &TgBot,
+    id: i64,
+    from_notification: bool,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
+    if let Some(message) = q.regular_message()
+        && let Err(e) = bot
+            .edit_markup(
+                message.chat.id,
+                message.id,
+                edit_choice_keyboard(id, from_notification),
+            )
+            .await
+    {
+        log::warn!("Failed to show edit chooser for event {id}: {e}");
+    }
+    bot.answer_callback(q.id, None).await?;
+    Ok(())
+}
+
+/// Handles the `❌ Cancel` press on the edit chooser (`eid:<id>:edcn` /
+/// `eid:<id>:edcn:n`): restores the keyboard the chooser replaced, leaving the
+/// message text untouched.
+async fn handle_choice_cancel(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    from_notification: bool,
+    q: CallbackQuery,
+) -> anyhow::Result<()> {
+    if let Some(message) = q.regular_message() {
+        restore_event_keyboard(
+            bot,
+            provider,
+            id,
+            from_notification,
+            message.chat.id,
+            message.id,
+        )
+        .await?;
+    }
+    bot.answer_callback(q.id, None).await?;
+    Ok(())
+}
+
+/// Handles an edit-chooser pick (`eid:<id>:edf(:n)` full edit /
+/// `eid:<id>:edt(:n)` text-only edit): restores the pressed message's keyboard
+/// (the chooser is done either way), access-checks the event against the chat
+/// the button was pressed in (callback ids are user-influenceable), records the
+/// chat as editing that event with the picked [`EditKind`], and prompts for the
+/// replacement input as a new message — the full flow shows the current time
+/// expression plus the formatted message ([`edit_prompt`]), the text-only flow
+/// just the message ([`edit_text_prompt`]) — with a Cancel button. Both kinds
+/// require a configured timezone (the full flow re-parses a time expression,
+/// and `main`'s timezone gate clears pending flows before any reply could
+/// complete either kind); a pre-existing-DB chat that never picked one gets the
+/// picker instead. A pick on a snoozed event starts the flow for its parent
+/// instead ([`resolve_edit_target`]). Replies "Event not found." for a missing
+/// or foreign id.
+async fn handle_edit_start(
     bot: &TgBot,
     provider: &EventProvider,
     pending_edit: &PendingEdit,
     id: i64,
+    kind: EditKind,
+    from_notification: bool,
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     let Some(message) = q.regular_message() else {
@@ -254,9 +338,10 @@ async fn handle_edit_prompt(
         return Ok(());
     };
     let chat_id = message.chat.id;
+    let message_id = message.id;
 
-    // Editing re-parses a time expression, which needs a configured timezone;
-    // a pre-existing-DB chat that never picked one gets the picker instead.
+    restore_event_keyboard(bot, provider, id, from_notification, chat_id, message_id).await?;
+
     if provider.get_timezone(chat_id.0)?.is_none() {
         bot.answer_callback(q.id, None).await?;
         bot.send_html(
@@ -271,14 +356,19 @@ async fn handle_edit_prompt(
     let event = resolve_edit_target(provider, id, chat_id.0)?;
     bot.answer_callback(q.id, None).await?;
     if let Some(event) = event {
-        pending_edit.lock().unwrap().insert(chat_id.0, event.id);
-        let loc = crate::locale::for_chat(chat_id.0);
-        bot.send_html(
-            chat_id,
-            edit_prompt(EDIT_ASK_TEXT, &event, loc),
-            Some(edit_cancel_keyboard(event.id)),
-        )
-        .await?;
+        pending_edit
+            .lock()
+            .unwrap()
+            .insert(chat_id.0, (event.id, kind));
+        let prompt = match kind {
+            EditKind::Full => {
+                let loc = crate::locale::for_chat(chat_id.0);
+                edit_prompt(EDIT_ASK_TEXT, &event, loc)
+            }
+            EditKind::TextOnly => edit_text_prompt(EDIT_TEXT_ASK, &event),
+        };
+        bot.send_html(chat_id, prompt, Some(edit_cancel_keyboard(event.id)))
+            .await?;
     } else {
         bot.send_text(chat_id, "Event not found.", None).await?;
     }
@@ -334,12 +424,40 @@ async fn handle_delete_prompt(
     Ok(())
 }
 
+/// Restores the action keyboard a confirmation/chooser replaced — the collapsed
+/// notification keyboard for the notification flavor, otherwise the
+/// Dismiss/Edit/Delete action buttons — leaving the message text untouched. The
+/// event is reloaded so the restored keyboard reflects its current active state
+/// (whether the Dismiss row belongs there). A failing keyboard edit is logged,
+/// not bubbled. Shared by the delete and edit-chooser Cancels and the
+/// edit-chooser picks.
+async fn restore_event_keyboard(
+    bot: &TgBot,
+    provider: &EventProvider,
+    id: i64,
+    from_notification: bool,
+    chat_id: ChatId,
+    message_id: teloxide::types::MessageId,
+) -> crate::error::Result<()> {
+    let event = provider.get_event(id)?;
+    let active = event.as_ref().is_some_and(|e| e.active);
+    let is_repetition = event
+        .as_ref()
+        .is_some_and(|e| e.source == Some(NextSource::Repetition));
+    let markup = if from_notification {
+        notification_keyboard(id, active, is_repetition, provider.last_snooze(chat_id.0))
+    } else {
+        event_actions_keyboard(id, active, is_repetition)
+    };
+    if let Err(e) = bot.edit_markup(chat_id, message_id, markup).await {
+        log::warn!("Failed to restore action keyboard for event {id}: {e}");
+    }
+    Ok(())
+}
+
 /// Handles the `❌ Cancel` press (`eid:<id>:delno` / `eid:<id>:delno:n`): restores
-/// the keyboard the flow started from — the collapsed notification keyboard for
-/// the `:n` variant, otherwise the Dismiss/Edit/Delete action buttons — leaving the
-/// message text untouched. For the detail view the event is reloaded so the
-/// restored keyboard reflects its current active state (whether the Dismiss
-/// button belongs there).
+/// the keyboard the flow started from via [`restore_event_keyboard`], leaving
+/// the message text untouched.
 async fn handle_delete_cancel(
     bot: &TgBot,
     provider: &EventProvider,
@@ -348,24 +466,15 @@ async fn handle_delete_cancel(
     q: CallbackQuery,
 ) -> anyhow::Result<()> {
     if let Some(message) = q.regular_message() {
-        let event = provider.get_event(id)?;
-        let active = event.as_ref().is_some_and(|e| e.active);
-        let is_repetition = event
-            .as_ref()
-            .is_some_and(|e| e.source == Some(NextSource::Repetition));
-        let markup = if from_notification {
-            notification_keyboard(
-                id,
-                active,
-                is_repetition,
-                provider.last_snooze(message.chat.id.0),
-            )
-        } else {
-            event_actions_keyboard(id, active, is_repetition)
-        };
-        if let Err(e) = bot.edit_markup(message.chat.id, message.id, markup).await {
-            log::warn!("Failed to restore delete button for event {id}: {e}");
-        }
+        restore_event_keyboard(
+            bot,
+            provider,
+            id,
+            from_notification,
+            message.chat.id,
+            message.id,
+        )
+        .await?;
     }
     bot.answer_callback(q.id, None).await?;
     Ok(())
@@ -496,6 +605,10 @@ mod tests {
         assert_eq!(parse_event_callback("eid:42:disr"), Some((42, "disr")));
         assert_eq!(parse_event_callback("eid:42:dis:n"), Some((42, "dis:n")));
         assert_eq!(parse_event_callback("eid:42:disr:n"), Some((42, "disr:n")));
+        assert_eq!(parse_event_callback("eid:42:ed:n"), Some((42, "ed:n")));
+        assert_eq!(parse_event_callback("eid:42:edf"), Some((42, "edf")));
+        assert_eq!(parse_event_callback("eid:42:edt:n"), Some((42, "edt:n")));
+        assert_eq!(parse_event_callback("eid:42:edcn:n"), Some((42, "edcn:n")));
 
         // Missing prefix, non-numeric id, no action separator.
         assert_eq!(parse_event_callback("ev:1:del"), None);

@@ -624,6 +624,21 @@ impl EventProvider {
         }
     }
 
+    /// Replaces only an event's message HTML without recomputing the schedule
+    /// (routing a text edit through the scheduler could silently reschedule —
+    /// an `in_offset` event recomputes from `now`), reloads the next-event
+    /// cache (the cached event carries the message a firing reminder sends),
+    /// and returns the event as stored. `None` when the row vanished. Used by
+    /// the text-only edit flow.
+    pub fn update_message_and_get(&self, id: i64, message: &str) -> Result<Option<EventInfo>> {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.storage.update_message(id, message)? {
+            return Ok(None);
+        }
+        Self::load_next_event(&mut inner)?;
+        inner.storage.get_event(id)
+    }
+
     /// Inserts an event exactly as supplied, without running the scheduler.
     ///
     /// Used by the legacy importer, where `next_datetime`/`active` are already
@@ -1114,6 +1129,43 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("2099-06-15")
+        );
+    }
+
+    #[test]
+    fn update_message_and_get_skips_reschedule() {
+        let chat_id = 904;
+        let (provider, msg_id) = test_provider(chat_id);
+
+        // An in_offset event: re-running the scheduler would recompute its
+        // next_datetime from `now`, so the text-only update must not.
+        let mut event = base_event(chat_id, msg_id);
+        event.in_offset = Some((30, crate::types::TimeUnit::Minutes));
+        let stored = provider
+            .insert_event_and_get_at(event, ndt(2099, 6, 15, 12, 0, 0))
+            .unwrap();
+        assert_eq!(stored.next_datetime, Some(ndt(2099, 6, 15, 12, 30, 0)));
+
+        let updated = provider
+            .update_message_and_get(stored.id, "<b>new</b> text")
+            .unwrap()
+            .expect("event still stored");
+        assert_eq!(updated.message, "<b>new</b> text");
+        assert_eq!(updated.next_datetime, stored.next_datetime);
+        assert_eq!(updated.active, stored.active);
+        assert_eq!(updated.source, stored.source);
+
+        // The next-event cache was reloaded and carries the new text.
+        let cached = provider.get_next_event().expect("cached next event");
+        assert_eq!(cached.id, stored.id);
+        assert_eq!(cached.message, "<b>new</b> text");
+
+        // A vanished row yields None.
+        assert!(
+            provider
+                .update_message_and_get(9999, "x")
+                .unwrap()
+                .is_none()
         );
     }
 

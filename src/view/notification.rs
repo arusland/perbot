@@ -41,9 +41,9 @@ fn snooze_label(minutes: i64) -> String {
 /// the event stays `active` after the fire (`eid:<id>:dis:n` skips the upcoming
 /// occurrence; `eid:<id>:disr:n` is added when `is_repetition` — the upcoming
 /// `source` is `Repetition` — and skips the interval fills to the next anchor),
-/// plus an Edit/Delete row (`eid:<id>:ed` starts the edit flow;
-/// `eid:<id>:del:n` starts the notification-aware delete flow, whose Cancel
-/// restores the collapsed keyboard).
+/// plus an Edit/Delete row (`eid:<id>:ed:n` opens the notification-aware edit
+/// chooser; `eid:<id>:del:n` starts the notification-aware delete flow — the
+/// Cancel of either restores the collapsed keyboard).
 fn action_rows(event_id: i64, active: bool, is_repetition: bool) -> Vec<Vec<InlineKeyboardButton>> {
     let mut rows = Vec::new();
     // Dismiss actions get their own row (only while a future occurrence remains).
@@ -61,7 +61,7 @@ fn action_rows(event_id: i64, active: bool, is_repetition: bool) -> Vec<Vec<Inli
         rows.push(dismiss_row);
     }
     rows.push(vec![
-        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed")),
+        InlineKeyboardButton::callback("✏️ Edit", format!("eid:{event_id}:ed:n")),
         InlineKeyboardButton::callback("🗑 Delete", format!("eid:{event_id}:del:n")),
     ]);
     rows
@@ -238,7 +238,7 @@ mod tests {
         let collapsed = || ["eid:42:snx".to_owned(), "eid:42:sn:30".to_owned()].into_iter();
 
         let expected: Vec<String> = collapsed()
-            .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
+            .chain(["eid:42:ed:n".to_owned(), "eid:42:del:n".to_owned()])
             .collect();
         assert_eq!(datas(notification_keyboard(42, false, false, 30)), expected);
 
@@ -246,7 +246,7 @@ mod tests {
             .chain([
                 "eid:42:dis:n".to_owned(),
                 "eid:42:disr:n".to_owned(),
-                "eid:42:ed".to_owned(),
+                "eid:42:ed:n".to_owned(),
                 "eid:42:del:n".to_owned(),
             ])
             .collect();
@@ -255,7 +255,7 @@ mod tests {
         let expected: Vec<String> = collapsed()
             .chain([
                 "eid:42:dis:n".to_owned(),
-                "eid:42:ed".to_owned(),
+                "eid:42:ed:n".to_owned(),
                 "eid:42:del:n".to_owned(),
             ])
             .collect();
@@ -271,7 +271,7 @@ mod tests {
         };
 
         let expected: Vec<String> = snoozes()
-            .chain(["eid:42:ed".to_owned(), "eid:42:del:n".to_owned()])
+            .chain(["eid:42:ed:n".to_owned(), "eid:42:del:n".to_owned()])
             .collect();
         assert_eq!(
             datas(expanded_notification_keyboard(42, false, false)),
@@ -282,7 +282,7 @@ mod tests {
             .chain([
                 "eid:42:dis:n".to_owned(),
                 "eid:42:disr:n".to_owned(),
-                "eid:42:ed".to_owned(),
+                "eid:42:ed:n".to_owned(),
                 "eid:42:del:n".to_owned(),
             ])
             .collect();

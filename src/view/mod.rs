@@ -17,8 +17,9 @@ mod timezone;
 mod user;
 
 pub use event::{
-    delete_confirm_keyboard, edit_cancel_keyboard, edit_prompt, event_actions_keyboard,
-    event_detail, next_launches_preview, scheduled_message, snoozed_message, updated_message,
+    delete_confirm_keyboard, edit_cancel_keyboard, edit_choice_keyboard, edit_prompt,
+    edit_text_prompt, event_actions_keyboard, event_detail, next_launches_preview,
+    scheduled_message, snoozed_message, updated_message,
 };
 pub use list::{
     EVENTS_DISABLED, LIST_PAGE_SIZE, ListKind, RowStyle, format_missed_page, format_page_at,
@@ -34,7 +35,8 @@ pub use notification::{
     fired_message, notification_keyboard,
 };
 pub use prompt::{
-    ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, cancel_keyboard,
+    ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, EDIT_TEXT_ASK,
+    cancel_keyboard,
 };
 pub use settings::{
     DEFAULT_DIGEST_HOUR, DIGEST_NOTE, DIGEST_TIME_ASK, EVENTS_DISABLED_NOTE, SETTINGS_OPEN_DATA,

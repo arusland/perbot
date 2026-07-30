@@ -15,7 +15,16 @@ use crate::parser;
 use crate::richtext;
 use crate::send_schedule_confirmation;
 use crate::types::EventInfo;
-use crate::view::{self, clamp_message, edit_prompt};
+use crate::view::{self, clamp_message, edit_prompt, edit_text_prompt};
+
+/// Which flavor of edit a chat's pending edit is: `Full` replaces the whole
+/// event from a re-parsed time + message reply; `TextOnly` replaces just the
+/// message HTML, leaving the schedule untouched.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditKind {
+    Full,
+    TextOnly,
+}
 
 /// Per-chat events awaiting a reminder body, keyed by chat id. The stored
 /// [`EventInfo`] has its time/recurrence fields set and an empty `message`;
@@ -27,10 +36,10 @@ pub fn new_pending() -> PendingMessage {
 }
 
 /// Per-chat events being edited, keyed by chat id; the value is the id of the
-/// event whose time and message the next message will replace. Set when the user
-/// taps Edit on the `/event<id>` view and cleared when the edit completes or is
-/// cancelled. In-memory only, like [`PendingMessage`].
-pub type PendingEdit = Arc<Mutex<HashMap<i64, i64>>>;
+/// event the next message will replace plus which [`EditKind`] of edit it is.
+/// Set when the user picks an option from the Edit chooser and cleared when
+/// the edit completes or is cancelled. In-memory only, like [`PendingMessage`].
+pub type PendingEdit = Arc<Mutex<HashMap<i64, (i64, EditKind)>>>;
 
 pub fn new_pending_edit() -> PendingEdit {
     Arc::new(Mutex::new(HashMap::new()))
@@ -43,10 +52,12 @@ pub fn clear_chat(pending_msg: &PendingMessage, pending_edit: &PendingEdit, chat
     pending_edit.lock().unwrap().remove(&chat_id);
 }
 
-/// Completes a pending edit (the chat tapped Edit on an `/event<id>` view):
-/// the message replaces the event's time and message. A time-only or
-/// unparsable reply re-prompts instead of applying. Returns `true` when the
-/// chat had a pending edit and the message was consumed by it.
+/// Completes a pending edit (the chat picked an option from the Edit chooser):
+/// a [`EditKind::Full`] edit re-parses the message as time + text and replaces
+/// the whole event (a time-only or unparsable reply re-prompts instead of
+/// applying); a [`EditKind::TextOnly`] edit replaces just the message HTML,
+/// leaving the schedule untouched. Returns `true` when the chat had a pending
+/// edit and the message was consumed by it.
 pub async fn handle_edit_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow::Result<bool> {
     let editing = ctx
         .pending_edit
@@ -54,7 +65,7 @@ pub async fn handle_edit_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow
         .unwrap()
         .get(&ctx.chat_id.0)
         .copied();
-    let Some(event_id) = editing else {
+    let Some((event_id, kind)) = editing else {
         return Ok(false);
     };
 
@@ -71,6 +82,10 @@ pub async fn handle_edit_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow
             .await?;
         return Ok(true);
     };
+
+    if kind == EditKind::TextOnly {
+        return handle_text_edit_completion(ctx, &old).await;
+    }
 
     if let Some((mut event, spans)) = parser::parse_full(ctx.text, ctx.loc, ctx.tz) {
         let entities = ctx.msg.parse_entities().unwrap_or_default();
@@ -108,6 +123,52 @@ pub async fn handle_edit_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow
             )
             .await?;
     }
+    Ok(true)
+}
+
+/// Completes a [`EditKind::TextOnly`] pending edit: the whole reply is the new
+/// message body (never parsed for a time expression) and replaces only the
+/// event's message HTML via [`EventProvider::update_message_and_get`], so the
+/// schedule stays exactly as stored. A whitespace-only reply re-prompts,
+/// keeping the pending edit.
+///
+/// [`EventProvider::update_message_and_get`]: crate::state::EventProvider::update_message_and_get
+async fn handle_text_edit_completion(
+    ctx: &CmdContext<'_>,
+    old: &EventInfo,
+) -> anyhow::Result<bool> {
+    let entities = ctx.msg.parse_entities().unwrap_or_default();
+    // The whole reply text is the body, so a single span covers all of it.
+    let span = 0..ctx.text.len();
+    let body = richtext::render_html(ctx.text, std::slice::from_ref(&span), &entities);
+    if body.is_empty() {
+        // Whitespace-only reply carries no usable body: keep waiting and
+        // re-prompt with the Cancel button.
+        ctx.bot
+            .send_html(
+                ctx.chat_id,
+                edit_text_prompt(view::EDIT_TEXT_ASK, old),
+                Some(view::edit_cancel_keyboard(old.id)),
+            )
+            .await?;
+        return Ok(true);
+    }
+
+    let (clamped, truncated) = clamp_message(&body);
+    let stored = ctx.provider.update_message_and_get(old.id, &clamped)?;
+    ctx.pending_edit.lock().unwrap().remove(&ctx.chat_id.0);
+    let Some(stored) = stored else {
+        ctx.bot
+            .send_text(ctx.chat_id, "Event not found.", None)
+            .await?;
+        return Ok(true);
+    };
+    if truncated {
+        ctx.bot
+            .send_text(ctx.chat_id, view::MESSAGE_TRUNCATED, None)
+            .await?;
+    }
+    send_schedule_confirmation(ctx, &stored, true).await?;
     Ok(true)
 }
 

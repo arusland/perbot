@@ -110,6 +110,18 @@ pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> S
     }
 }
 
+/// Builds the HTML text-only edit prompt: the `lead` line followed by just the
+/// event's current message with its Telegram formatting intact (the stored HTML
+/// fragment, inserted verbatim), selectable as a copy-paste starting point. No
+/// time expression — the schedule is not up for editing here.
+pub fn edit_text_prompt(lead: &str, event: &EventInfo) -> String {
+    if event.message.is_empty() {
+        html::escape(lead)
+    } else {
+        format!("{}\n\n{}", html::escape(lead), event.message)
+    }
+}
+
 /// Human-readable recurrence period for an event, e.g. `"every 2 days"`,
 /// `"every Friday"`, `"every first Sunday"`, `"last day of the month"`. Weekday
 /// sets collapse contiguous runs of ≥3 days into full-name ranges
@@ -249,8 +261,9 @@ pub fn event_detail(
 /// only shown when the event is `active`), an optional `⏩ Dismiss repetition`
 /// (callback `eid:<id>:disr`, skips the interval fills to the next anchor — only
 /// shown when the event is `active` and its current source is `Repetition`),
-/// `✏️ Edit` (callback `eid:<id>:ed`, starts the edit flow) and `🗑 Delete`
-/// (callback `eid:<id>:del`, swaps in the [`delete_confirm_keyboard`] row).
+/// `✏️ Edit` (callback `eid:<id>:ed`, swaps in the [`edit_choice_keyboard`])
+/// and `🗑 Delete` (callback `eid:<id>:del`, swaps in the
+/// [`delete_confirm_keyboard`] row).
 pub fn event_actions_keyboard(
     event_id: i64,
     active: bool,
@@ -287,6 +300,26 @@ pub fn edit_cancel_keyboard(event_id: i64) -> InlineKeyboardMarkup {
         "Cancel",
         format!("eid:{event_id}:edno"),
     )]])
+}
+
+/// The chooser shown after the Edit button is tapped: full edit
+/// (`eid:<id>:edf`, re-parse time + message), text-only edit (`eid:<id>:edt`,
+/// message only) and a cancel (`eid:<id>:edcn`) that restores the previous
+/// keyboard. When the flow started from a fired notification
+/// (`from_notification`), all callbacks carry a trailing `:n` so the follow-up
+/// handlers restore the notification keyboard instead of the detail-view one.
+pub fn edit_choice_keyboard(event_id: i64, from_notification: bool) -> InlineKeyboardMarkup {
+    let suffix = if from_notification { ":n" } else { "" };
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback("✏️ Edit event", format!("eid:{event_id}:edf{suffix}")),
+            InlineKeyboardButton::callback("📝 Edit text", format!("eid:{event_id}:edt{suffix}")),
+        ],
+        vec![InlineKeyboardButton::callback(
+            "❌ Cancel",
+            format!("eid:{event_id}:edcn{suffix}"),
+        )],
+    ])
 }
 
 /// The confirmation row shown after the Delete button is tapped: a confirm
@@ -739,6 +772,15 @@ mod tests {
             ["eid:42:delyes:n", "eid:42:delno:n"]
         );
         assert_eq!(datas(edit_cancel_keyboard(42)), ["eid:42:edno"]);
+        assert_eq!(
+            datas(edit_choice_keyboard(42, false)),
+            ["eid:42:edf", "eid:42:edt", "eid:42:edcn"]
+        );
+        // Started from a notification → the `:n` suffix rides along.
+        assert_eq!(
+            datas(edit_choice_keyboard(42, true)),
+            ["eid:42:edf:n", "eid:42:edt:n", "eid:42:edcn:n"]
+        );
 
         // Row layout: dismiss actions sit on their own first row, Edit/Delete
         // on the second. Inactive events drop the dismiss row entirely.
@@ -770,5 +812,26 @@ mod tests {
             rows(event_actions_keyboard(42, false, false)),
             vec![vec!["eid:42:ed", "eid:42:del"]]
         );
+        // The edit chooser: both edit flavors on the first row, Cancel below.
+        assert_eq!(
+            rows(edit_choice_keyboard(42, false)),
+            vec![vec!["eid:42:edf", "eid:42:edt"], vec!["eid:42:edcn"]]
+        );
+    }
+
+    #[test]
+    fn edit_text_prompt_shows_message_without_time() {
+        // The message keeps its Telegram formatting (HTML fragment verbatim);
+        // the lead is escaped; no time expression appears.
+        let mut e = sample_event("<b>call</b> her", None);
+        e.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
+        assert_eq!(
+            edit_text_prompt("Edit <text>:", &e),
+            "Edit &lt;text&gt;:\n\n<b>call</b> her"
+        );
+
+        // A body-less event renders just the lead.
+        let t = sample_event("", None);
+        assert_eq!(edit_text_prompt("Edit:", &t), "Edit:");
     }
 }

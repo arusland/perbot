@@ -10,6 +10,10 @@ pub const ASK_TEXT: &str = "🕒 Got the time. Now send the reminder text:";
 /// Prompt shown when the user taps Edit, asking for the replacement input.
 pub const EDIT_ASK_TEXT: &str = "✏️ Send the new time and message:";
 
+/// Prompt shown when the user picks "Edit text", asking for the replacement
+/// message text (the schedule stays as is). Also the whitespace-only re-prompt.
+pub const EDIT_TEXT_ASK: &str = "📝 Send the new message text:";
+
 /// Re-prompt when an edit reply carried a time but no reminder text.
 pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too:";
 

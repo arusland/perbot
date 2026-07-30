@@ -534,6 +534,18 @@ impl EventStorage {
         Ok(())
     }
 
+    /// Replaces only the message HTML of an event; schedule and identity
+    /// columns are untouched. Used by the text-only edit flow. Returns `true`
+    /// when a row was updated.
+    pub fn update_message(&self, id: i64, message: &str) -> Result<bool> {
+        let rows_affected = self.conn.execute(
+            "UPDATE events SET message = ?1 WHERE id = ?2",
+            params![message, id],
+        )?;
+        log::info!("Updated event {id} message ({} bytes)", message.len());
+        Ok(rows_affected > 0)
+    }
+
     /// Marks an event as inactive.
     pub fn mark_inactive(&self, id: i64) -> Result<bool> {
         let rows_affected = self
@@ -1216,6 +1228,36 @@ mod tests {
         assert_eq!(stored.msg_id, original.msg_id);
         assert_eq!(stored.created_at, original.created_at);
         assert_eq!(stored.parent, original.parent);
+    }
+
+    #[test]
+    fn test_update_message_leaves_schedule_untouched() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 321);
+        let mut event = make_event("original message");
+        event.chat_id = 321;
+        event.msg_id = ensure_message(&storage, 321);
+
+        let id = storage.insert_event(&event).unwrap();
+        let original = storage.get_event(id).unwrap().unwrap();
+
+        assert!(storage.update_message(id, "<b>new</b> message").unwrap());
+
+        let stored = storage.get_event(id).unwrap().unwrap();
+        assert_eq!(stored.message, "<b>new</b> message");
+        // The schedule and identity columns are untouched.
+        assert_eq!(stored.date, original.date);
+        assert_eq!(stored.time, original.time);
+        assert_eq!(stored.active, original.active);
+        assert_eq!(stored.next_datetime, original.next_datetime);
+        assert_eq!(stored.last_next_datetime, original.last_next_datetime);
+        assert_eq!(stored.source, original.source);
+        assert_eq!(stored.chat_id, original.chat_id);
+        assert_eq!(stored.msg_id, original.msg_id);
+        assert_eq!(stored.created_at, original.created_at);
+
+        // A missing id updates nothing.
+        assert!(!storage.update_message(9999, "x").unwrap());
     }
 
     /// Inserts a parent + snoozed child pair for the parent-resolution tests:
