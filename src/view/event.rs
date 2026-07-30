@@ -95,30 +95,48 @@ pub fn snoozed_message(
     detail_body(Some("💤 Event snoozed"), event, now, tz, loc)
 }
 
-/// Builds the HTML edit prompt: the `lead` line followed by the event's current
-/// input — its canonical time expression ([`EventInfo::normalize_time`]) and the
-/// original message with its Telegram formatting intact (the stored HTML
-/// fragment, inserted verbatim), so the user can select, copy and paste it as a
-/// starting point. Pasting the formatted text round-trips: ingestion re-renders
-/// the entities back to the same HTML.
+/// Bold label line introducing the current input in [`edit_prompt`].
+const OLD_EVENT_LABEL: &str = "<b>Old event:</b>";
+
+/// Bold label line introducing the current message in [`edit_text_prompt`].
+const OLD_TEXT_LABEL: &str = "<b>Old text:</b>";
+
+/// Builds the HTML edit prompt: the `lead` line, then an `Old event:` label
+/// introducing the event's current input — its canonical time expression
+/// ([`EventInfo::normalize_time`]) and the original message with its Telegram
+/// formatting intact (the stored HTML fragment, inserted verbatim), so the user
+/// can select, copy and paste it as a starting point. Pasting the formatted
+/// text round-trips: ingestion re-renders the entities back to the same HTML.
 pub fn edit_prompt(lead: &str, event: &EventInfo, loc: &dyn LocaleProvider) -> String {
     let time = html::escape(&event.normalize_time(loc));
     if event.message.is_empty() {
-        format!("{}\n\n{}", html::escape(lead), time)
+        format!("{}\n\n{}\n{}", html::escape(lead), OLD_EVENT_LABEL, time)
     } else {
-        format!("{}\n\n{} {}", html::escape(lead), time, event.message)
+        format!(
+            "{}\n\n{}\n{} {}",
+            html::escape(lead),
+            OLD_EVENT_LABEL,
+            time,
+            event.message
+        )
     }
 }
 
-/// Builds the HTML text-only edit prompt: the `lead` line followed by just the
-/// event's current message with its Telegram formatting intact (the stored HTML
-/// fragment, inserted verbatim), selectable as a copy-paste starting point. No
-/// time expression — the schedule is not up for editing here.
+/// Builds the HTML text-only edit prompt: the `lead` line, then an `Old text:`
+/// label introducing just the event's current message with its Telegram
+/// formatting intact (the stored HTML fragment, inserted verbatim), selectable
+/// as a copy-paste starting point. No time expression — the schedule is not up
+/// for editing here.
 pub fn edit_text_prompt(lead: &str, event: &EventInfo) -> String {
     if event.message.is_empty() {
         html::escape(lead)
     } else {
-        format!("{}\n\n{}", html::escape(lead), event.message)
+        format!(
+            "{}\n\n{}\n{}",
+            html::escape(lead),
+            OLD_TEXT_LABEL,
+            event.message
+        )
     }
 }
 
@@ -531,7 +549,7 @@ mod tests {
         e.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
         assert_eq!(
             edit_prompt("Edit:", &e, &EN),
-            "Edit:\n\n08:00 <b>call</b> her"
+            "Edit:\n\n<b>Old event:</b>\n08:00 <b>call</b> her"
         );
 
         // Recurrence (weekday set) is included via normalize_time.
@@ -546,7 +564,7 @@ mod tests {
         ]));
         assert_eq!(
             edit_prompt("Edit:", &r, &EN),
-            "Edit:\n\n09:00 Mon-Fri standup"
+            "Edit:\n\n<b>Old event:</b>\n09:00 Mon-Fri standup"
         );
 
         // An already-escaped message body passes through unchanged; the lead is
@@ -554,12 +572,18 @@ mod tests {
         let mut s = sample_event("a &amp; b &lt;c&gt;", None);
         s.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         let prompt = edit_prompt("Edit <now>:", &s, &EN);
-        assert_eq!(prompt, "Edit &lt;now&gt;:\n\n10:00 a &amp; b &lt;c&gt;");
+        assert_eq!(
+            prompt,
+            "Edit &lt;now&gt;:\n\n<b>Old event:</b>\n10:00 a &amp; b &lt;c&gt;"
+        );
 
         // A body-less event (snoozed child) renders just the time expression.
         let mut t = sample_event("", None);
         t.time = Some(NaiveTime::from_hms_opt(11, 0, 0).unwrap());
-        assert_eq!(edit_prompt("Edit:", &t, &EN), "Edit:\n\n11:00");
+        assert_eq!(
+            edit_prompt("Edit:", &t, &EN),
+            "Edit:\n\n<b>Old event:</b>\n11:00"
+        );
     }
 
     #[test]
@@ -827,7 +851,7 @@ mod tests {
         e.time = Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap());
         assert_eq!(
             edit_text_prompt("Edit <text>:", &e),
-            "Edit &lt;text&gt;:\n\n<b>call</b> her"
+            "Edit &lt;text&gt;:\n\n<b>Old text:</b>\n<b>call</b> her"
         );
 
         // A body-less event renders just the lead.

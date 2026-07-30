@@ -5,20 +5,20 @@
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Prompt shown after a time-only message, asking for the reminder text.
-pub const ASK_TEXT: &str = "🕒 Got the time. Now send the reminder text:";
+pub const ASK_TEXT: &str = "🕒 Got the time. Now send the reminder text";
 
 /// Prompt shown when the user taps Edit, asking for the replacement input.
-pub const EDIT_ASK_TEXT: &str = "✏️ Send the new time and message:";
+pub const EDIT_ASK_TEXT: &str = "✏️ Send the new time and message";
 
 /// Prompt shown when the user picks "Edit text", asking for the replacement
 /// message text (the schedule stays as is). Also the whitespace-only re-prompt.
-pub const EDIT_TEXT_ASK: &str = "📝 Send the new message text:";
+pub const EDIT_TEXT_ASK: &str = "📝 Send the new message text";
 
 /// Re-prompt when an edit reply carried a time but no reminder text.
-pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too:";
+pub const EDIT_NEED_TEXT: &str = "Please include the reminder text too";
 
 /// Re-prompt when an edit reply couldn't be parsed into a time.
-pub const EDIT_NEED_TIME: &str = "Couldn't read a time. Send the new time and message:";
+pub const EDIT_NEED_TIME: &str = "Couldn't read a time. Send the new time and message";
 
 /// Callback data carried by the Cancel button (routed by the `pm:` prefix).
 pub const CANCEL_DATA: &str = "pm:cancel";
