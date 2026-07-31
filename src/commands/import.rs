@@ -34,9 +34,24 @@ const IMPORT_USAGE: &str = "Usage: /import <user_id> <timezone>, e.g. /import 12
 /// Parses the `/import` arguments: exactly a chat id and an IANA timezone.
 fn parse_import_args(args: &str) -> Option<(i64, Tz)> {
     let mut words = args.split_whitespace();
-    let user_id = words.next()?.parse().ok()?;
-    let tz = crate::tz::parse_tz(words.next()?)?;
-    if words.next().is_some() {
+    let Some(id_word) = words.next() else {
+        log::warn!("/import: missing arguments");
+        return None;
+    };
+    let Ok(user_id) = id_word.parse() else {
+        log::warn!("/import: invalid chat id {id_word:?} (args: {args:?})");
+        return None;
+    };
+    let Some(tz_word) = words.next() else {
+        log::warn!("/import: missing timezone (args: {args:?})");
+        return None;
+    };
+    let Some(tz) = crate::tz::parse_tz(tz_word) else {
+        log::warn!("/import: unknown timezone {tz_word:?} (args: {args:?})");
+        return None;
+    };
+    if let Some(extra) = words.next() {
+        log::warn!("/import: unexpected extra argument {extra:?} (args: {args:?})");
         return None;
     }
     Some((user_id, tz))
