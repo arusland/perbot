@@ -267,23 +267,31 @@ fn parse_components(
             }
         }
 
-        // Monthly pattern: "first sunday", "last monday", "last day of the month"
+        // Monthly pattern: "first sunday", "last monday", "last day of the
+        // month", "last fri of july" (month-restricted → yearly)
         if monthly_pattern.is_none()
             && let Some(caps) = g.monthly.captures(&rem.text)
             && let Some(ord) = loc.ordinal_from_str(&caps[1])
         {
             let target = caps[2].to_ascii_lowercase();
+            let month = caps.get(3).and_then(|m| loc.month_from_str(m.as_str()));
             let m = caps.get(0).unwrap();
-            let (start, end) = (m.start(), m.end());
+            let (start, mut end) = (m.start(), m.end());
             let pattern = if target == "day" {
                 if ord == Ordinal::Last {
+                    // A month restriction applies only to ordinal weekdays:
+                    // "last day of july" stays LastDay and keeps "of july" in
+                    // the body (the deleted span stops after "day").
+                    if month.is_some() {
+                        end = caps.get(2).unwrap().end();
+                    }
                     Some(MonthlyPattern::LastDay)
                 } else {
                     None
                 }
             } else {
                 loc.day_from_str(&target)
-                    .map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd))
+                    .map(|wd| MonthlyPattern::OrdinalWeekday(ord, wd, month))
             };
 
             if pattern.is_some() {
@@ -936,7 +944,11 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(10, 0, 0));
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Sun,
+                None
+            ))
         );
         assert!(e.days.is_none());
         assert_eq!(e.message, "call mom");
@@ -948,7 +960,11 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(9, 30, 0));
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Last,
+                Weekday::Mon,
+                None
+            ))
         );
         assert_eq!(e.message, "team sync");
     }
@@ -961,7 +977,8 @@ mod tests {
             e.monthly_pattern,
             Some(MonthlyPattern::OrdinalWeekday(
                 Ordinal::Second,
-                Weekday::Thu
+                Weekday::Thu,
+                None,
             ))
         );
         assert_eq!(e.message, "board meeting");
@@ -973,7 +990,11 @@ mod tests {
         assert_eq!(e.time, NaiveTime::from_hms_opt(17, 0, 0));
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::Third, Weekday::Fri))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Third,
+                Weekday::Fri,
+                None
+            ))
         );
         assert_eq!(e.message, "happy hour");
     }
@@ -986,10 +1007,74 @@ mod tests {
             e.monthly_pattern,
             Some(MonthlyPattern::OrdinalWeekday(
                 Ordinal::Fourth,
-                Weekday::Wed
+                Weekday::Wed,
+                None,
             ))
         );
         assert_eq!(e.message, "review");
+    }
+
+    #[test]
+    fn parse_last_friday_of_july() {
+        let e = parse("11:02 last fri of july Sysadmin Day").unwrap();
+        assert_eq!(e.time, NaiveTime::from_hms_opt(11, 2, 0));
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Last,
+                Weekday::Fri,
+                Some(7),
+            ))
+        );
+        assert!(e.days.is_none());
+        assert_eq!(e.message, "Sysadmin Day");
+    }
+
+    #[test]
+    fn parse_the_last_friday_of_july_absorbs_article() {
+        let e = parse("11:02 the last fri of july Sysadmin Day").unwrap();
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Last,
+                Weekday::Fri,
+                Some(7),
+            ))
+        );
+        assert_eq!(e.message, "Sysadmin Day");
+    }
+
+    #[test]
+    fn parse_ordinal_weekday_of_full_month_name() {
+        let e = parse("10:00 first sunday of January call mom").unwrap();
+        assert_eq!(
+            e.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Sun,
+                Some(1),
+            ))
+        );
+        assert_eq!(e.message, "call mom");
+    }
+
+    #[test]
+    fn parse_last_day_of_named_month_keeps_tail() {
+        // A month restriction applies only to ordinal weekdays: "last day"
+        // stays LastDay and the "of july" tail remains in the body.
+        let e = parse("18:00 last day of july party").unwrap();
+        assert_eq!(e.monthly_pattern, Some(MonthlyPattern::LastDay));
+        assert_eq!(e.message, "of july party");
+    }
+
+    #[test]
+    fn normalize_last_friday_of_july_round_trips() {
+        let e = parse("11:02 the last fri of july x").unwrap();
+        let canonical = e.normalize_time(&EN);
+        assert_eq!(canonical, "11:02 last Friday of July");
+        let re = parse(&format!("{canonical} x")).unwrap();
+        assert_eq!(re.normalize_time(&EN), canonical);
+        assert_eq!(re.message, "x");
     }
 
     #[test]
@@ -1013,7 +1098,11 @@ mod tests {
         let e = parse("8:00 First Saturday chores").unwrap();
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sat))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Sat,
+                None
+            ))
         );
         assert_eq!(e.message, "chores");
     }
@@ -1024,7 +1113,11 @@ mod tests {
         assert!(e.time.is_none());
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Tue))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Tue,
+                None
+            ))
         );
         assert_eq!(e.message, "standup");
     }
@@ -1096,7 +1189,11 @@ mod tests {
         let e = parse("10:00 first sunday every month call mom").unwrap();
         assert_eq!(
             e.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Sun,
+                None
+            ))
         );
         let rep = e.repetition.unwrap();
         assert_eq!(rep.interval, 1);

@@ -156,13 +156,23 @@ fn calculate_next_datetime(
             let mut year = today.year();
             let mut month = today.month();
             let mut found = None;
-            for _ in 0..13 {
+            // A month-restricted pattern fires at most once a year, and a
+            // Fifth-<weekday>-of-<month> exists only in some years (a 5th
+            // Friday of February needs a leap year starting on Friday — gaps
+            // of ~28 years), so scan ~50 years; beyond that the event goes
+            // inactive. Unrestricted patterns keep the 13-month scan.
+            let months_to_scan = match pattern {
+                MonthlyPattern::OrdinalWeekday(_, _, Some(_)) => 12 * 50,
+                _ => 13,
+            };
+            for _ in 0..months_to_scan {
                 let target_date = match pattern {
                     MonthlyPattern::LastDay => last_day_of_month_date(year, month),
                     // `from_ymd_opt` yields `None` for days the month lacks
                     // (e.g. the 31st in February), so the loop skips that month.
                     MonthlyPattern::DayOfMonth(d) => NaiveDate::from_ymd_opt(year, month, *d),
-                    MonthlyPattern::OrdinalWeekday(ord, wd) => {
+                    MonthlyPattern::OrdinalWeekday(_, _, Some(m)) if *m != month => None,
+                    MonthlyPattern::OrdinalWeekday(ord, wd, _) => {
                         let n = match ord {
                             Ordinal::First => 1,
                             Ordinal::Second => 2,
@@ -545,7 +555,11 @@ mod tests {
         let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
-        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::First,
+            Weekday::Sun,
+            None,
+        ));
         let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -559,7 +573,11 @@ mod tests {
         let now = Utc::now().naive_utc();
         let mut event = make_play_event();
         event.time = Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap());
-        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Mon));
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Last,
+            Weekday::Mon,
+            None,
+        ));
         let result = calc_next(event, Tz::UTC);
         assert!(result.active);
         let dt = result.next_datetime.unwrap();
@@ -581,6 +599,61 @@ mod tests {
         assert!(dt > now);
         let next_day = dt.date().succ_opt().unwrap();
         assert_ne!(next_day.month(), dt.date().month());
+    }
+
+    #[test]
+    fn play_monthly_last_friday_of_july() {
+        // Month-restricted ordinal weekday fires yearly (mirrors Case 33.3):
+        // the last Friday of July 2026 (the 31st) at 11:02 has already passed
+        // at 12:00:01, so the next anchors are 2027-07-30 and 2028-07-28.
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(11, 2, 0).unwrap());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Last,
+            Weekday::Fri,
+            Some(7),
+        ));
+        let result = calc_next_at(
+            event,
+            dt(2026, 7, 31, 12, 0) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert!(result.active);
+        assert_eq!(result.next_datetime, Some(dt(2027, 7, 30, 11, 2)));
+        assert_eq!(result.source, Some(NextSource::MonthlyPattern));
+
+        let result = calc_next_at(
+            result,
+            dt(2027, 7, 30, 11, 2) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert_eq!(result.next_datetime, Some(dt(2028, 7, 28, 11, 2)));
+
+        // Later in the same July: the occurrence later that month still wins.
+        let result = calc_next_at(result, dt(2030, 7, 20, 9, 13), Tz::UTC);
+        assert_eq!(result.next_datetime, Some(dt(2030, 7, 26, 11, 2)));
+    }
+
+    #[test]
+    fn play_monthly_fifth_friday_of_february_scans_years() {
+        // A 5th Friday of February exists only in a leap year whose Feb 1 is a
+        // Friday — the next anchor can be decades away, proving the scan
+        // horizon exceeds 13 months.
+        let mut event = make_play_event();
+        event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Fifth,
+            Weekday::Fri,
+            Some(2),
+        ));
+        let now = dt(2026, 7, 31, 12, 0);
+        let result = calc_next_at(event, now, Tz::UTC);
+        assert!(result.active);
+        let next = result.next_datetime.unwrap();
+        assert!(next > now);
+        assert_eq!(next.date().month(), 2);
+        assert_eq!(next.date().weekday(), Weekday::Fri);
+        assert_eq!(next.date().day(), 29);
     }
 
     #[test]
@@ -698,6 +771,7 @@ mod tests {
         event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
             Ordinal::Second,
             Weekday::Wed,
+            None,
         ));
         let result = calc_next(event, Tz::UTC);
         assert!(result.active);

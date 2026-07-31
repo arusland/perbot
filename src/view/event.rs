@@ -174,12 +174,16 @@ fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String
     }
     if let Some(pattern) = &e.monthly_pattern {
         return Some(match pattern {
-            MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                format!(
+            MonthlyPattern::OrdinalWeekday(ord, wd, month) => {
+                let base = format!(
                     "{every} {} {}",
                     loc.ordinal_word(*ord),
                     loc.weekday_full(*wd)
-                )
+                );
+                match month {
+                    Some(m) => format!("{base} {}", loc.of_month_phrase(*m)),
+                    None => base,
+                }
             }
             MonthlyPattern::LastDay => loc.last_day_phrase().to_string(),
             MonthlyPattern::DayOfMonth(d) => loc.day_of_month_recurrence(&loc.ordinal_suffix(*d)),
@@ -650,10 +654,23 @@ mod tests {
         e.days = None;
 
         // Monthly patterns.
-        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::First,
+            Weekday::Sun,
+            None,
+        ));
         assert_eq!(
             describe_recurrence(&e, &EN).as_deref(),
             Some("every first Sunday")
+        );
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Last,
+            Weekday::Fri,
+            Some(7),
+        ));
+        assert_eq!(
+            describe_recurrence(&e, &EN).as_deref(),
+            Some("every last Friday of July")
         );
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(

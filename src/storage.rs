@@ -35,7 +35,7 @@ fn deserialize_years(s: &str) -> Option<HashSet<i32>> {
 
 fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
     match p {
-        MonthlyPattern::OrdinalWeekday(ord, wd) => {
+        MonthlyPattern::OrdinalWeekday(ord, wd, month) => {
             let ord_str = match ord {
                 Ordinal::First => "first",
                 Ordinal::Second => "second",
@@ -44,7 +44,13 @@ fn serialize_monthly_pattern(p: &MonthlyPattern) -> String {
                 Ordinal::Fifth => "fifth",
                 Ordinal::Last => "last",
             };
-            format!("{}_{}", ord_str, day_to_str(*wd))
+            // The month restriction rides as a numeric `@<1-12>` suffix
+            // (`last_fri@7`), keeping the column locale-independent.
+            let base = format!("{}_{}", ord_str, day_to_str(*wd));
+            match month {
+                Some(m) => format!("{base}@{m}"),
+                None => base,
+            }
         }
         MonthlyPattern::LastDay => "last_day".to_string(),
         MonthlyPattern::DayOfMonth(d) => format!("day_{d}"),
@@ -60,6 +66,15 @@ fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
     if let Some(rest) = s.strip_prefix("day_") {
         return rest.parse().ok().map(MonthlyPattern::DayOfMonth);
     }
+    // Optional `@<month>` suffix on the ordinal-weekday form (`last_fri@7`);
+    // pre-existing rows without it deserialize with no month restriction.
+    let (s, month) = match s.split_once('@') {
+        Some((base, m)) => (
+            base,
+            Some(m.parse::<u32>().ok().filter(|m| (1..=12).contains(m))?),
+        ),
+        None => (s, None),
+    };
     let (ord_str, wd_str) = s.split_once('_')?;
     let ord = match ord_str {
         "first" => Ordinal::First,
@@ -71,7 +86,7 @@ fn deserialize_monthly_pattern(s: &str) -> Option<MonthlyPattern> {
         _ => return None,
     };
     let wd = parse_days(wd_str)?.into_iter().next()?;
-    Some(MonthlyPattern::OrdinalWeekday(ord, wd))
+    Some(MonthlyPattern::OrdinalWeekday(ord, wd, month))
 }
 
 // --- Shared event-query fragments ---
@@ -1737,7 +1752,11 @@ mod tests {
         event.date = None;
         event.time = Some(NaiveTime::from_hms_opt(10, 0, 0).unwrap());
         event.year_explicit = false;
-        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::First,
+            Weekday::Sun,
+            None,
+        ));
         event.next_datetime = Some(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2027, 3, 7).unwrap(),
             NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
@@ -1748,9 +1767,65 @@ mod tests {
 
         assert_eq!(
             stored.monthly_pattern,
-            Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun))
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::First,
+                Weekday::Sun,
+                None
+            ))
         );
         assert_eq!(stored.message, "call mom");
+    }
+
+    #[test]
+    fn test_monthly_pattern_month_restricted_round_trip() {
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 123);
+        let mut event = make_event("Sysadmin Day");
+        event.chat_id = 123;
+        event.msg_id = ensure_message(&storage, 123);
+        event.date = None;
+        event.time = Some(NaiveTime::from_hms_opt(11, 2, 0).unwrap());
+        event.year_explicit = false;
+        event.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Last,
+            Weekday::Fri,
+            Some(7),
+        ));
+        event.next_datetime = Some(NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2027, 7, 30).unwrap(),
+            NaiveTime::from_hms_opt(11, 2, 0).unwrap(),
+        ));
+
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get_event(id).unwrap().unwrap();
+
+        assert_eq!(
+            stored.monthly_pattern,
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Last,
+                Weekday::Fri,
+                Some(7),
+            ))
+        );
+    }
+
+    #[test]
+    fn monthly_pattern_month_suffix_serialization() {
+        let restricted = MonthlyPattern::OrdinalWeekday(Ordinal::Last, Weekday::Fri, Some(7));
+        assert_eq!(serialize_monthly_pattern(&restricted), "last_fri@7");
+        assert_eq!(deserialize_monthly_pattern("last_fri@7"), Some(restricted));
+        // Pre-existing rows without the suffix keep parsing (no restriction).
+        assert_eq!(
+            deserialize_monthly_pattern("last_fri"),
+            Some(MonthlyPattern::OrdinalWeekday(
+                Ordinal::Last,
+                Weekday::Fri,
+                None,
+            ))
+        );
+        // Out-of-range or malformed month suffixes degrade to None, not panic.
+        assert_eq!(deserialize_monthly_pattern("last_fri@13"), None);
+        assert_eq!(deserialize_monthly_pattern("last_fri@x"), None);
     }
 
     #[test]

@@ -32,6 +32,9 @@ const VOCAB: GrammarVocab = GrammarVocab {
     each: "each",
     day_word: "day",
     of_the_month: r"of\s+(?:the\s+)?month",
+    the: "the",
+    of_word: "of",
+    months: r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?",
     am: "AM",
     pm: "PM",
 };
@@ -63,6 +66,23 @@ impl LocaleProvider for English {
             "fourth" | "4th" => Some(Ordinal::Fourth),
             "fifth" | "5th" => Some(Ordinal::Fifth),
             "last" => Some(Ordinal::Last),
+            _ => None,
+        }
+    }
+    fn month_from_str(&self, s: &str) -> Option<u32> {
+        match s.to_ascii_lowercase().as_str() {
+            "jan" | "january" => Some(1),
+            "feb" | "february" => Some(2),
+            "mar" | "march" => Some(3),
+            "apr" | "april" => Some(4),
+            "may" => Some(5),
+            "jun" | "june" => Some(6),
+            "jul" | "july" => Some(7),
+            "aug" | "august" => Some(8),
+            "sep" | "sept" | "september" => Some(9),
+            "oct" | "october" => Some(10),
+            "nov" | "november" => Some(11),
+            "dec" | "december" => Some(12),
             _ => None,
         }
     }
@@ -106,6 +126,25 @@ impl LocaleProvider for English {
         }
     }
 
+    fn month_full(&self, month: u32) -> &'static str {
+        match month {
+            1 => "January",
+            2 => "February",
+            3 => "March",
+            4 => "April",
+            5 => "May",
+            6 => "June",
+            7 => "July",
+            8 => "August",
+            9 => "September",
+            10 => "October",
+            11 => "November",
+            12 => "December",
+            // Never produced: the regex and the DB deserializer only yield 1-12.
+            _ => "",
+        }
+    }
+
     fn ordinal_suffix(&self, n: u32) -> String {
         let suffix = match (n % 10, n % 100) {
             (1, 11) | (2, 12) | (3, 13) => "th",
@@ -131,6 +170,9 @@ impl LocaleProvider for English {
     }
     fn last_day_phrase(&self) -> &'static str {
         "last day of the month"
+    }
+    fn of_month_phrase(&self, month: u32) -> String {
+        format!("of {}", self.month_full(month))
     }
     fn format_time(&self, t: NaiveTime) -> String {
         t.format("%H:%M").to_string()
@@ -254,9 +296,24 @@ mod tests {
         );
         assert_eq!(
             g.monthly.as_str(),
-            r"(?i)\b(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+of\s+(?:the\s+)?month)?\b"
+            r"(?i)\b(?:the\s+)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+(?:of\s+(?:the\s+)?month|of\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)))?\b"
         );
         assert_eq!(g.years.as_str(), r"\b(\d{4}(?:\s*,\s*\d{4})*)\b");
+    }
+
+    #[test]
+    fn month_from_str_maps_all_spellings() {
+        assert_eq!(English.month_from_str("jul"), Some(7));
+        assert_eq!(English.month_from_str("July"), Some(7));
+        assert_eq!(English.month_from_str("SEPT"), Some(9));
+        assert_eq!(English.month_from_str("may"), Some(5));
+        assert_eq!(English.month_from_str("foo"), None);
+    }
+
+    #[test]
+    fn of_month_phrase_renders_capitalized_month() {
+        assert_eq!(English.of_month_phrase(7), "of July");
+        assert_eq!(English.of_month_phrase(1), "of January");
     }
 
     #[test]

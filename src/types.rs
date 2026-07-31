@@ -86,7 +86,8 @@ impl EventInfo {
     /// - year restrictions → ascending comma list (`2027,2028`);
     /// - weekday sets → capitalized 3-letter days, Monday-first, contiguous runs of
     ///   ≥3 collapsed to `First-Last` (`mon-Friday,Sat` → `Mon-Sat`);
-    /// - monthly patterns → `first sunday` / `last day of the month` / `each 28th day of the month`;
+    /// - monthly patterns → `first sunday` / `last Friday of July` (month-restricted,
+    ///   yearly) / `last day of the month` / `each 28th day of the month`;
     /// - repetition → `every <unit>` / `every <n> <units>`.
     ///
     /// Parts are emitted in the order [`crate::parser`] re-extracts them and joined
@@ -136,8 +137,12 @@ impl EventInfo {
             parts.push(format_weekday_set(days, loc));
         } else if let Some(pattern) = &self.monthly_pattern {
             parts.push(match pattern {
-                MonthlyPattern::OrdinalWeekday(ord, wd) => {
-                    format!("{} {}", loc.ordinal_word(*ord), loc.weekday_full(*wd))
+                MonthlyPattern::OrdinalWeekday(ord, wd, month) => {
+                    let base = format!("{} {}", loc.ordinal_word(*ord), loc.weekday_full(*wd));
+                    match month {
+                        Some(m) => format!("{base} {}", loc.of_month_phrase(*m)),
+                        None => base,
+                    }
                 }
                 MonthlyPattern::LastDay => loc.last_day_phrase().to_string(),
                 MonthlyPattern::DayOfMonth(d) => {
@@ -406,7 +411,9 @@ pub enum Ordinal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonthlyPattern {
-    OrdinalWeekday(Ordinal, Weekday),
+    /// Nth/last weekday of the month, optionally restricted to one calendar
+    /// month (1–12) — `last Friday of July` — which makes the pattern yearly.
+    OrdinalWeekday(Ordinal, Weekday, Option<u32>),
     LastDay,
     /// Fixed calendar day of the month (`28` → the 28th). Months that lack that
     /// day (e.g. the 31st in February) are skipped.
@@ -818,14 +825,30 @@ mod tests {
     fn normalize_monthly_patterns() {
         let mut e = blank();
         e.time = NaiveTime::from_hms_opt(10, 0, 0);
-        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::First, Weekday::Sun));
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::First,
+            Weekday::Sun,
+            None,
+        ));
         assert_eq!(e.normalize_time(&EN), "10:00 first Sunday");
         e.time = NaiveTime::from_hms_opt(17, 0, 0);
-        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(Ordinal::Third, Weekday::Fri));
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Third,
+            Weekday::Fri,
+            None,
+        ));
         assert_eq!(e.normalize_time(&EN), "17:00 third Friday");
         e.time = NaiveTime::from_hms_opt(18, 0, 0);
         e.monthly_pattern = Some(MonthlyPattern::LastDay);
         assert_eq!(e.normalize_time(&EN), "18:00 last day of the month");
+        // Month-restricted (yearly) ordinal weekday.
+        e.time = NaiveTime::from_hms_opt(11, 2, 0);
+        e.monthly_pattern = Some(MonthlyPattern::OrdinalWeekday(
+            Ordinal::Last,
+            Weekday::Fri,
+            Some(7),
+        ));
+        assert_eq!(e.normalize_time(&EN), "11:02 last Friday of July");
     }
 
     #[test]

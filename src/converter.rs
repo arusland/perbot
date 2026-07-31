@@ -366,7 +366,10 @@ fn summarize(event: &EventInfo) -> String {
         parts.push(match pattern {
             MonthlyPattern::DayOfMonth(d) => format!("day-of-month={d}"),
             MonthlyPattern::LastDay => "monthly=last-day".to_string(),
-            MonthlyPattern::OrdinalWeekday(ord, wd) => format!("monthly={ord:?}-{wd:?}"),
+            MonthlyPattern::OrdinalWeekday(ord, wd, month) => match month {
+                Some(m) => format!("monthly={ord:?}-{wd:?}@{m}"),
+                None => format!("monthly={ord:?}-{wd:?}"),
+            },
         });
     }
     if let Some(rep) = &event.repetition {

@@ -612,6 +612,14 @@ is independent of when the suite runs.
 | 2026-02-05 10:00:00 | USER   | 18:00 last day of the month pay bills  | pay bills | 18:00 last day of the month |
 | 2026-12-31 18:00:01 | SYSTEM | 2027-01-31 18:00:00                    | source=monthly_pattern |       |
 
+### Case 33.3: Last friday of July
+| Current Time        | Actor  | Input / Expected Next                      | Message / Source       | Normalized                |
+|---------------------|--------|--------------------------------------------|------------------------|---------------------------|
+| 2026-07-31 12:00:00 | USER   | 11:02 (the) last fri of july Sysadmin Day  | Sysadmin Day           | 11:02 last Friday of July |
+| 2026-07-31 12:00:01 | SYSTEM | 2027-07-30 11:02:00                        | source=monthly_pattern |                           |
+| 2027-07-30 11:02:01 | SYSTEM | 2028-07-28 11:02:00                        | source=monthly_pattern |                           |
+| 2030-07-20 09:13:00 | SYSTEM | 2030-07-26 11:02:00                        | source=monthly_pattern |                           |
+
 ### Case 34: Last day of month — "of the month" is optional
 
 | Current Time        | Actor  | Input / Expected Next     | Message / Source   | Normalized                  |

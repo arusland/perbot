@@ -187,7 +187,8 @@ const HELP_EXAMPLES: &str = "Examples (tap to copy):\n\
      <code>17:45 every mon-fri leave for the gym</code> — weekday recurrence\n\
      <code>10:00 15.12 congrat Alice</code> — every year on that date\n\
      <code>09:00 every 2 weeks water the plants</code> — repeating interval\n\
-     <code>18:00 last day of the month pay the rent</code> — monthly pattern";
+     <code>18:00 last day of the month pay the rent</code> — monthly pattern\n\
+     <code>11:02 last fri of july Sysadmin Day</code> — yearly monthly pattern";
 
 /// The /help reply (HTML): the command list (escaped), the tap-to-copy
 /// [`HELP_EXAMPLES`] block, and — for the admin — the admin-only commands.

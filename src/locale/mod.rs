@@ -73,6 +73,13 @@ pub struct GrammarVocab {
     pub day_word: &'static str,
     /// Month tail with optional `the`, e.g. `r"of\s+(?:the\s+)?month"`.
     pub of_the_month: &'static str,
+    /// Optional leading article absorbed before a monthly pattern, e.g. `"the"`.
+    pub the: &'static str,
+    /// Preposition before a month name, e.g. `"of"`.
+    pub of_word: &'static str,
+    /// Month-name alternation (abbrev + full, no surrounding group), e.g.
+    /// `"jan(?:uary)?|feb(?:ruary)?|…|dec(?:ember)?"`.
+    pub months: &'static str,
     /// 12-hour ante-meridiem marker, e.g. `"AM"`.
     pub am: &'static str,
     /// 12-hour post-meridiem marker, e.g. `"PM"`.
@@ -135,9 +142,11 @@ impl TimeGrammar {
                 v.every, v.each, v.ordinal_suffix, v.day_word, v.of_the_month
             ))
             .unwrap(),
+            // The `of_the_month` alternative comes first so `of [the] month`
+            // never reaches the month-name branch (group 3).
             monthly: Regex::new(&format!(
-                r"(?i)\b({})\s+({}|{})(?:\s+{})?\b",
-                v.ordinals, wd, v.day_word, v.of_the_month
+                r"(?i)\b(?:{}\s+)?({})\s+({}|{})(?:\s+(?:{}|{}\s+({})))?\b",
+                v.the, v.ordinals, wd, v.day_word, v.of_the_month, v.of_word, v.months
             ))
             .unwrap(),
             years: Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap(),
@@ -157,6 +166,8 @@ pub trait LocaleProvider: Sync {
     fn day_from_str(&self, s: &str) -> Option<Weekday>;
     fn parse_days(&self, s: &str) -> Option<HashSet<Weekday>>;
     fn ordinal_from_str(&self, s: &str) -> Option<Ordinal>;
+    /// Month-name word → month number 1–12 (`"jul"`/`"July"` → `7`).
+    fn month_from_str(&self, s: &str) -> Option<u32>;
 
     // --- Output vocabulary ---
     /// Unit word: plural (`"days"`) or singular (`"day"`).
@@ -167,6 +178,8 @@ pub trait LocaleProvider: Sync {
     fn weekday_full(&self, wd: Weekday) -> &'static str;
     /// Ordinal word for a monthly pattern (`"first"`…`"last"`).
     fn ordinal_word(&self, ord: Ordinal) -> &'static str;
+    /// Full capitalized month name (`7` → `"July"`).
+    fn month_full(&self, month: u32) -> &'static str;
     /// Ordinal numeral (`28` → `"28th"`).
     fn ordinal_suffix(&self, n: u32) -> String;
 
@@ -181,6 +194,9 @@ pub trait LocaleProvider: Sync {
     fn day_of_month_canonical(&self, ordinal_suffix: &str) -> String;
     /// `"last day of the month"` (identical in canonical and recurrence forms).
     fn last_day_phrase(&self) -> &'static str;
+    /// Month-restriction tail of an ordinal-weekday pattern (`7` → `"of July"`);
+    /// shared by the canonical and recurrence-display forms.
+    fn of_month_phrase(&self, month: u32) -> String;
     /// A bare clock time, e.g. `"13:05"`.
     fn format_time(&self, t: NaiveTime) -> String;
     /// A short date without year, e.g. `"26.11"`.

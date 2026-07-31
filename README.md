@@ -37,6 +37,7 @@ rescheduled, and any reminders missed while the bot was down are delivered immed
 | `9:30 last monday team sync` | Last Monday of the month at 9:30 |
 | `14:00 second thursday board meeting` | Second Thursday of the month |
 | `17:00 3rd friday happy hour` | Ordinals: `1st`, `2nd`, `3rd`, `4th`, `5th` |
+| `11:02 last fri of july Sysadmin Day` | Last Friday of July, yearly |
 | `18:00 last day of the month pay rent` | Last day of the month |
 | `18:00 last day pay bills` | "of the month" is optional |
 
