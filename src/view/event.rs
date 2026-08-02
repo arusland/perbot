@@ -295,7 +295,7 @@ pub fn event_actions_keyboard(
     // Dismiss actions get their own first row (only for active events).
     if active {
         let mut dismiss_row = vec![InlineKeyboardButton::callback(
-            "⏭ Dismiss next",
+            "⏭ Dismiss",
             format!("eid:{event_id}:dis"),
         )];
         if is_repetition {

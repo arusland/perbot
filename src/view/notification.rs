@@ -49,7 +49,7 @@ fn action_rows(event_id: i64, active: bool, is_repetition: bool) -> Vec<Vec<Inli
     // Dismiss actions get their own row (only while a future occurrence remains).
     if active {
         let mut dismiss_row = vec![InlineKeyboardButton::callback(
-            "⏭ Dismiss next",
+            "⏭ Dismiss",
             format!("eid:{event_id}:dis:n"),
         )];
         if is_repetition {
