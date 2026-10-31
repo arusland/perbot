@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use crate::commands::CmdContext;
 use crate::parser;
 use crate::richtext;
-use crate::send_schedule_confirmation;
 use crate::types::EventInfo;
 use crate::view::{self, clamp_message, edit_prompt, edit_text_prompt};
+use crate::{send_event_detail_confirmation, send_schedule_confirmation};
 
 /// Which flavor of edit a chat's pending edit is: `Full` replaces the whole
 /// event from a re-parsed time + message reply; `TextOnly` replaces just the
@@ -106,7 +106,7 @@ pub async fn handle_edit_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow
                 .send_text(ctx.chat_id, view::MESSAGE_TRUNCATED, None)
                 .await?;
         }
-        send_schedule_confirmation(ctx, &stored, true).await?;
+        send_event_detail_confirmation(ctx, &stored, true).await?;
     } else {
         // A time-only or unparsable reply: re-prompt (keeping the pending
         // edit) with the current input still attached.
@@ -168,7 +168,9 @@ async fn handle_text_edit_completion(
             .send_text(ctx.chat_id, view::MESSAGE_TRUNCATED, None)
             .await?;
     }
-    send_schedule_confirmation(ctx, &stored, true).await?;
+    // Like the full edit: always the full detail — an inactive event too,
+    // rather than the bare inactive-input echo.
+    send_event_detail_confirmation(ctx, &stored, true).await?;
     Ok(true)
 }
 
@@ -211,6 +213,6 @@ pub async fn handle_body_completion(ctx: &CmdContext<'_>, msg_id: i64) -> anyhow
             .send_text(ctx.chat_id, view::MESSAGE_TRUNCATED, None)
             .await?;
     }
-    send_schedule_confirmation(ctx, &stored, false).await?;
+    send_schedule_confirmation(ctx, &stored).await?;
     Ok(true)
 }

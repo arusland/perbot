@@ -510,7 +510,7 @@ async fn handle_text_message(ctx: &CmdContext<'_>) -> anyhow::Result<()> {
                 .await?;
         }
 
-        perbot::send_schedule_confirmation(ctx, &stored, false).await?;
+        perbot::send_schedule_confirmation(ctx, &stored).await?;
         return Ok(());
     } else if let Some(event) = parser::parse_time_only(ctx.text, ctx.loc, ctx.tz) {
         // A time was given but no reminder body: hold the parsed event and ask
