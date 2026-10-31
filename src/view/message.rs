@@ -182,13 +182,16 @@ pub fn bot_started_message(git_hash: Option<&str>, git_commit_msg: Option<&str>)
 /// annotation.
 const HELP_EXAMPLES: &str = "Examples (tap to copy):\n\
      <code>13:30 call the office</code> — one-off, today (or tomorrow if past)\n\
+     <code>10:00 25.03.2027 renew the passport</code> — one-off on a full date\n\
      <code>in 45 min take the pizza out</code> — relative offset\n\
      <code>8 morning run</code> — next 8:00\n\
      <code>17:45 every mon-fri leave for the gym</code> — weekday recurrence\n\
      <code>10:00 15.12 congrat Alice</code> — every year on that date\n\
      <code>09:00 every 2 weeks water the plants</code> — repeating interval\n\
      <code>18:00 last day of the month pay the rent</code> — monthly pattern\n\
-     <code>11:02 last fri of july Sysadmin Day</code> — yearly monthly pattern";
+     <code>11:02 last fri of july Sysadmin Day</code> — yearly monthly pattern\n\
+     <code>09:00 every 30 min until 12:00 drink water</code> — repeating, capped daily at a time\n\
+     <code>10:00 mon-fri every hour until 18:00 31.12.2026 stretch</code> — repetition ends at a date";
 
 /// The /help reply (HTML): the command list (escaped), the tap-to-copy
 /// [`HELP_EXAMPLES`] block, and — for the admin — the admin-only commands.
@@ -333,6 +336,23 @@ mod tests {
         let admin = help_message("cmds", true);
         assert!(admin.contains("/import &lt;user_id&gt; &lt;timezone&gt;"));
         assert!(admin.find("Examples").unwrap() < admin.find("Admin commands:").unwrap());
+    }
+
+    #[test]
+    fn help_examples_all_parse_with_body() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let examples: Vec<&str> = HELP_EXAMPLES
+            .split("<code>")
+            .skip(1)
+            .map(|s| s.split("</code>").next().unwrap())
+            .collect();
+        assert_eq!(examples.len(), 11);
+        for ex in examples {
+            let ev = crate::parser::parse_at(ex, &EN, today)
+                .unwrap_or_else(|| panic!("help example doesn't parse: {ex}"));
+            assert!(!ev.message.trim().is_empty(), "no body: {ex}");
+            assert!(!ev.message.contains("until"), "until left in body: {ex}");
+        }
     }
 
     #[test]
