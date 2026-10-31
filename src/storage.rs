@@ -6,10 +6,15 @@ use std::path::Path;
 use crate::error::Result;
 use crate::types::{
     ChatInfo, ChatType, EventInfo, MessageInfo, MonthlyPattern, NextSource, Ordinal, Repetition,
-    day_to_str, format_time_left, parse_days, unit_from_str,
+    day_to_str, format_time_left, parse_days, unit_from_str, until_from_str, until_to_str,
 };
 
 // --- Private serialization helpers ---
+
+/// The naive-UTC text form every datetime column holds.
+fn fmt_ts(dt: NaiveDateTime) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
 fn serialize_days(days: &HashSet<Weekday>) -> String {
     let order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -103,7 +108,7 @@ fn event_cols(next_expr: &str) -> String {
          COALESCE(p.message, e.message) AS message, e.active, {next_expr}, \
          e.created_at, e.days, e.repeat_interval, e.repeat_unit, e.in_offset, \
          e.in_offset_unit, e.bare_hour, e.monthly_pattern, e.msg_id, e.years, \
-         e.legacy, e.parent, e.last_next_datetime, e.source"
+         e.legacy, e.parent, e.last_next_datetime, e.source, e.until, e.until_notice_at"
     )
 }
 
@@ -237,7 +242,9 @@ impl EventStorage {
                 years           TEXT,
                 legacy          INTEGER NOT NULL DEFAULT 0,
                 parent          INTEGER REFERENCES events(id) ON DELETE CASCADE,
-                source          TEXT
+                source          TEXT,
+                until           TEXT,
+                until_notice_at TEXT
             )",
             [],
         )?;
@@ -324,10 +331,12 @@ impl EventStorage {
             .map(serialize_monthly_pattern);
         let years_str = event.years.as_ref().map(serialize_years);
         let source_str = event.source.map(|s| s.as_str());
+        let until_str = event.until.as_ref().map(until_to_str);
+        let notice_str = event.until_notice_at.map(fmt_ts);
 
         self.conn.execute(
-            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, last_next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, parent, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO events (chat_id, date, time, year_explicit, message, active, next_datetime, last_next_datetime, days, repeat_interval, repeat_unit, in_offset, in_offset_unit, bare_hour, monthly_pattern, msg_id, years, legacy, parent, source, until, until_notice_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 event.chat_id,
                 date_str,
@@ -349,6 +358,8 @@ impl EventStorage {
                 event.legacy as i32,
                 event.parent,
                 source_str,
+                until_str,
+                notice_str,
             ],
         )?;
 
@@ -491,10 +502,12 @@ impl EventStorage {
             .map(serialize_monthly_pattern);
         let years_str = event.years.as_ref().map(serialize_years);
         let source_str = event.source.map(|s| s.as_str());
+        let until_str = event.until.as_ref().map(until_to_str);
+        let notice_str = event.until_notice_at.map(fmt_ts);
 
         let rows_affected = self.conn.execute(
-            "UPDATE events SET date = ?1, time = ?2, year_explicit = ?3, message = ?4, active = ?5, next_datetime = ?6, last_next_datetime = ?7, days = ?8, repeat_interval = ?9, repeat_unit = ?10, in_offset = ?11, in_offset_unit = ?12, bare_hour = ?13, monthly_pattern = ?14, years = ?15, source = ?16
-             WHERE id = ?17",
+            "UPDATE events SET date = ?1, time = ?2, year_explicit = ?3, message = ?4, active = ?5, next_datetime = ?6, last_next_datetime = ?7, days = ?8, repeat_interval = ?9, repeat_unit = ?10, in_offset = ?11, in_offset_unit = ?12, bare_hour = ?13, monthly_pattern = ?14, years = ?15, source = ?16, until = ?17, until_notice_at = ?18
+             WHERE id = ?19",
             params![
                 date_str,
                 time_str,
@@ -512,6 +525,8 @@ impl EventStorage {
                 monthly_str,
                 years_str,
                 source_str,
+                until_str,
+                notice_str,
                 event.id,
             ],
         )?;
@@ -519,21 +534,18 @@ impl EventStorage {
         Ok(rows_affected > 0)
     }
 
-    /// Updates `active` and `next_datetime` for an event after `calc_next` is called.
-    pub fn update_schedule(
-        &self,
-        id: i64,
-        active: bool,
-        next_datetime: Option<NaiveDateTime>,
-        last_next_datetime: Option<NaiveDateTime>,
-        source: Option<NextSource>,
-    ) -> Result<()> {
-        let next_str = next_datetime.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-        let last_next_str = last_next_datetime.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    /// Persists the schedule columns of a rescheduled event (the output of
+    /// `calc_next_at`): `active`, `next_datetime`, `last_next_datetime`, `source`
+    /// and the pending `until_notice_at`. Parsed fields stay as stored.
+    pub fn update_schedule(&self, id: i64, next: &EventInfo) -> Result<()> {
+        let (active, next_datetime, source) = (next.active, next.next_datetime, next.source);
+        let next_str = next_datetime.map(fmt_ts);
+        let last_next_str = next.last_next_datetime.map(fmt_ts);
         let source_str = source.map(|s| s.as_str());
+        let notice_str = next.until_notice_at.map(fmt_ts);
         self.conn.execute(
-            "UPDATE events SET active = ?1, next_datetime = ?2, last_next_datetime = ?3, source = ?4 WHERE id = ?5",
-            params![active as i32, next_str, last_next_str, source_str, id],
+            "UPDATE events SET active = ?1, next_datetime = ?2, last_next_datetime = ?3, source = ?4, until_notice_at = ?5 WHERE id = ?6",
+            params![active as i32, next_str, last_next_str, source_str, notice_str, id],
         )?;
         let time_left = next_datetime
             .map(|dt| {
@@ -723,6 +735,42 @@ impl EventStorage {
 
         let rows = stmt.query_map(params![dt_str], Self::row_to_event)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The earliest pending "repetition ended" notice moment (UTC) over fireable
+    /// chats. Deliberately not restricted to active events: an anchorless event
+    /// goes inactive at the cut but still gets its notice.
+    pub fn get_next_until_notice(&self) -> Result<Option<NaiveDateTime>> {
+        let value: Option<String> = self.conn.query_row(
+            &format!(
+                "SELECT MIN(e.until_notice_at) FROM events e
+                 WHERE e.until_notice_at IS NOT NULL AND {FIREABLE_ONLY}"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value.and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok()))
+    }
+
+    /// Events (of fireable chats) whose pending notice is due at `now`.
+    pub fn get_until_notices_due(&self, now: NaiveDateTime) -> Result<Vec<EventInfo>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} {EVENT_FROM} WHERE e.until_notice_at IS NOT NULL
+             AND e.until_notice_at <= ?1 AND {FIREABLE_ONLY}
+             ORDER BY e.until_notice_at ASC, e.id ASC",
+            event_cols("e.next_datetime")
+        ))?;
+        let rows = stmt.query_map(params![fmt_ts(now)], Self::row_to_event)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Marks an event's pending notice as sent.
+    pub fn clear_until_notice(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE events SET until_notice_at = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// Deletes all inactive events. Deleting an inactive parent cascades to its
@@ -951,6 +999,11 @@ impl EventStorage {
         let years = years_str.and_then(|s| deserialize_years(&s));
         let source_str: Option<String> = row.get(21)?;
         let source = source_str.and_then(|s| NextSource::from_str(&s));
+        let until_str: Option<String> = row.get(22)?;
+        let until = until_str.and_then(|s| until_from_str(&s));
+        let notice_str: Option<String> = row.get(23)?;
+        let until_notice_at =
+            notice_str.and_then(|s| NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok());
 
         Ok(EventInfo {
             id: row.get(0)?,
@@ -973,6 +1026,8 @@ impl EventStorage {
             msg_id: row.get(16)?,
             legacy: row.get::<_, i32>(18)? != 0,
             parent: row.get(19)?,
+            until,
+            until_notice_at,
         })
     }
 }
@@ -1047,6 +1102,8 @@ mod tests {
             msg_id: 0,
             legacy: false,
             parent: None,
+            until: None,
+            until_notice_at: None,
         }
     }
 
@@ -1087,14 +1144,59 @@ mod tests {
         // update_schedule persists a new last_next_datetime even as the event
         // goes inactive.
         let later = dt(2028, 1, 1, 8, 0);
-        storage
-            .update_schedule(id, false, None, Some(later), None)
-            .unwrap();
+        let mut next = stored.clone();
+        next.active = false;
+        next.next_datetime = None;
+        next.last_next_datetime = Some(later);
+        next.source = None;
+        storage.update_schedule(id, &next).unwrap();
         let reloaded = storage.get_event(id).unwrap().unwrap();
         assert!(!reloaded.active);
         assert!(reloaded.next_datetime.is_none());
         assert_eq!(reloaded.last_next_datetime, Some(later));
         assert!(reloaded.source.is_none());
+    }
+
+    #[test]
+    fn until_round_trips_and_notice_queries_respect_fireable() {
+        use crate::types::Until;
+        let storage = EventStorage::open_in_memory().unwrap();
+        ensure_chat(&storage, 888);
+        let mut event = make_event("capped");
+        event.chat_id = 888;
+        event.msg_id = ensure_message(&storage, 888);
+        event.until = Some(Until::At(dt(2027, 5, 5, 12, 32)));
+        event.until_notice_at = Some(dt(2027, 5, 5, 10, 32));
+        let id = storage.insert_event(&event).unwrap();
+        let stored = storage.get_event(id).unwrap().unwrap();
+        assert_eq!(stored.until, event.until);
+        assert_eq!(stored.until_notice_at, event.until_notice_at);
+
+        // A deactivated chat is not fireable.
+        storage
+            .set_setting(888, ACTIVATED_SETTING, "false")
+            .unwrap();
+        assert!(storage.get_next_until_notice().unwrap().is_none());
+        storage.set_setting(888, ACTIVATED_SETTING, "true").unwrap();
+        assert_eq!(
+            storage.get_next_until_notice().unwrap(),
+            Some(dt(2027, 5, 5, 10, 32))
+        );
+        assert!(
+            storage
+                .get_until_notices_due(dt(2027, 5, 5, 10, 31))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .get_until_notices_due(dt(2027, 5, 5, 10, 32))
+                .unwrap()
+                .len(),
+            1
+        );
+        storage.clear_until_notice(id).unwrap();
+        assert!(storage.get_next_until_notice().unwrap().is_none());
     }
 
     #[test]
@@ -1111,15 +1213,12 @@ mod tests {
         assert_eq!(stored.source, Some(NextSource::Repetition));
 
         // update_schedule persists a new source alongside the reschedule.
-        storage
-            .update_schedule(
-                id,
-                true,
-                Some(dt(2028, 1, 1, 8, 0)),
-                Some(dt(2028, 1, 1, 8, 0)),
-                Some(NextSource::MonthlyPattern),
-            )
-            .unwrap();
+        let mut next = stored.clone();
+        next.active = true;
+        next.next_datetime = Some(dt(2028, 1, 1, 8, 0));
+        next.last_next_datetime = Some(dt(2028, 1, 1, 8, 0));
+        next.source = Some(NextSource::MonthlyPattern);
+        storage.update_schedule(id, &next).unwrap();
         let reloaded = storage.get_event(id).unwrap().unwrap();
         assert_eq!(reloaded.source, Some(NextSource::MonthlyPattern));
     }

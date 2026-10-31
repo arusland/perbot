@@ -84,6 +84,8 @@ pub struct GrammarVocab {
     pub am: &'static str,
     /// 12-hour post-meridiem marker, e.g. `"PM"`.
     pub pm: &'static str,
+    /// Repetition-end lead word, e.g. `"until"`.
+    pub until: &'static str,
 }
 
 /// The compiled time-expression regexes for one locale, assembled from a
@@ -103,10 +105,13 @@ pub struct TimeGrammar {
     pub day_of_month: Regex,
     pub monthly: Regex,
     pub years: Regex,
+    /// `until HH:MM [dd.mm.yyyy]` — the repetition end (groups: hour, minute,
+    /// then optional day, month, year).
+    pub until: Regex,
 }
 
 impl TimeGrammar {
-    /// Assembles all twelve regexes from `v`. The regex *shapes* are fixed here;
+    /// Assembles all thirteen regexes from `v`. The regex *shapes* are fixed here;
     /// only the vocabulary varies per locale.
     pub fn build(v: &GrammarVocab) -> Self {
         let wd = v.weekdays;
@@ -150,6 +155,11 @@ impl TimeGrammar {
             ))
             .unwrap(),
             years: Regex::new(r"\b(\d{4}(?:\s*,\s*\d{4})*)\b").unwrap(),
+            until: Regex::new(&format!(
+                r"(?i)\b{}\s+(\d{{1,2}}):(\d{{1,2}})(?:\s+(\d{{1,2}})\.(\d{{1,2}})\.(\d{{4}}))?\b",
+                v.until
+            ))
+            .unwrap(),
         }
     }
 }
@@ -188,6 +198,8 @@ pub trait LocaleProvider: Sync {
     fn offset_prefix(&self) -> &'static str;
     /// Repetition lead word, e.g. `"every"` in `every 2 days`.
     fn every_word(&self) -> &'static str;
+    /// Repetition-end lead word, e.g. `"until"` in `until 12:32`.
+    fn until_word(&self) -> &'static str;
     /// Trailing marker emitted for an implicitly-yearly short date.
     fn yearly_marker(&self) -> &'static str;
     /// Canonical day-of-month phrase, e.g. `"each 28th day of the month"`.

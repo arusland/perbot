@@ -32,7 +32,7 @@ pub use message::{
 };
 pub use notification::{
     DEFAULT_SNOOZE_MINUTES, dismissed_notification_text, expanded_notification_keyboard,
-    fired_message, notification_keyboard,
+    fired_message, notification_keyboard, until_notice_message,
 };
 pub use prompt::{
     ASK_TEXT, CANCEL_DATA, EDIT_ASK_TEXT, EDIT_NEED_TEXT, EDIT_NEED_TIME, EDIT_TEXT_ASK,
@@ -80,6 +80,8 @@ pub(crate) mod test_support {
             msg_id: 0,
             legacy: false,
             parent: None,
+            until: None,
+            until_notice_at: None,
         }
     }
 }

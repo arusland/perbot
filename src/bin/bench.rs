@@ -33,6 +33,8 @@ fn make_event(i: u32, msg_id: i64) -> EventInfo {
         msg_id,
         legacy: false,
         parent: None,
+        until: None,
+        until_notice_at: None,
     }
 }
 

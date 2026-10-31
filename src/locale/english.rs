@@ -37,6 +37,7 @@ const VOCAB: GrammarVocab = GrammarVocab {
     months: r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?",
     am: "AM",
     pm: "PM",
+    until: "until",
 };
 
 static GRAMMAR: LazyLock<TimeGrammar> = LazyLock::new(|| TimeGrammar::build(&VOCAB));
@@ -161,6 +162,9 @@ impl LocaleProvider for English {
     }
     fn every_word(&self) -> &'static str {
         "every"
+    }
+    fn until_word(&self) -> &'static str {
+        "until"
     }
     fn yearly_marker(&self) -> &'static str {
         "yearly"
@@ -299,6 +303,10 @@ mod tests {
             r"(?i)\b(?:the\s+)?(first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last)\s+(mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|day)(?:\s+(?:of\s+(?:the\s+)?month|of\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)))?\b"
         );
         assert_eq!(g.years.as_str(), r"\b(\d{4}(?:\s*,\s*\d{4})*)\b");
+        assert_eq!(
+            g.until.as_str(),
+            r"(?i)\buntil\s+(\d{1,2}):(\d{1,2})(?:\s+(\d{1,2})\.(\d{1,2})\.(\d{4}))?\b"
+        );
     }
 
     #[test]

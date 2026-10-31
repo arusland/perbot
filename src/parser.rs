@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use crate::locale::LocaleProvider;
-use crate::types::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit};
+use crate::types::{EventInfo, MonthlyPattern, Ordinal, Repetition, TimeUnit, Until};
 
 // The time-expression regexes and word maps live behind the active
 // `LocaleProvider` (see `crate::locale`): a clock time is matched wherever it
@@ -151,8 +151,72 @@ fn parse_components(
     loc: &dyn LocaleProvider,
     today: NaiveDate,
 ) -> Option<(EventInfo, Vec<Range<usize>>)> {
+    // An `until …` clause only counts on a repeating event (a time-only daily
+    // cap only on a minute/hour interval); otherwise reparse with the clause left
+    // in the body, exactly as before `until` existed.
+    if let Some((event, spans)) = parse_components_inner(input, loc, today, true)
+        && let Some(until) = event.until
+    {
+        let fits = match (&event.repetition, until) {
+            (None, _) => false,
+            (Some(rep), Until::Daily(_)) => {
+                matches!(rep.unit, TimeUnit::Minutes | TimeUnit::Hours)
+            }
+            (Some(_), Until::At(_)) => true,
+        };
+        if fits {
+            return Some((event, spans));
+        }
+    }
+    parse_components_inner(input, loc, today, false)
+}
+
+/// [`parse_components`] body; `allow_until` extracts the `until …` clause first
+/// (before the clock time regexes, so they cannot grab its time).
+fn parse_components_inner(
+    input: &str,
+    loc: &dyn LocaleProvider,
+    today: NaiveDate,
+    allow_until: bool,
+) -> Option<(EventInfo, Vec<Range<usize>>)> {
     let g = loc.grammar();
     let mut rem = Remaining::new(input);
+    let mut until: Option<Until> = None;
+
+    // Repetition end: "until 12:32" (daily cap) / "until 12:32 5.05.2027".
+    if allow_until && let Some(caps) = g.until.captures(&rem.text) {
+        let time = caps[1]
+            .parse::<u32>()
+            .ok()
+            .zip(caps[2].parse::<u32>().ok())
+            .and_then(|(h, m)| NaiveTime::from_hms_opt(h, m, 0));
+        let date = match (caps.get(3), caps.get(4), caps.get(5)) {
+            (Some(d), Some(m), Some(y)) => Some(
+                d.as_str()
+                    .parse::<u32>()
+                    .ok()
+                    .zip(m.as_str().parse::<u32>().ok())
+                    .zip(y.as_str().parse::<i32>().ok())
+                    .and_then(|((d, m), y)| NaiveDate::from_ymd_opt(y, m, d)),
+            ),
+            _ => None,
+        };
+        until = match (time, date) {
+            (Some(t), None) => Some(Until::Daily(t)),
+            (Some(t), Some(Some(d))) => Some(Until::At(d.and_time(t))),
+            _ => None,
+        };
+        if until.is_some() {
+            let m = caps.get(0).unwrap();
+            let mut end = m.end();
+            // A leading clause also takes its trailing blanks, so the forms that
+            // must lead (offset, bare hour, short date) still start the text.
+            if m.start() == 0 {
+                end += rem.text[end..].len() - rem.text[end..].trim_start_matches(' ').len();
+            }
+            rem.delete(m.start()..end);
+        }
+    }
     let mut time: Option<NaiveTime> = None;
     let mut date: Option<NaiveDate> = None;
     let mut year_explicit = false;
@@ -379,6 +443,8 @@ fn parse_components(
         msg_id: 0,
         legacy: false,
         parent: None,
+        until,
+        until_notice_at: None,
     };
     Some((event, rem.spans))
 }
@@ -1246,6 +1312,70 @@ mod tests {
                 s,
                 "normalize_time should round-trip {s:?}"
             );
+        }
+    }
+
+    // --- until (repetition end) ---
+
+    #[test]
+    fn parse_until_daily_and_absolute() {
+        let e = parse("9:00 every 30 min until 12:00 water").unwrap();
+        assert_eq!(
+            e.until,
+            Some(Until::Daily(NaiveTime::from_hms_opt(12, 0, 0).unwrap()))
+        );
+        assert_eq!(e.time, NaiveTime::from_hms_opt(9, 0, 0));
+        assert_eq!(e.message, "water");
+
+        let e = parse("9:00 every hour until 12:32 5.05.2027 water").unwrap();
+        let at = NaiveDate::from_ymd_opt(2027, 5, 5)
+            .unwrap()
+            .and_hms_opt(12, 32, 0)
+            .unwrap();
+        assert_eq!(e.until, Some(Until::At(at)));
+        // The until date is not taken for the event's own date.
+        assert_eq!(e.date, None);
+        assert_eq!(e.message, "water");
+    }
+
+    #[test]
+    fn parse_until_before_the_clock_time_keeps_both() {
+        let e = parse("until 12:00 9:00 every 30 min water").unwrap();
+        assert_eq!(
+            e.until,
+            Some(Until::Daily(NaiveTime::from_hms_opt(12, 0, 0).unwrap()))
+        );
+        assert_eq!(e.time, NaiveTime::from_hms_opt(9, 0, 0));
+        assert_eq!(e.message, "water");
+    }
+
+    #[test]
+    fn parse_until_left_in_body_without_usable_repetition() {
+        // No repetition.
+        let e = parse("13:00 call until 15:00").unwrap();
+        assert!(e.until.is_none());
+        assert_eq!(e.message, "call until 15:00");
+        // Daily cap needs a minute/hour interval.
+        let e = parse("9:00 every 2 days until 18:00 go").unwrap();
+        assert!(e.until.is_none());
+        assert_eq!(e.message, "until 18:00 go");
+        // An invalid date is not an until clause; the date then fails the
+        // parse like any invalid full date does.
+        assert!(parse("9:00 every hour until 12:00 31.02.2027 x").is_none());
+    }
+
+    #[test]
+    fn until_canonical_round_trips() {
+        for s in [
+            "09:00 every 30 minutes until 12:00",
+            "09:00 Mon-Fri every hour until 12:32 05.05.2027",
+            "in 5 minutes every 5 minutes until 10:12 01.03.2026",
+            "11:07 05.11 every 2 days yearly until 18:00 01.01.2028",
+        ] {
+            let event = parse(&format!("{s} reminder"))
+                .unwrap_or_else(|| panic!("canonical string {s:?} should parse"));
+            assert_eq!(event.normalize_time(&EN), s);
+            assert_eq!(event.message, "reminder");
         }
     }
 }

@@ -64,6 +64,48 @@ pub struct EventInfo {
     /// message is resolved from the parent at query time, and deleting the
     /// parent cascade-deletes it.
     pub parent: Option<i64>,
+    /// "until 12:32" (daily cap) / "until 12:32 5.05.2027" (absolute end) of the
+    /// `repetition` interval. **Chat-local** wall-clock. Only set alongside a
+    /// `repetition` (the parser leaves the clause in the body otherwise).
+    pub until: Option<Until>,
+    /// **UTC** moment of the pending "repetition ended" notice. Set by
+    /// [`crate::scheduler::calc_next_at`] when it cuts the repetition at `until`;
+    /// cleared once the notice is sent (and on create/edit).
+    pub until_notice_at: Option<NaiveDateTime>,
+}
+
+/// The end of an event's `repetition` interval (`until …`). Both forms carry
+/// chat-local wall-clock values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Until {
+    /// `until 12:32` — a daily cap: each day the interval stops at this time and
+    /// resumes at the next anchor (a plain time/bare hour counts as a daily
+    /// anchor). Only with minute/hour intervals.
+    Daily(NaiveTime),
+    /// `until 12:32 5.05.2027` — after this moment the interval never fires again.
+    At(NaiveDateTime),
+}
+
+/// Canonical (storage) serialization of an [`Until`]: `daily@HH:MM` /
+/// `at@YYYY-MM-DD HH:MM:SS`. Not localized.
+pub fn until_to_str(u: &Until) -> String {
+    match u {
+        Until::Daily(t) => format!("daily@{}", t.format("%H:%M")),
+        Until::At(dt) => format!("at@{}", dt.format("%Y-%m-%d %H:%M:%S")),
+    }
+}
+
+/// Inverse of [`until_to_str`]; `None` for an unrecognized value.
+pub fn until_from_str(s: &str) -> Option<Until> {
+    if let Some(t) = s.strip_prefix("daily@") {
+        return NaiveTime::parse_from_str(t, "%H:%M").ok().map(Until::Daily);
+    }
+    if let Some(dt) = s.strip_prefix("at@") {
+        return NaiveDateTime::parse_from_str(dt, "%Y-%m-%d %H:%M:%S")
+            .ok()
+            .map(Until::At);
+    }
+    None
 }
 
 impl EventInfo {
@@ -88,7 +130,8 @@ impl EventInfo {
     ///   ≥3 collapsed to `First-Last` (`mon-Friday,Sat` → `Mon-Sat`);
     /// - monthly patterns → `first sunday` / `last Friday of July` (month-restricted,
     ///   yearly) / `last day of the month` / `each 28th day of the month`;
-    /// - repetition → `every <unit>` / `every <n> <units>`.
+    /// - repetition → `every <unit>` / `every <n> <units>`;
+    /// - repetition end → `until HH:MM` / `until HH:MM dd.mm.yyyy` (last).
     ///
     /// Parts are emitted in the order [`crate::parser`] re-extracts them and joined
     /// with single spaces. Returns `""` for a value with no time component (which
@@ -172,7 +215,26 @@ impl EventInfo {
             parts.push(loc.yearly_marker().to_string());
         }
 
+        // Repetition end (the parser extracts it first, wherever it appears).
+        if let Some(u) = &self.until {
+            parts.push(format_until(u, loc));
+        }
+
         parts.join(" ")
+    }
+}
+
+/// Canonical, re-parseable `until …` clause: `until 12:32` /
+/// `until 12:32 05.05.2027`. Shared with the recurrence description.
+pub fn format_until(u: &Until, loc: &dyn LocaleProvider) -> String {
+    match u {
+        Until::Daily(t) => format!("{} {}", loc.until_word(), loc.format_time(*t)),
+        Until::At(dt) => format!(
+            "{} {} {}",
+            loc.until_word(),
+            loc.format_time(dt.time()),
+            loc.format_date_year(dt.date())
+        ),
     }
 }
 
@@ -491,6 +553,9 @@ pub struct TgMessage {
     pub chat_id: i64,
     pub text: String,
     pub reply_markup: Option<InlineKeyboardMarkup>,
+    /// Deliver without sound (`disable_notification`), e.g. the "repetition
+    /// ended" notice.
+    pub silent: bool,
 }
 
 /// Channel sender used by the scheduler to hand batches of due/missed messages
@@ -657,6 +722,8 @@ mod tests {
             msg_id: 0,
             legacy: false,
             parent: None,
+            until: None,
+            until_notice_at: None,
         }
     }
 

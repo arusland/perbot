@@ -151,10 +151,14 @@ fn describe_recurrence(e: &EventInfo, loc: &dyn LocaleProvider) -> Option<String
     let every = loc.every_word();
     if let Some(rep) = &e.repetition {
         let unit = loc.unit_label(rep.unit, rep.interval != 1);
-        return Some(if rep.interval == 1 {
+        let base = if rep.interval == 1 {
             format!("{every} {unit}")
         } else {
             format!("{every} {} {unit}", rep.interval)
+        };
+        return Some(match &e.until {
+            Some(u) => format!("{base} {}", crate::types::format_until(u, loc)),
+            None => base,
         });
     }
     if let Some(days) = &e.days {

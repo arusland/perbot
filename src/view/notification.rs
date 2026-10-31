@@ -2,11 +2,13 @@
 //! and its snooze/dismiss/edit keyboard ([`notification_keyboard`]).
 
 use super::event::next_launches_preview;
+use super::message::{MESSAGE_PREVIEW_MAX, format_when, message_preview};
 use crate::locale::LocaleProvider;
-use crate::types::{EventInfo, TgMessage};
+use crate::types::{EventInfo, TgMessage, Until, format_until};
 use chrono::NaiveDateTime;
 use chrono_tz::Tz;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::utils::html;
 
 /// Snooze durations offered on a fired reminder: `(label, minutes)`. The minutes
 /// value is embedded in the callback data (`eid:<id>:sn:<minutes>`).
@@ -158,6 +160,44 @@ pub fn fired_message(
             post_fire_is_repetition,
             last_snooze,
         )),
+        silent: false,
+    }
+}
+
+/// The silent notice sent at an event's `until` moment, once the scheduler cut
+/// its repetition: which event (preview + `/event<id>` link), which limit, and
+/// what happens next — the next (anchor) fire, or that the event is now
+/// inactive. A daily cap reads "paused for today"; an absolute end "ended".
+pub fn until_notice_message(
+    event: &EventInfo,
+    now: NaiveDateTime,
+    tz: Tz,
+    loc: &dyn LocaleProvider,
+) -> TgMessage {
+    let headline = match event.until {
+        Some(Until::Daily(_)) => "Repetition paused for today",
+        _ => "Repetition ended",
+    };
+    let limit = event
+        .until
+        .as_ref()
+        .map(|u| format!(" ({})", format_until(u, loc)))
+        .unwrap_or_default();
+    let preview = html::escape(&message_preview(&event.message, MESSAGE_PREVIEW_MAX));
+    let tail = match event.next_datetime {
+        Some(next) if event.active => format!("Next: {}", format_when(now, next, tz, loc)),
+        _ => "Event is now inactive.".to_string(),
+    };
+    TgMessage {
+        chat_id: event.chat_id,
+        text: format!(
+            "🔁 <b>{headline}{}</b>\n{preview} /event{}\n{}",
+            html::escape(&limit),
+            event.id,
+            html::escape(&tail)
+        ),
+        reply_markup: None,
+        silent: true,
     }
 }
 

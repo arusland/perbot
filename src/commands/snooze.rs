@@ -58,6 +58,8 @@ fn snoozed_event(source: &EventInfo, next: chrono::NaiveDateTime, tz: Tz) -> Eve
         msg_id: source.msg_id,
         legacy: false,
         parent: Some(source.parent.unwrap_or(source.id)),
+        until: None,
+        until_notice_at: None,
     }
 }
 

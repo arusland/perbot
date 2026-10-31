@@ -1,7 +1,7 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
 
-use crate::types::{EventInfo, MonthlyPattern, NextSource, Ordinal, TimeUnit};
+use crate::types::{EventInfo, MonthlyPattern, NextSource, Ordinal, TimeUnit, Until};
 
 /// Calculates the next occurrence datetime for an event and returns the
 /// updated event. Sets `active = true` and `next_datetime = Some(dt)` when a
@@ -26,9 +26,14 @@ pub fn calc_next_at(event: EventInfo, now: NaiveDateTime, tz: Tz) -> EventInfo {
         next_datetime: event.next_datetime.map(|dt| crate::tz::to_local(dt, tz)),
         ..event.clone()
     };
-    let computed = calculate_next_datetime(&local_event, crate::tz::to_local(now, tz));
+    let (computed, cut) = calculate_next_datetime(&local_event, crate::tz::to_local(now, tz));
     let next_datetime = computed.map(|(dt, _)| crate::tz::to_utc(dt, tz));
     let source = computed.map(|(_, src)| src);
+    // A fresh `until` cut schedules the "repetition ended" notice at the cut
+    // moment; otherwise any pending notice is kept.
+    let until_notice_at = cut
+        .map(|dt| crate::tz::to_utc(dt, tz))
+        .or(event.until_notice_at);
     let last_next_datetime = next_datetime
         .or(event.next_datetime)
         .or(event.last_next_datetime);
@@ -37,17 +42,72 @@ pub fn calc_next_at(event: EventInfo, now: NaiveDateTime, tz: Tz) -> EventInfo {
         next_datetime,
         source,
         last_next_datetime,
+        until_notice_at,
         ..event
     }
 }
 
-/// Computes the next fire datetime and the field that produced it. Returns
-/// `None` when no future occurrence remains (the event is then inactive and its
-/// `source` is cleared).
-fn calculate_next_datetime(
-    event: &EventInfo,
-    now: NaiveDateTime,
-) -> Option<(NaiveDateTime, NextSource)> {
+/// Applies the `until` repetition end on top of [`calculate_raw`]. Returns the
+/// next occurrence plus, when this computation cut the repetition, the local
+/// cut moment (the notice time).
+///
+/// Only a `Repetition`-sourced candidate past the limit is cut:
+/// - [`Until::At`]: the candidate later than `u` is replaced by the schedule
+///   without the interval (base kept — a one-shot ends, anchors continue). The
+///   cut is reported only while the base is not past `u`, so later anchor fires
+///   don't report it again.
+/// - [`Until::Daily`]: the candidate later than the day's cap (first `t` at or
+///   after the base) is replaced by a *fresh* schedule without the interval, so
+///   a plain time/bare hour resumes the next day and weekday/monthly/date
+///   anchors at their next anchor; an `in_offset` has no window start and ends.
+type Next = Option<(NaiveDateTime, NextSource)>;
+fn calculate_next_datetime(event: &EventInfo, now: NaiveDateTime) -> (Next, Option<NaiveDateTime>) {
+    let raw = calculate_raw(event, now);
+    let (Some((candidate, NextSource::Repetition)), Some(until), Some(base)) =
+        (raw, event.until, event.next_datetime)
+    else {
+        return (raw, None);
+    };
+    match until {
+        Until::At(u) => {
+            if candidate <= u {
+                return (raw, None);
+            }
+            let stripped = EventInfo {
+                repetition: None,
+                ..event.clone()
+            };
+            let cut = (base <= u).then_some(u);
+            (calculate_raw(&stripped, now), cut)
+        }
+        Until::Daily(t) => {
+            let mut cap = base.date().and_time(t);
+            if cap < base {
+                let Some(next_day) = base.date().succ_opt() else {
+                    return (None, None);
+                };
+                cap = next_day.and_time(t);
+            }
+            if candidate <= cap {
+                return (raw, None);
+            }
+            if event.in_offset.is_some() {
+                return (None, Some(cap));
+            }
+            let fresh = EventInfo {
+                repetition: None,
+                next_datetime: None,
+                ..event.clone()
+            };
+            (calculate_raw(&fresh, now), Some(cap))
+        }
+    }
+}
+
+/// Computes the next fire datetime and the field that produced it, ignoring
+/// `until`. Returns `None` when no future occurrence remains (the event is then
+/// inactive and its `source` is cleared).
+fn calculate_raw(event: &EventInfo, now: NaiveDateTime) -> Option<(NaiveDateTime, NextSource)> {
     // Handle bare hour (e.g., bare_hour=8 -> next 08:00)
     if let Some(h) = event.bare_hour {
         // One-shot: already scheduled and no repetition means it has fired
@@ -444,6 +504,8 @@ mod tests {
             msg_id: 0,
             legacy: false,
             parent: None,
+            until: None,
+            until_notice_at: None,
         }
     }
 
@@ -981,5 +1043,123 @@ mod tests {
         });
         let result = calc_next_at(event, dt(2026, 7, 1, 5, 0), tz);
         assert_eq!(result.next_datetime, Some(dt(2026, 7, 2, 0, 0)));
+    }
+
+    // --- until (repetition end) ---
+
+    fn hm(h: u32, m: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+
+    #[test]
+    fn until_daily_overnight_window() {
+        // 22:00 every hour until 02:00: the window crosses midnight.
+        let mut e = make_play_event();
+        e.time = Some(hm(22, 0));
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        e.until = Some(Until::Daily(hm(2, 0)));
+        e.next_datetime = Some(dt(2026, 3, 2, 1, 0));
+        let r = calc_next_at(
+            e.clone(),
+            dt(2026, 3, 2, 1, 0) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert_eq!(r.next_datetime, Some(dt(2026, 3, 2, 2, 0)));
+        assert_eq!(r.source, Some(NextSource::Repetition));
+        assert!(r.until_notice_at.is_none());
+
+        let r = calc_next_at(
+            EventInfo {
+                next_datetime: Some(dt(2026, 3, 2, 2, 0)),
+                ..e
+            },
+            dt(2026, 3, 2, 2, 0) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert_eq!(r.next_datetime, Some(dt(2026, 3, 2, 22, 0)));
+        assert_eq!(r.source, Some(NextSource::Time));
+        assert_eq!(r.until_notice_at, Some(dt(2026, 3, 2, 2, 0)));
+    }
+
+    #[test]
+    fn until_daily_on_offset_ends_the_event() {
+        let mut e = make_play_event();
+        e.in_offset = Some((5, TimeUnit::Minutes));
+        e.repetition = Some(Repetition {
+            interval: 10,
+            unit: TimeUnit::Minutes,
+        });
+        e.until = Some(Until::Daily(hm(18, 0)));
+        e.next_datetime = Some(dt(2026, 3, 2, 17, 55));
+        let r = calc_next_at(
+            e,
+            dt(2026, 3, 2, 17, 55) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert!(!r.active);
+        assert_eq!(r.until_notice_at, Some(dt(2026, 3, 2, 18, 0)));
+    }
+
+    #[test]
+    fn until_at_reports_the_cut_once() {
+        // Mon-Fri 09:00 every hour until 10:30 on 2026-03-02 (a Monday).
+        let mut e = make_play_event();
+        e.time = Some(hm(9, 0));
+        e.days = Some(
+            [
+                Weekday::Mon,
+                Weekday::Tue,
+                Weekday::Wed,
+                Weekday::Thu,
+                Weekday::Fri,
+            ]
+            .into(),
+        );
+        e.repetition = Some(Repetition {
+            interval: 1,
+            unit: TimeUnit::Hours,
+        });
+        e.until = Some(Until::At(dt(2026, 3, 2, 10, 30)));
+        e.next_datetime = Some(dt(2026, 3, 2, 10, 0));
+        let r = calc_next_at(
+            e,
+            dt(2026, 3, 2, 10, 0) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert_eq!(r.next_datetime, Some(dt(2026, 3, 3, 9, 0)));
+        assert_eq!(r.until_notice_at, Some(dt(2026, 3, 2, 10, 30)));
+
+        // The next anchor fire is past the limit: no new cut, pending kept as-is
+        // (a cleared notice stays cleared).
+        let r = calc_next_at(
+            EventInfo {
+                until_notice_at: None,
+                ..r
+            },
+            dt(2026, 3, 3, 9, 0) + chrono::Duration::seconds(1),
+            Tz::UTC,
+        );
+        assert_eq!(r.next_datetime, Some(dt(2026, 3, 4, 9, 0)));
+        assert!(r.until_notice_at.is_none());
+    }
+
+    #[test]
+    fn until_daily_cap_is_chat_local() {
+        // Berlin (UTC+1 in March): a 10:00 local cap is 09:00 UTC.
+        let tz: Tz = "Europe/Berlin".parse().unwrap();
+        let mut e = make_play_event();
+        e.time = Some(hm(9, 0));
+        e.repetition = Some(Repetition {
+            interval: 30,
+            unit: TimeUnit::Minutes,
+        });
+        e.until = Some(Until::Daily(hm(10, 0)));
+        e.next_datetime = Some(dt(2026, 3, 2, 9, 0)); // 10:00 local
+        let r = calc_next_at(e, dt(2026, 3, 2, 9, 0) + chrono::Duration::seconds(1), tz);
+        assert_eq!(r.next_datetime, Some(dt(2026, 3, 3, 8, 0))); // 09:00 local
+        assert_eq!(r.until_notice_at, Some(dt(2026, 3, 2, 9, 0)));
     }
 }

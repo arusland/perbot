@@ -38,18 +38,32 @@ impl TgBot {
         text: impl Into<String>,
         markup: Option<InlineKeyboardMarkup>,
     ) -> ResponseResult<()> {
+        self.send_html_opts(chat_id, text, markup, false).await
+    }
+
+    /// [`Self::send_html`] with `silent` = deliver without sound
+    /// (`disable_notification`).
+    pub async fn send_html_opts(
+        &self,
+        chat_id: ChatId,
+        text: impl Into<String>,
+        markup: Option<InlineKeyboardMarkup>,
+        silent: bool,
+    ) -> ResponseResult<()> {
         let text = text.into();
         log::info!(
-            "send_html → chat {}: {} chars, keyboard={}",
+            "send_html → chat {}: {} chars, keyboard={}, silent={}",
             chat_id.0,
             text.chars().count(),
-            markup.is_some()
+            markup.is_some(),
+            silent
         );
         // Keep `text` for the error log; the builder consumes a clone.
         let mut req = self
             .inner
             .send_message(chat_id, text.clone())
-            .parse_mode(ParseMode::Html);
+            .parse_mode(ParseMode::Html)
+            .disable_notification(silent);
         if let Some(kb) = markup {
             req = req.reply_markup(kb);
         }

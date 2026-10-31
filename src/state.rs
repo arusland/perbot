@@ -31,6 +31,9 @@ struct EventProviderState {
     storage: EventStorage,
     /// Next event to be processed. Stored in memory for efficiency.
     next_event: Option<EventInfo>,
+    /// Earliest pending "repetition ended" notice moment (UTC), cached like
+    /// `next_event` so the poll loop needs no per-tick query.
+    next_until_notice: Option<NaiveDateTime>,
 }
 
 /// Result of an [`EventProvider::dismiss`] request.
@@ -62,6 +65,7 @@ impl EventProvider {
             inner: Arc::new(Mutex::new(EventProviderState {
                 storage,
                 next_event: None,
+                next_until_notice: None,
             })),
         }
     }
@@ -355,6 +359,7 @@ impl EventProvider {
             chat_id,
             text: format!("{text}\n\n{}", crate::view::DIGEST_NOTE),
             reply_markup: crate::view::list_keyboard(kind, 0, pages),
+            silent: false,
         }))
     }
 
@@ -404,30 +409,30 @@ impl EventProvider {
                 continue;
             }
             let shifted = tz::shift_wallclock(next_dt, old_tz, new_tz);
+            // A pending "repetition ended" notice is a wall-clock `until`
+            // moment too: keep its local reading.
+            let until_notice_at = event
+                .until_notice_at
+                .map(|dt| tz::shift_wallclock(dt, old_tz, new_tz));
             if shifted > now {
-                inner.storage.update_schedule(
-                    id,
-                    event.active,
-                    Some(shifted),
-                    Some(shifted),
-                    event.source,
-                )?;
+                let moved = EventInfo {
+                    next_datetime: Some(shifted),
+                    last_next_datetime: Some(shifted),
+                    until_notice_at,
+                    ..event
+                };
+                inner.storage.update_schedule(id, &moved)?;
             } else {
                 let recalculated = scheduler::calc_next_at(
                     EventInfo {
                         next_datetime: Some(shifted),
+                        until_notice_at,
                         ..event
                     },
                     now,
                     new_tz,
                 );
-                inner.storage.update_schedule(
-                    id,
-                    recalculated.active,
-                    recalculated.next_datetime,
-                    recalculated.last_next_datetime,
-                    recalculated.source,
-                )?;
+                inner.storage.update_schedule(id, &recalculated)?;
             }
             shifted_count += 1;
         }
@@ -577,7 +582,7 @@ impl EventProvider {
     ) -> Result<EventInfo> {
         let mut inner = self.inner.lock().unwrap();
         let tz = Self::tz_for_chat_locked(&inner, event.chat_id);
-        let calculated = scheduler::calc_next_at(event, now, tz);
+        let calculated = Self::calc_fresh(event, now, tz);
         let id = inner.storage.insert_event(&calculated)?;
 
         // Reload to update the next event cache
@@ -609,7 +614,7 @@ impl EventProvider {
         let mut inner = self.inner.lock().unwrap();
         let id = event.id;
         let tz = Self::tz_for_chat_locked(&inner, event.chat_id);
-        let calculated = scheduler::calc_next_at(event, now, tz);
+        let calculated = Self::calc_fresh(event, now, tz);
         inner.storage.update_event(&calculated)?;
 
         // Reload to update the next event cache
@@ -622,6 +627,49 @@ impl EventProvider {
                 Ok(calculated)
             }
         }
+    }
+
+    /// Schedules a just-typed (created/edited) event. Any `until` cut this first
+    /// computation reports is dropped: the user just wrote the limit, so no
+    /// "repetition ended" notice for it.
+    fn calc_fresh(event: EventInfo, now: NaiveDateTime, tz: Tz) -> EventInfo {
+        EventInfo {
+            until_notice_at: None,
+            ..scheduler::calc_next_at(
+                EventInfo {
+                    until_notice_at: None,
+                    ..event
+                },
+                now,
+                tz,
+            )
+        }
+    }
+
+    /// Collects the "repetition ended" notices due at `now` (silent messages,
+    /// see [`crate::view::until_notice_message`]) and marks each as sent.
+    /// Per-chat timezones are memoized across the batch.
+    pub fn collect_due_until_notices_at(&self, now: NaiveDateTime) -> Result<Vec<TgMessage>> {
+        let mut inner = self.inner.lock().unwrap();
+        let events = inner.storage.get_until_notices_due(now)?;
+        let mut tz_cache: HashMap<i64, Tz> = HashMap::new();
+        let mut messages = Vec::with_capacity(events.len());
+        for event in events {
+            let tz = *tz_cache
+                .entry(event.chat_id)
+                .or_insert_with(|| Self::tz_for_chat_locked(&inner, event.chat_id));
+            let loc = crate::locale::for_chat(event.chat_id);
+            log::info!("Sending until notice for event {}", event.id);
+            messages.push(crate::view::until_notice_message(&event, now, tz, loc));
+            inner.storage.clear_until_notice(event.id)?;
+        }
+        Self::load_next_event(&mut inner)?;
+        Ok(messages)
+    }
+
+    /// The cached earliest pending notice moment (UTC).
+    fn next_until_notice(&self) -> Option<NaiveDateTime> {
+        self.inner.lock().unwrap().next_until_notice
     }
 
     /// Replaces only an event's message HTML without recomputing the schedule
@@ -689,13 +737,7 @@ impl EventProvider {
                 .entry(event.chat_id)
                 .or_insert_with(|| Self::tz_for_chat_locked(inner, event.chat_id));
             let next = scheduler::calc_next_at(event, now, tz);
-            inner.storage.update_schedule(
-                event_id,
-                next.active,
-                next.next_datetime,
-                next.last_next_datetime,
-                next.source,
-            )?;
+            inner.storage.update_schedule(event_id, &next)?;
         }
         Self::load_next_event(inner)?;
         Ok(())
@@ -759,13 +801,7 @@ impl EventProvider {
         }
 
         let calculated = scheduler::calc_next_at(event, next_dt + Duration::seconds(1), tz);
-        inner.storage.update_schedule(
-            id,
-            calculated.active,
-            calculated.next_datetime,
-            calculated.last_next_datetime,
-            calculated.source,
-        )?;
+        inner.storage.update_schedule(id, &calculated)?;
         Self::load_next_event(&mut inner)?;
 
         let updated = inner.storage.get_event(id)?.unwrap_or(calculated);
@@ -816,6 +852,7 @@ impl EventProvider {
                         chat_id,
                         text,
                         reply_markup,
+                        silent: false,
                     });
                 }
 
@@ -853,6 +890,20 @@ impl EventProvider {
                         }
                         Ok(_) => {}
                         Err(e) => log::error!("Failed to collect due digests: {}", e),
+                    }
+                }
+
+                // "Repetition ended" notices go out before any fire due in the
+                // same tick (the fire's reschedule never drops a pending one).
+                if provider.next_until_notice().is_some_and(|at| now >= at) {
+                    match provider.collect_due_until_notices_at(now) {
+                        Ok(messages) if !messages.is_empty() => {
+                            if let Err(e) = msg_tx.send(messages) {
+                                log::error!("Failed to queue until notices: {}", e);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::error!("Failed to collect until notices: {}", e),
                     }
                 }
 
@@ -921,6 +972,7 @@ impl EventProvider {
     /// Internal reload that operates on an already-locked inner.
     fn load_next_event(inner: &mut EventProviderState) -> Result<()> {
         inner.next_event = inner.storage.get_next_event()?;
+        inner.next_until_notice = inner.storage.get_next_until_notice()?;
         Ok(())
     }
 }
@@ -1201,6 +1253,8 @@ mod tests {
             msg_id,
             legacy: false,
             parent: None,
+            until: None,
+            until_notice_at: None,
         }
     }
 
@@ -1746,5 +1800,84 @@ mod tests {
             tz::to_local(next, Tz::Asia__Tokyo).time(),
             event.time.unwrap()
         );
+    }
+
+    #[test]
+    fn until_notice_is_sent_silently_once_at_the_cut_moment() {
+        use crate::types::{Repetition, TimeUnit, Until};
+        let (provider, msg_id) = test_provider(100);
+        provider.set_timezone(100, Tz::UTC).unwrap();
+        let mut event = base_event(100, msg_id);
+        event.time = chrono::NaiveTime::from_hms_opt(10, 0, 0);
+        event.repetition = Some(Repetition {
+            interval: 10,
+            unit: TimeUnit::Minutes,
+        });
+        event.until = Some(Until::At(ndt(2026, 3, 1, 10, 15, 0)));
+        let stored = provider
+            .insert_event_and_get_at(event, ndt(2026, 3, 1, 9, 0, 0))
+            .unwrap();
+        assert!(stored.until_notice_at.is_none());
+
+        // 10:00 fires, then 10:10 — whose reschedule cuts the repetition.
+        provider
+            .update_at_and_reload(vec![stored], ndt(2026, 3, 1, 10, 0, 1))
+            .unwrap();
+        let at_10_10 = provider.get_next_event().unwrap();
+        assert_eq!(at_10_10.next_datetime, Some(ndt(2026, 3, 1, 10, 10, 0)));
+        provider
+            .update_at_and_reload(vec![at_10_10.clone()], ndt(2026, 3, 1, 10, 10, 1))
+            .unwrap();
+        let cut = provider.get_event(at_10_10.id).unwrap().unwrap();
+        assert!(!cut.active);
+        assert_eq!(cut.until_notice_at, Some(ndt(2026, 3, 1, 10, 15, 0)));
+        assert_eq!(
+            provider.next_until_notice(),
+            Some(ndt(2026, 3, 1, 10, 15, 0))
+        );
+
+        // Not due yet.
+        assert!(
+            provider
+                .collect_due_until_notices_at(ndt(2026, 3, 1, 10, 14, 59))
+                .unwrap()
+                .is_empty()
+        );
+        // Due: one silent notice, then cleared.
+        let sent = provider
+            .collect_due_until_notices_at(ndt(2026, 3, 1, 10, 15, 0))
+            .unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].silent);
+        assert_eq!(sent[0].chat_id, 100);
+        assert!(sent[0].text.contains("Repetition ended"));
+        assert!(sent[0].text.contains("inactive"));
+        assert!(provider.next_until_notice().is_none());
+        assert!(
+            provider
+                .collect_due_until_notices_at(ndt(2026, 3, 1, 10, 16, 0))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn until_cut_at_creation_sends_no_notice() {
+        use crate::types::{Repetition, TimeUnit, Until};
+        let (provider, msg_id) = test_provider(101);
+        let mut event = base_event(101, msg_id);
+        event.in_offset = Some((5, TimeUnit::Minutes));
+        event.repetition = Some(Repetition {
+            interval: 5,
+            unit: TimeUnit::Minutes,
+        });
+        // Limit already in the past.
+        event.until = Some(Until::At(ndt(2026, 1, 1, 0, 0, 0)));
+        let stored = provider
+            .insert_event_and_get_at(event, ndt(2026, 3, 1, 9, 0, 0))
+            .unwrap();
+        assert_eq!(stored.until, Some(Until::At(ndt(2026, 1, 1, 0, 0, 0))));
+        assert!(stored.until_notice_at.is_none());
+        assert!(provider.next_until_notice().is_none());
     }
 }

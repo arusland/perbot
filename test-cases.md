@@ -850,3 +850,77 @@ then advances past it.
 | 2026-02-20 08:00:00 | SYSTEM | 2026-02-20 09:00:00            | source=time |                   |
 | 2026-02-27 12:00:00 | USER   | !Dismiss                       |            |                    |
 | 2026-02-27 12:00:00 | SYSTEM | 2026-03-01 09:00:00            | source=repetition |             |
+
+### Case 52: `until` with a date — repetition ends for good, no anchor → inactive
+
+The 10:20 fire is the last one: the next interval step (10:30) is past the
+limit, so the repetition is cut and the plain time has nothing further.
+
+| Current Time        | Actor  | Input / Expected Next                            | Message / Source  | Normalized                                    |
+|---------------------|--------|--------------------------------------------------|-------------------|-----------------------------------------------|
+| 2026-03-01 09:00:00 | USER   | 10:00 every 10 min until 10:25 1.03.2026 standup | standup           | 10:00 every 10 minutes until 10:25 01.03.2026 |
+| 2026-03-01 09:00:00 | SYSTEM | 2026-03-01 10:00:00                              | source=time       |                                               |
+| 2026-03-01 10:00:01 | SYSTEM | 2026-03-01 10:10:00                              | source=repetition |                                               |
+| 2026-03-01 10:10:01 | SYSTEM | 2026-03-01 10:20:00                              | source=repetition |                                               |
+| 2026-03-01 10:20:01 | SYSTEM | NONE                                             |                   |                                               |
+
+### Case 53: `until` with a date — weekday anchors survive, the interval never resumes
+
+2026-03-02 is a Monday. After the limit only the Mon-Fri 09:00 anchors fire.
+
+| Current Time        | Actor  | Input / Expected Next                                  | Message / Source  | Normalized                                     |
+|---------------------|--------|--------------------------------------------------------|-------------------|------------------------------------------------|
+| 2026-03-02 08:00:00 | USER   | 9:00 mon-fri every hour until 10:30 2.03.2026 stand up | stand up          | 09:00 Mon-Fri every hour until 10:30 02.03.2026 |
+| 2026-03-02 08:00:00 | SYSTEM | 2026-03-02 09:00:00                                    | source=weekdays   |                                                |
+| 2026-03-02 09:00:01 | SYSTEM | 2026-03-02 10:00:00                                    | source=repetition |                                                |
+| 2026-03-02 10:00:01 | SYSTEM | 2026-03-03 09:00:00                                    | source=weekdays   |                                                |
+| 2026-03-03 09:00:01 | SYSTEM | 2026-03-04 09:00:00                                    | source=weekdays   |                                                |
+
+### Case 54: `until` time only — daily cap on a weekday schedule
+
+The cap is inclusive (the 11:00 step fires); the interval resumes after the next
+weekday anchor.
+
+| Current Time        | Actor  | Input / Expected Next                       | Message / Source  | Normalized                          |
+|---------------------|--------|---------------------------------------------|-------------------|-------------------------------------|
+| 2026-03-02 08:00:00 | USER   | 9:00 mon-fri every hour until 11:00 standup | standup           | 09:00 Mon-Fri every hour until 11:00 |
+| 2026-03-02 08:00:00 | SYSTEM | 2026-03-02 09:00:00                         | source=weekdays   |                                     |
+| 2026-03-02 09:00:01 | SYSTEM | 2026-03-02 10:00:00                         | source=repetition |                                     |
+| 2026-03-02 10:00:01 | SYSTEM | 2026-03-02 11:00:00                         | source=repetition |                                     |
+| 2026-03-02 11:00:01 | SYSTEM | 2026-03-03 09:00:00                         | source=weekdays   |                                     |
+| 2026-03-03 09:00:01 | SYSTEM | 2026-03-03 10:00:00                         | source=repetition |                                     |
+
+### Case 55: `until` time only — a plain time is the daily window start
+
+| Current Time        | Actor  | Input / Expected Next               | Message / Source  | Normalized                         |
+|---------------------|--------|-------------------------------------|-------------------|------------------------------------|
+| 2026-03-01 08:00:00 | USER   | 9:00 every 30 min until 10:00 water | water             | 09:00 every 30 minutes until 10:00 |
+| 2026-03-01 08:00:00 | SYSTEM | 2026-03-01 09:00:00                 | source=time       |                                    |
+| 2026-03-01 09:00:01 | SYSTEM | 2026-03-01 09:30:00                 | source=repetition |                                    |
+| 2026-03-01 09:30:01 | SYSTEM | 2026-03-01 10:00:00                 | source=repetition |                                    |
+| 2026-03-01 10:00:01 | SYSTEM | 2026-03-02 09:00:00                 | source=time       |                                    |
+| 2026-03-02 09:00:01 | SYSTEM | 2026-03-02 09:30:00                 | source=repetition |                                    |
+
+### Case 56: `until` leading the message, relative offset
+
+| Current Time        | Actor  | Input / Expected Next                            | Message / Source  | Normalized                                          |
+|---------------------|--------|--------------------------------------------------|-------------------|-----------------------------------------------------|
+| 2026-03-01 10:00:00 | USER   | until 10:12 1.03.2026 in 5 min every 5 min tea   | tea               | in 5 minutes every 5 minutes until 10:12 01.03.2026 |
+| 2026-03-01 10:00:00 | SYSTEM | 2026-03-01 10:05:00                              | source=in_offset  |                                                     |
+| 2026-03-01 10:05:01 | SYSTEM | 2026-03-01 10:10:00                              | source=repetition |                                                     |
+| 2026-03-01 10:10:01 | SYSTEM | NONE                                             |                   |                                                     |
+
+### Case 57: `until` without a usable repetition stays in the message
+
+No repetition at all, or a time-only cap on a day-long interval: the clause is
+plain text.
+
+| Current Time        | Actor  | Input / Expected Next            | Message / Source       | Normalized         |
+|---------------------|--------|----------------------------------|------------------------|--------------------|
+| 2026-03-01 10:00:00 | USER   | 13:00 call until 15:00           | call until 15:00       | 13:00              |
+| 2026-03-01 10:00:00 | SYSTEM | 2026-03-01 13:00:00              | source=time            |                    |
+
+| Current Time        | Actor  | Input / Expected Next            | Message / Source       | Normalized         |
+|---------------------|--------|----------------------------------|------------------------|--------------------|
+| 2026-03-01 10:00:00 | USER   | 9:00 every 2 days until 18:00 go | until 18:00 go         | 09:00 every 2 days |
+| 2026-03-01 10:00:00 | SYSTEM | 2026-03-02 09:00:00              | source=time            |                    |

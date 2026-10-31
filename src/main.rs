@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
                 // Every routed `text` is an HTML fragment (the reminder body may
                 // carry the user's formatting), so always send as HTML.
                 if let Err(e) = sender_bot
-                    .send_html(ChatId(msg.chat_id), msg.text, msg.reply_markup)
+                    .send_html_opts(ChatId(msg.chat_id), msg.text, msg.reply_markup, msg.silent)
                     .await
                 {
                     log::error!("Failed to send message to {}: {}", msg.chat_id, e);
