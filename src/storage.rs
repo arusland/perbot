@@ -242,9 +242,7 @@ impl EventStorage {
                 years           TEXT,
                 legacy          INTEGER NOT NULL DEFAULT 0,
                 parent          INTEGER REFERENCES events(id) ON DELETE CASCADE,
-                source          TEXT,
-                until           TEXT,
-                until_notice_at TEXT
+                source          TEXT
             )",
             [],
         )?;
@@ -303,7 +301,43 @@ impl EventStorage {
             [],
         )?;
 
+        self.migrate_columns()?;
+
         Ok(())
+    }
+
+    /// Schema migrations: columns added after their table first shipped. They
+    /// live only here, never in the `CREATE TABLE` statements above (which
+    /// keep the original shape), so new and existing databases take the same
+    /// path. Each is `ALTER TABLE … ADD COLUMN`ed when `PRAGMA table_info`
+    /// lacks it — idempotent, runs on every start. Append new columns here.
+    const ADDED_COLUMNS: &'static [(&'static str, &'static str, &'static str)] = &[
+        ("events", "until", "TEXT"),
+        ("events", "until_notice_at", "TEXT"),
+    ];
+
+    fn migrate_columns(&self) -> Result<()> {
+        for (table, column, decl) in Self::ADDED_COLUMNS {
+            if !self.has_column(table, column)? {
+                log::info!("Migrating schema: adding {table}.{column}");
+                self.conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for name in names {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Inserts a new event into the database from a `EventInfo`.
@@ -1155,6 +1189,30 @@ mod tests {
         assert!(reloaded.next_datetime.is_none());
         assert_eq!(reloaded.last_next_datetime, Some(later));
         assert!(reloaded.source.is_none());
+    }
+
+    #[test]
+    fn init_schema_adds_columns_missing_from_an_old_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-`until` shape of the events table.
+        conn.execute_batch(
+            "CREATE TABLE chats (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL,
+                 banned INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+                 message TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, next_datetime TEXT,
+                 parent INTEGER);",
+        )
+        .unwrap();
+        let storage = EventStorage { conn };
+        storage.init_schema().unwrap();
+        for (table, column, _) in EventStorage::ADDED_COLUMNS {
+            assert!(
+                storage.has_column(table, column).unwrap(),
+                "{table}.{column}"
+            );
+        }
+        // Idempotent on an up-to-date schema.
+        storage.init_schema().unwrap();
     }
 
     #[test]
